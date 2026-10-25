@@ -30,7 +30,10 @@ func TestModulesGetTheirKindsAndHooks(t *testing.T) {
 
 	var fired []func()
 	hub := NewHub(nil)
-	hub.afterFunc = func(d time.Duration, fn func()) func() bool { fired = append(fired, fn); return func() bool { return true } }
+	hub.afterFunc = func(d time.Duration, fn func()) func() bool {
+		fired = append(fired, fn)
+		return func() bool { return true }
+	}
 	cl := hub.Connect(Claims{Sub: 1, Name: "Ada"})
 	<-cl.send
 	hub.Handle(cl, []byte(`{"t":"join","street":"ONE"}`))
@@ -60,4 +63,28 @@ func TestACoreKindCannotBeTaken(t *testing.T) {
 		}
 	}()
 	(&Registry{h: NewHub(nil)}).Handle("chat", nil)
+}
+
+func TestASlowClientDroppedByTheHubGoesOffline(t *testing.T) {
+	var mod *echoModule
+	saved := modules
+	modules = append(append([]moduleFactory{}, saved...), func(h *Hub) Module { mod = &echoModule{h: h}; return mod })
+	defer func() { modules = saved }()
+	hub := NewHub(nil)
+	slow := hub.Connect(Claims{Sub: 1, Name: "Ada"})
+	fast := hub.Connect(Claims{Sub: 2, Name: "Bo"})
+	hub.Handle(slow, []byte(`{"t":"join","street":"ONE"}`))
+	for i := 0; i < sendBuffer+5; i++ {
+		hub.Handle(fast, []byte(`{"t":"join","street":"ONE"}`))
+	}
+	if !slow.closed || slow.why != closeSlow {
+		t.Fatal("a client that stops reading is closed as slow")
+	}
+	if !strings.Contains(strings.Join(mod.events, ","), "offline Ada") {
+		t.Fatalf("the hub's own drop runs the offline hooks: %v", mod.events)
+	}
+	hub.Disconnect(slow)
+	if n := strings.Count(strings.Join(mod.events, ","), "offline Ada"); n != 1 {
+		t.Fatalf("offline ran %d times", n)
+	}
 }

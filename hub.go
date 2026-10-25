@@ -293,11 +293,14 @@ func (h *Hub) pushLocked(cl *Client, b []byte) {
 	select {
 	case cl.send <- b:
 	default:
+		h.closeLocked(cl, closeSlow)
 		h.leaveLocked(cl)
 		if h.clients[cl.id] == cl {
 			delete(h.clients, cl.id)
+			for _, fn := range h.onDisconnect {
+				fn(cl)
+			}
 		}
-		h.closeLocked(cl, closeSlow)
 	}
 }
 
