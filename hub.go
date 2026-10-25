@@ -36,6 +36,9 @@ import (
 //
 // One live session per character: a second socket for the same player closes the
 // first with closeReplaced.
+//
+// Shared systems (quoins, street objects, parties, …) are modules (modules.go),
+// each in a file of its own with its message kinds listed in its header.
 
 const (
 	maxStreet   = 32
@@ -89,13 +92,25 @@ type Hub struct {
 	mu      sync.Mutex
 	clients map[int64]*Client
 	streets map[string]map[int64]*Client
+
+	// Modules (modules.go): extra message kinds and lifecycle hooks, all run under mu.
+	handlers     map[string]func(cl *Client, frame json.RawMessage)
+	onConnect    []func(cl *Client)
+	onJoin       []func(cl *Client)
+	onLeave      []func(cl *Client, street string)
+	onDisconnect []func(cl *Client)
+	afterFunc    func(d time.Duration, fn func()) func() bool
 }
 
 func NewHub(now func() time.Time) *Hub {
 	if now == nil {
 		now = time.Now
 	}
-	return &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}}
+	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter}
+	for _, m := range modules {
+		m(h).Register(&Registry{h: h})
+	}
+	return h
 }
 
 // Stats counts characters online and streets with someone on them.
@@ -116,6 +131,9 @@ func (h *Hub) Connect(c Claims) *Client {
 	}
 	h.clients[c.Sub] = cl
 	h.queueLocked(cl, map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}})
+	for _, fn := range h.onConnect {
+		fn(cl)
+	}
 	return cl
 }
 
@@ -126,6 +144,9 @@ func (h *Hub) Disconnect(cl *Client) {
 	if h.clients[cl.id] == cl {
 		h.leaveLocked(cl)
 		delete(h.clients, cl.id)
+		for _, fn := range h.onDisconnect {
+			fn(cl)
+		}
 	}
 	h.closeLocked(cl, 0)
 }
@@ -176,6 +197,9 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		room[cl.id] = cl
 		h.queueLocked(cl, map[string]any{"t": "street", "street": m.Street, "players": others})
 		h.broadcastLocked(cl, map[string]any{"t": "joined", "player": cl.player})
+		for _, fn := range h.onJoin {
+			fn(cl)
+		}
 	case "move":
 		if cl.street == "" || !h.allowMoveLocked(cl) {
 			return
@@ -205,6 +229,10 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 	case "ping":
 		h.queueLocked(cl, map[string]any{"t": "pong"})
 	default:
+		if fn := h.handlers[m.T]; fn != nil {
+			fn(cl, frame)
+			return
+		}
 		h.replyLocked(cl, "bad_frame", "That message kind is not one the server knows.")
 	}
 }
@@ -231,7 +259,11 @@ func (h *Hub) leaveLocked(cl *Client) {
 			delete(h.streets, cl.street)
 		}
 	}
+	street := cl.street
 	cl.street = ""
+	for _, fn := range h.onLeave {
+		fn(cl, street)
+	}
 }
 
 // broadcastLocked sends to everyone on cl's street but cl.
