@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -436,5 +437,58 @@ func TestTheHeaderListsTheKinds(t *testing.T) {
 		if !strings.Contains(string(src), kind) {
 			t.Fatalf("the header does not list %s", kind)
 		}
+	}
+}
+
+func TestHelpMineAddsTheHelpersChunks(t *testing.T) {
+	if got := []int{helpMineBonus(0), helpMineBonus(1), helpMineBonus(2), helpMineBonus(4), helpMineBonus(9), helpMineBonus(12)}; fmt.Sprint(got) != "[0 1 3 10 30 30]" {
+		t.Fatalf("mining.js 335-337 bonuses %v", got)
+	}
+	r := newObjRig(t)
+	spot := sharedWorld.streets[defaultStreet]["rock:1"]
+	a := r.player(1, "Ada", defaultStreet, spot.x, spot.y)
+	b := r.player(2, "Bo", defaultStreet, spot.x+30, spot.y)
+	c := r.player(3, "Cy", defaultStreet, spot.x-30, spot.y)
+	r.drain(a)
+	r.drain(b)
+	mine := func(cl *Client, do string) { r.send(cl, map[string]any{"t": "obj_mine", "id": "rock:1", "do": do}) }
+
+	mine(a, "start")
+	if got := r.only(a, "obj_mine"); got["helping"] != false {
+		t.Fatalf("Ada starts alone: %v", got)
+	}
+	if got := objOf(r.only(b, "objs"), "rock:1"); fmt.Sprint(got["miners"]) != "[1]" {
+		t.Fatalf("Bo sees Ada swinging (Help mine): %v", got)
+	}
+	mine(b, "start")
+	if got := r.only(b, "obj_mine"); got["helping"] != true {
+		t.Fatalf("Bo helps: %v", got)
+	}
+	mine(c, "start")
+	r.drain(a)
+	r.drain(b)
+	r.drain(c)
+	// Cy gives up: Ada keeps only Bo's help.
+	mine(c, "stop")
+	r.act(a, 1, "rock:1", "mine", map[string]any{"perks": []string{"luck"}})
+	ok := r.only(a, "obj_ok")
+	help, _ := ok["help"].(map[string]any)
+	if num(ok["chunks"]) != 9 || help == nil || num(help["bonus"]) != 1 || fmt.Sprint(help["by"]) != "[Bo]" {
+		t.Fatalf("Ada's swing with one help answered %v", ok)
+	}
+	if got := objOf(ok, "rock:1"); num(got["chunks"]) != 40 || fmt.Sprint(got["miners"]) != "[2]" {
+		t.Fatalf("the rock gives up the bonus too, and Ada is off it: %v", got)
+	}
+	// Bo started after Ada: nobody helped Bo.
+	r.act(b, 1, "rock:1", "mine", map[string]any{"perks": []string{"luck"}})
+	if ok := r.only(b, "obj_ok"); ok["help"] != nil || objOf(ok, "rock:1")["miners"] != nil {
+		t.Fatalf("Bo's swing had no helpers: %v", ok)
+	}
+	// Leaving the street takes a player off the rock.
+	mine(c, "start")
+	r.drain(a)
+	r.send(c, map[string]any{"t": "join", "street": "GA9", "x": 0, "y": 0})
+	if got := objOf(r.only(a, "objs"), "rock:1"); got["miners"] != nil {
+		t.Fatalf("Cy left: %v", got)
 	}
 }

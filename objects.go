@@ -11,6 +11,7 @@ package main
 //
 //	{"t":"obj_sync"}                                    after a join: the street's state, please
 //	{"t":"obj_act","req":7,"id":"rock:2","verb":"mine","perks":["luck"],"skill":"gardening_2"}
+//	{"t":"obj_mine","id":"rock:2","do":"start"}         a mining swing begins (or "stop": cancelled)
 //
 // Server to client:
 //
@@ -21,8 +22,10 @@ package main
 //	                                                       or a regrowth, respawn or new day (to everyone)
 //	{"t":"obj_ok","req":7,"id":"rock:2","verb":"mine","before":State,"obj":State,"chunks":7,"roll":0.31}
 //	{"t":"obj_no","req":7,"id":"rock:2","verb":"mine","code":"empty","message":"…","obj":State}
+//	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
 //
-// State: {"id":"rock:2","chunks":43,"mega":false,"in":0} (in: ms to the respawn),
+// State: {"id":"rock:2","chunks":43,"mega":false,"in":0,"miners":[3,7]} (in: ms to the
+// respawn; miners: who is swinging at it now, so the verb reads "Help mine"),
 // {"id":"node:peat_1:0","units":3,"in":120000} (in: ms to the next +1; a Paper
 // Tree adds "petted","watered","reset"), {"id":"tree:1","fruit":40,"cap":98,
 // "health":8,"maturity":7,"petted":true,"watered":false}.
@@ -32,6 +35,11 @@ package main
 // every street out as game.js does and carries the rule numbers from the
 // game's modules, so the server checks the class and the place of every
 // object a player names, and that the player stands near it.
+//
+// Help mine (items/include/mining.js 8-122, 327-383): a player who starts
+// mining a rock while others swing at it helps each of them; when a swing
+// lands, each help it had adds min(i+1, 4) chunks (up to 9 helps) to the take,
+// from the rock, and the answer names the helpers ("help":{"bonus":3,"by":[…]}).
 //
 // A tree the Rook rooks (rook.go, through the hooks below) loses its fruit and
 // health for everyone, and refuses harvest, pet and water ("code":"rooked")
@@ -247,6 +255,11 @@ type liveObj struct {
 	maturity   int
 	day        int64 // tree: the game day its flags and fruit belong to
 
+	// rock: who is mining it now, in the order they started, and each miner's helpers with how
+	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122).
+	miners  []int64
+	helpers map[int64]map[int64]int
+
 	due  time.Time   // rock respawn or node's next +1
 	stop func() bool // that timer
 	// resetStop is the Paper Tree's flag reset timer.
@@ -275,6 +288,8 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_sync", o.handleSync)
 	r.Handle("obj_act", o.handleAct)
 	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()) })
+	r.Handle("obj_mine", o.handleMine)
+	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
 }
@@ -364,7 +379,7 @@ func (o *objects) isFresh(ob *liveObj) bool {
 	s := ob.spot
 	switch s.kind {
 	case "rock":
-		return ob.chunks == o.w.rules.Rocks[s.class].Chunks && !ob.mega && ob.stop == nil
+		return ob.chunks == o.w.rules.Rocks[s.class].Chunks && !ob.mega && ob.stop == nil && len(ob.miners) == 0
 	case "node":
 		return ob.units == o.w.rules.Nodes[s.class].Initial && !ob.petted && !ob.watered && ob.stop == nil && ob.resetStop == nil
 	case "tree":
@@ -417,7 +432,11 @@ func (o *objects) state(ob *liveObj) map[string]any {
 	}
 	switch s.kind {
 	case "rock":
-		return map[string]any{"id": s.id, "chunks": ob.chunks, "mega": ob.mega, "in": left(ob.due)}
+		m := map[string]any{"id": s.id, "chunks": ob.chunks, "mega": ob.mega, "in": left(ob.due)}
+		if len(ob.miners) > 0 {
+			m["miners"] = append([]int64(nil), ob.miners...)
+		}
+		return m
 	case "node":
 		m := map[string]any{"id": s.id, "units": ob.units, "in": left(ob.due)}
 		if o.w.rules.Nodes[s.class].Tend != nil {
@@ -524,7 +543,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	var v verdict
 	switch spot.kind {
 	case "rock":
-		v = o.mine(street, ob, m.Verb, perks)
+		v = o.mine(street, ob, m.Verb, perks, cl.ID())
 	case "node":
 		v = o.useNode(street, ob, m.Verb, perks)
 	case "tree":
@@ -533,6 +552,11 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		} else {
 			v = o.tendTree(ob, m.Verb, m.Skill)
 		}
+	}
+	if !v.ok && spot.kind == "rock" && ob.mining(cl.ID()) {
+		// A refused swing is over (cancelMining): off the rock, its helps taken back.
+		ob.removeMiner(cl.ID(), true)
+		o.broadcast(street, cl.ID(), ob)
 	}
 	after := o.state(ob)
 	if !v.ok {
@@ -553,7 +577,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 // Rocks (items/include/mining.js)
 // ---------------------------------------------------------------------------
 
-func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string]bool) verdict {
+func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string]bool, miner int64) verdict {
 	if verb != "mine" {
 		return refuse("bad_verb", "You can't do that to a rock.")
 	}
@@ -573,9 +597,21 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 	if perks["expert"] {
 		taken += int(math.Round(0.15 * float64(toGet)))
 	}
-	// 383: the whole take comes off, even past what is left (help bonus: no
-	// real helpers yet, so none).
-	ob.chunks -= taken
+	// 327-342: each help this swing had adds min(i+1, 4), up to 9 helps; the
+	// helpers are named for the "You got N additional …" line (373).
+	helped, by := 0, []string{}
+	for id, n := range ob.helpers[miner] {
+		helped += n
+		if cl := o.h.ClientLocked(id); cl != nil {
+			by = append(by, cl.Name())
+		}
+	}
+	sort.Strings(by)
+	bonus := helpMineBonus(helped)
+	// The swing is done: off the rock, its helps kept for the others (removeMiner, not cancelled).
+	ob.removeMiner(miner, false)
+	// 383: the whole take comes off, even past what is left.
+	ob.chunks -= taken + bonus
 	if ob.chunks <= 0 {
 		ob.chunks = 0
 		ob.mega = false
@@ -588,7 +624,108 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 		ob.nextMega = o.roll() < chance
 		o.schedule(street, ob, rockRespawn, o.respawnRock)
 	}
-	return verdict{ok: true, extra: map[string]any{"chunks": toGet}}
+	extra := map[string]any{"chunks": toGet}
+	if bonus > 0 {
+		extra["help"] = map[string]any{"bonus": bonus, "by": by}
+	}
+	return verdict{ok: true, extra: extra}
+}
+
+// helpMineBonus is mining.js 335-337: min(i+1, 4) for each of up to 9 helps.
+func helpMineBonus(helps int) int {
+	bonus := 0
+	for i := 0; i < helps && i < 9; i++ {
+		bonus += min(i+1, 4)
+	}
+	return bonus
+}
+
+// addMiner is mining.js addMiner 68-91: the newcomer helps everyone already swinging, and starts a
+// helper list of its own.
+func (ob *liveObj) addMiner(id int64) {
+	if ob.helpers == nil {
+		ob.helpers = map[int64]map[int64]int{}
+	}
+	for _, list := range ob.helpers {
+		list[id]++
+	}
+	ob.helpers[id] = map[int64]int{}
+	ob.miners = append(ob.miners, id)
+}
+
+// removeMiner is mining.js removeMiner 93-122: a cancelled swing takes back its helps too.
+func (ob *liveObj) removeMiner(id int64, cancel bool) {
+	if cancel {
+		for _, list := range ob.helpers {
+			if list[id] > 0 {
+				if list[id]--; list[id] == 0 {
+					delete(list, id)
+				}
+			}
+		}
+	}
+	delete(ob.helpers, id)
+	for i, m := range ob.miners {
+		if m == id {
+			ob.miners = append(ob.miners[:i], ob.miners[i+1:]...)
+			break
+		}
+	}
+}
+
+func (ob *liveObj) mining(id int64) bool {
+	for _, m := range ob.miners {
+		if m == id {
+			return true
+		}
+	}
+	return false
+}
+
+// handleMine is a swing starting or stopping (startMining, cancelMining 124-134).
+func (o *objects) handleMine(cl *Client, frame json.RawMessage) {
+	var m struct {
+		ID string `json:"id"`
+		Do string `json:"do"`
+	}
+	if json.Unmarshal(frame, &m) != nil || (m.Do != "start" && m.Do != "stop") || !o.allow(cl) {
+		return
+	}
+	street := cl.Street()
+	spot := o.w.streets[street][m.ID]
+	if street == "" || spot == nil || spot.kind != "rock" {
+		return
+	}
+	ob := o.get(street, spot)
+	if m.Do == "stop" {
+		if ob.mining(cl.ID()) {
+			ob.removeMiner(cl.ID(), true)
+			o.broadcast(street, 0, ob)
+		}
+		o.forget(street, ob)
+		return
+	}
+	if x, y := cl.Pos(); ob.chunks <= 0 || math.Abs(x-spot.x) > objReachX || math.Abs(y-spot.y) > objReachY {
+		o.forget(street, ob)
+		return
+	}
+	// getVerbLabel 8-23: "Help mine" when someone else is already swinging.
+	ob.removeMiner(cl.ID(), true)
+	helping := len(ob.miners) > 0
+	ob.addMiner(cl.ID())
+	o.h.SendLocked(cl, map[string]any{"t": "obj_mine", "id": m.ID, "helping": helping})
+	o.broadcast(street, 0, ob)
+}
+
+// leftStreet is miningSanityCheck 53-66: a player who leaves is off every rock, their helps taken back.
+func (o *objects) leftStreet(cl *Client, street string) {
+	for _, ob := range o.streets[street] {
+		if ob.spot.kind == "rock" && ob.mining(cl.ID()) {
+			ob.removeMiner(cl.ID(), true)
+			o.broadcast(street, 0, ob)
+			o.forget(street, ob)
+		}
+	}
 }
 
 func (o *objects) respawnRock(street string, ob *liveObj) {
