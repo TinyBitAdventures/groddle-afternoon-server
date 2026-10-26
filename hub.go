@@ -99,6 +99,7 @@ type Hub struct {
 	onJoin       []func(cl *Client)
 	onLeave      []func(cl *Client, street string)
 	onDisconnect []func(cl *Client)
+	joinGates    []func(cl *Client, street string) (ok bool, code, message string)
 	afterFunc    func(d time.Duration, fn func()) func() bool
 	provided     map[string]any // hooks one module offers another (Registry.Provide)
 }
@@ -182,6 +183,12 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		}
 		if len(m.Look) > maxLook || (len(m.Look) > 0 && !json.Valid(m.Look)) {
 			m.Look = nil
+		}
+		for _, gate := range h.joinGates {
+			if ok, code, message := gate(cl, m.Street); !ok {
+				h.replyLocked(cl, code, message)
+				return
+			}
 		}
 		h.leaveLocked(cl)
 		cl.street = m.Street

@@ -276,6 +276,19 @@ func (m *races) Register(r *Registry) {
 	r.OnJoin(m.onJoin)
 	r.OnLeave(m.onLeave)
 	r.OnDisconnect(m.onDisconnect)
+	r.GateJoin(m.gate)
+}
+
+// gate keeps a match's instance to its racers: a RACE_ street is joined only by a member of the match
+// that owns it (shared_instance_manager.js: an instance is entered only through its game's invite).
+func (m *races) gate(cl *Client, street string) (bool, string, string) {
+	if !strings.HasPrefix(street, "RACE_") {
+		return true, "", ""
+	}
+	if mt := m.matchOf[cl.ID()]; mt != nil && mt.street == street {
+		return true, "", ""
+	}
+	return false, "private_street", "That race is not yours."
 }
 
 // RaceStreet is the hub street a match's racers share: unguessable, so

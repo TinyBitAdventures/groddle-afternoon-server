@@ -52,6 +52,12 @@ func (r *Registry) OnDisconnect(fn func(cl *Client)) {
 	r.h.onDisconnect = append(r.h.onDisconnect, fn)
 }
 
+// GateJoin may refuse a join before it happens (a private street such as a race's instance): the
+// character stays where it was and is told code and message. Every gate must agree.
+func (r *Registry) GateJoin(fn func(cl *Client, street string) (ok bool, code, message string)) {
+	r.h.joinGates = append(r.h.joinGates, fn)
+}
+
 // Provide offers fn to the other modules under name ("<module>.<what>"): a hook between two shared
 // systems, such as the Rook stripping a shared tree's fruit. Callers look it up when they need it
 // (ProvidedLocked), so the order modules register in does not matter.

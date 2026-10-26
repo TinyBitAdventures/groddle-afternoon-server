@@ -445,3 +445,31 @@ func TestTheRaceDataFileParses(t *testing.T) {
 		t.Fatal("pretty_list")
 	}
 }
+
+func TestOnlyTheRacersMayEnterTheirInstance(t *testing.T) {
+	r := newRaceRig(t)
+	ada, _, match := r.pair("grab_em_good")
+	street := match["street"].(string)
+	cy := r.hub.Connect(Claims{Sub: 3, Name: "Cy"})
+	r.at(cy, "GA1", 10, 0)
+	drain(cy)
+	r.at(cy, street, 0, 0)
+	if no := one(t, drain(cy), "error"); no["code"] != "private_street" {
+		t.Fatalf("a guessed instance answered %v", no)
+	}
+	if cy.Street() != "GA1" {
+		t.Fatalf("Cy stays where they were, not %q", cy.Street())
+	}
+	r.at(ada, street, 0, 0)
+	if ada.Street() != street {
+		t.Fatalf("a racer enters their own instance: %q", ada.Street())
+	}
+	r.at(cy, "RACE_NOSUCHMATCH", 0, 0)
+	if cy.Street() != "GA1" {
+		t.Fatal("an instance with no match is refused too")
+	}
+	r.at(cy, "GA2", 0, 0)
+	if cy.Street() != "GA2" {
+		t.Fatal("ordinary streets are untouched by the gate")
+	}
+}
