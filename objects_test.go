@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -135,10 +136,14 @@ func TestTheLayoutLoads(t *testing.T) {
 	if len(w.streets) < 1000 {
 		t.Fatalf("only %d streets laid out", len(w.streets))
 	}
-	// The caps are assets/content/trants.json fruitCapMap.
-	raw, err := os.ReadFile("../public/assets/content/trants.json")
+	// The caps are the game repo's public/assets/content/trants.json fruitCapMap.
+	game := os.Getenv("GRODDLE_GAME_DIR")
+	if game == "" {
+		game = filepath.Join("..", "groddle-afternoon")
+	}
+	raw, err := os.ReadFile(filepath.Join(game, "public", "assets", "content", "trants.json"))
 	if err != nil {
-		t.Skip("no trants.json beside the server")
+		t.Skipf("the fruit caps are checked against the game repo's trants.json: none at %s (set GRODDLE_GAME_DIR)", game)
 	}
 	var trants map[string]struct {
 		FruitCapMap [][]int `json:"fruitCapMap"`

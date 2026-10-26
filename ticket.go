@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Claims is what a ticket from groddle/v1/realtime (minn/groddle/src/RealtimeTicket.php) says.
+// Claims is what a ticket from groddle/v1/realtime (groddle-afternoon-site src/RealtimeTicket.php) says.
 type Claims struct {
 	Sub  int64  `json:"sub"`
 	Name string `json:"name"`

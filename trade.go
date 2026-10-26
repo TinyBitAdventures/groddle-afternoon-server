@@ -58,7 +58,7 @@ package main
 //   - Items: at most 6 slots (TradeDialog.as:50), each one stack of one
 //     class up to its stackmax (MakingSlot.as:162); no_trade and soulbound
 //     classes refused (TradeDialog.as:1061, inc_trading.js:473-479), from
-//     realtime/data/trade.json (tools/build-realtime-trade.mjs).
+//     data/trade.json (tools/build-realtime-trade.mjs).
 //
 // Ours: an accept names the offer versions it accepts, so nobody accepts an
 // offer they have not seen; a re-join within tradeSettle (a new outfit) keeps

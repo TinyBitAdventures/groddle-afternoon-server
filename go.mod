@@ -1,4 +1,4 @@
-module groddle.local/realtime
+module github.com/TinyBitAdventures/groddle-afternoon-server
 
 go 1.25.0
 

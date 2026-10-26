@@ -3,7 +3,7 @@
 // Groddle site) keeps accounts and saves, and signs the ticket a player opens
 // the socket with (groddle/v1/realtime). Caddy sends https://<site>/ws here.
 //
-//	go run . -addr 127.0.0.1:8793 -secret-file ~/Cove/Sites/groddle.localhost/realtime.secret
+//	go run . -addr 127.0.0.1:8793 -secret-file /path/to/realtime.secret
 package main
 
 import (
