@@ -492,3 +492,64 @@ func TestHelpMineAddsTheHelpersChunks(t *testing.T) {
 		t.Fatalf("Cy left: %v", got)
 	}
 }
+
+func TestAWoodTreeIsSharedButEachPlayerHarvestsItOnceADay(t *testing.T) {
+	var street, id string
+	var spot *objSpot
+	for tsid, spots := range sharedWorld.streets {
+		for sid, sp := range spots {
+			if sp.kind == "wood" && (street == "" || tsid < street) {
+				street, id, spot = tsid, sid, sp
+			}
+		}
+	}
+	if spot == nil || spot.maturity != 6 {
+		t.Fatalf("the layout carries Wood Trees at maturity 6: %v", spot)
+	}
+	r := newObjRig(t)
+	a := r.player(1, "Ada", street, spot.x, spot.y)
+	b := r.player(2, "Bo", street, spot.x, spot.y)
+	r.drain(a)
+	tree := func(m map[string]any) map[string]any { return objOf(m, id) }
+
+	// wood_tree.js endHarvest: the first harvest of a grown tree only marks it; the second takes a maturity.
+	r.act(a, 1, id, "harvest", nil)
+	if got := tree(r.only(a, "obj_ok")); num(got["maturity"]) != 6 || num(got["count"]) != 1 {
+		t.Fatalf("Ada's harvest: %v", got)
+	}
+	if got := tree(r.only(b, "objs")); num(got["count"]) != 1 {
+		t.Fatalf("Bo sees %v", got)
+	}
+	r.act(a, 2, id, "harvest", nil)
+	if no := r.only(a, "obj_no"); no["code"] != "daily_limit" || no["message"] != "You can only harvest from this tree once per game day." {
+		t.Fatalf("a second harvest the same day answered %v", no)
+	}
+	r.drain(b)
+	r.act(b, 1, id, "harvest", nil)
+	if got := tree(r.only(b, "obj_ok")); num(got["maturity"]) != 5 || num(got["count"]) != 0 {
+		t.Fatalf("Bo's harvest takes the maturity: %v", got)
+	}
+	// A wee tree loses one each harvest, down to cleared for everyone.
+	r.mod.get(street, spot).maturity = 1
+	r.mod.get(street, spot).woodBy = nil
+	r.drain(a)
+	r.act(a, 3, id, "harvest", nil)
+	if got := tree(r.only(a, "obj_ok")); num(got["maturity"]) != 0 {
+		t.Fatalf("a wee tree's last harvest: %v", got)
+	}
+	r.drain(b)
+	r.mod.get(street, spot).woodBy = nil
+	r.act(b, 2, id, "harvest", nil)
+	if no := r.only(b, "obj_no"); no["code"] != "cleared" {
+		t.Fatalf("a cleared tree answered %v", no)
+	}
+	// A new game day: the harvests reset for everyone (the maturity does not grow back).
+	ob := r.mod.get(street, spot)
+	ob.maturity, ob.woodBy = 4, map[int64]bool{1: true, 2: true}
+	r.advance(time.Duration(gameDayMs) * time.Millisecond)
+	r.drain(a)
+	r.act(a, 4, id, "harvest", nil)
+	if got := tree(r.only(a, "obj_ok")); num(got["maturity"]) != 4 || num(got["count"]) != 1 {
+		t.Fatalf("the next day Ada may harvest again: %v", got)
+	}
+}

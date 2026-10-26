@@ -24,6 +24,8 @@ package main
 //	{"t":"obj_no","req":7,"id":"rock:2","verb":"mine","code":"empty","message":"…","obj":State}
 //	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
 //
+// A Wood Tree is tree:<i> too: {"id":"tree:3","maturity":5,"count":1}.
+//
 // State: {"id":"rock:2","chunks":43,"mega":false,"in":0,"miners":[3,7]} (in: ms to the
 // respawn; miners: who is swinging at it now, so the verb reads "Help mine"),
 // {"id":"node:peat_1:0","units":3,"in":120000} (in: ms to the next +1; a Paper
@@ -143,7 +145,7 @@ type objRules struct {
 // objSpot is one object as laid out: its kind, class, place and (trees) its fresh maturity and health.
 type objSpot struct {
 	id       string
-	kind     string // rock | node | tree
+	kind     string // rock | node | tree | wood (a Wood Tree: tree:<i> like the trants)
 	class    string
 	x, y     float64
 	maturity int
@@ -193,11 +195,15 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			y, ok4 := num(r[3])
 			m, ok5 := num(r[4])
 			hl, ok6 := num(r[5])
-			if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) || w.rules.Trants[class] == nil {
+			kind := "tree"
+			if class == "wood_tree" {
+				kind = "wood"
+			}
+			if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) || (kind == "tree" && w.rules.Trants[class] == nil) || (kind == "wood" && (m < 1 || m > 6)) {
 				return nil, fmt.Errorf("%s: bad tree %v", tsid, r)
 			}
 			id := "tree:" + strconv.Itoa(int(i))
-			spots[id] = &objSpot{id: id, kind: "tree", class: class, x: x, y: y, maturity: int(m), health: int(hl)}
+			spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, maturity: int(m), health: int(hl)}
 		}
 		for _, r := range row.Nodes {
 			key, ok1 := str(r[0])
@@ -253,7 +259,9 @@ type liveObj struct {
 	fruit, cap int       // tree
 	health     int
 	maturity   int
-	day        int64 // tree: the game day its flags and fruit belong to
+	day        int64          // tree: the game day its flags and fruit belong to; wood: its harvesters' day
+	woodCount  int            // wood: harvest_count (wood_tree.js 732-782)
+	woodBy     map[int64]bool // wood: who harvested it this game day (the source's intervals[today][pc])
 
 	// rock: who is mining it now, in the order they started, and each miner's helpers with how
 	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122).
@@ -298,7 +306,7 @@ func (o *objects) Register(r *Registry) {
 // Rook can check the tree a client pairs with one of its keys (rook_sync "objs").
 func (o *objects) treeClass(street, id string) string {
 	spot := o.w.streets[street][id]
-	if spot == nil || spot.kind != "tree" {
+	if spot == nil || (spot.kind != "tree" && spot.kind != "wood") {
 		return ""
 	}
 	return spot.class
@@ -371,6 +379,8 @@ func (o *objects) fresh(spot *objSpot) *liveObj {
 		ob.cap = o.w.capAt(spot.class, ob.maturity, ob.health)
 		ob.fruit = ob.cap
 		ob.day = o.today()
+	case "wood":
+		ob.maturity, ob.day = spot.maturity, o.today()
 	}
 	return ob
 }
@@ -384,6 +394,8 @@ func (o *objects) isFresh(ob *liveObj) bool {
 		return ob.units == o.w.rules.Nodes[s.class].Initial && !ob.petted && !ob.watered && ob.stop == nil && ob.resetStop == nil
 	case "tree":
 		return ob.fruit == ob.cap && ob.maturity == s.maturity && ob.health == s.health && !ob.petted && !ob.watered
+	case "wood":
+		return ob.maturity == s.maturity && ob.woodCount == 0 && len(ob.woodBy) == 0
 	}
 	return false
 }
@@ -405,6 +417,10 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 	}
 	if spot.kind == "tree" {
 		o.newDay(ob)
+	}
+	if spot.kind == "wood" && ob.day < o.today() {
+		// A new game day: everyone may harvest it again (canHarvest by intervals[today]).
+		ob.day, ob.woodBy = o.today(), nil
 	}
 	return ob
 }
@@ -443,6 +459,8 @@ func (o *objects) state(ob *liveObj) map[string]any {
 			m["petted"], m["watered"], m["reset"] = ob.petted, ob.watered, left(ob.resetAt)
 		}
 		return m
+	case "wood":
+		return map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount}
 	default:
 		return map[string]any{"id": s.id, "fruit": ob.fruit, "cap": ob.cap, "health": ob.health, "maturity": ob.maturity, "petted": ob.petted, "watered": ob.watered}
 	}
@@ -546,6 +564,12 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		v = o.mine(street, ob, m.Verb, perks, cl.ID())
 	case "node":
 		v = o.useNode(street, ob, m.Verb, perks)
+	case "wood":
+		if o.rooked(street, spot.id) {
+			v = refuse("rooked", "It's rooked. Revive it first.")
+		} else {
+			v = o.chopWood(ob, m.Verb, cl.ID())
+		}
 	case "tree":
 		if o.rooked(street, spot.id) {
 			v = refuse("rooked", "It's rooked. Revive it first.")
@@ -629,6 +653,34 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 		extra["help"] = map[string]any{"bonus": bonus, "by": by}
 	}
 	return verdict{ok: true, extra: extra}
+}
+
+// chopWood is items/wood_tree.js harvest (conditions 485-497, doHarvest/endHarvest 725-790) on the
+// shared tree: once a game day for each player; every second harvest (any player's) takes one
+// maturity, and a wee tree (maturity 2 or less) loses one each time; at 0 it is cleared for
+// everyone (onDie: the remake keeps a patch). The planks, energy and Hatchet wear are the
+// harvester's own (js/woodcutting.js harvestWoodTree, from "before").
+func (o *objects) chopWood(ob *liveObj, verb string, harvester int64) verdict {
+	if verb != "harvest" {
+		return refuse("bad_verb", "You can't do that to a Wood Tree here.")
+	}
+	if ob.maturity <= 0 {
+		return refuse("cleared", "This Wood Tree has been cleared.")
+	}
+	if ob.woodBy[harvester] {
+		return refuse("daily_limit", "You can only harvest from this tree once per game day.")
+	}
+	if ob.woodBy == nil {
+		ob.woodBy = map[int64]bool{}
+	}
+	ob.woodBy[harvester] = true
+	if ob.maturity <= 2 || ob.woodCount != 0 {
+		ob.maturity--
+		ob.woodCount = 0
+	} else {
+		ob.woodCount = 1
+	}
+	return verdict{ok: true}
 }
 
 // helpMineBonus is mining.js 335-337: min(i+1, 4) for each of up to 9 helps.
