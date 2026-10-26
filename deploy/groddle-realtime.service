@@ -1,0 +1,35 @@
+# systemd unit for the realtime server on a Linux host (the live site's machine).
+# Install: copy the binary to /opt/groddle-realtime/, the secret to /etc/groddle/realtime.secret
+# (owned by root, mode 0640, group groddle), then:
+#   useradd --system --no-create-home groddle
+#   cp groddle-realtime.service /etc/systemd/system/ && systemctl daemon-reload
+#   systemctl enable --now groddle-realtime
+# The site's web server passes /ws to 127.0.0.1:8793 (see readme.md).
+[Unit]
+Description=Groddle Afternoon realtime server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=groddle
+Group=groddle
+ExecStart=/opt/groddle-realtime/groddle-realtime -addr 127.0.0.1:8793 -secret-file /etc/groddle/realtime.secret -trade-journal /var/lib/groddle-realtime/realtime-trades.jsonl
+Restart=always
+RestartSec=2
+# SIGTERM closes the listener and lets sockets finish (main.go).
+KillSignal=SIGTERM
+TimeoutStopSec=15
+StateDirectory=groddle-realtime
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

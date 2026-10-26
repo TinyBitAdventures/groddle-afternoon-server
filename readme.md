@@ -43,6 +43,16 @@ one with `openssl rand -hex 32 > realtime.secret` and keep it outside any webroo
 
 `GET /healthz` answers `{"players":N,"streets":N}`.
 
+### As a service
+
+- Linux (the live host): `deploy/groddle-realtime.service` is a systemd unit (its header says how to install
+  it). It restarts the server if it stops and keeps the trade journal in `/var/lib/groddle-realtime/`.
+- macOS (a local Cove site): `deploy/install-local.sh [SRC]` builds SRC (default: this checkout), installs the
+  binary in `~/Cove/Sites/groddle.localhost/realtime/` and loads the launchd agent
+  `com.groddleafternoon.realtime`, which starts at login and restarts the server if it stops. Logs go to
+  `realtime/realtime.log` there. Run it again after a change; `launchctl kickstart -k gui/$(id -u)/com.groddleafternoon.realtime`
+  restarts the installed build.
+
 ### Behind the site's web server
 
 The game connects to `/ws` on the site's own host. With Caddy:
