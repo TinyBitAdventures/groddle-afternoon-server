@@ -352,6 +352,10 @@ func (m *parties) invite(cl *Client, frame json.RawMessage) {
 		m.activity(cl.ID(), "You can't invite yourself.")
 		return
 	}
+	if blockedBetween(m.h, cl.ID(), target.ID()) {
+		m.activity(cl.ID(), "You are blocking or blocked by that player.") // inc_trading.js:128, the source's words for a block
+		return
+	}
 	p := m.of[cl.ID()]
 	created := false
 	if p == nil {

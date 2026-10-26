@@ -451,6 +451,10 @@ func (m *trades) start(cl *Client, frame json.RawMessage) {
 			return
 		}
 	}
+	if blockedBetween(m.h, cl.ID(), target.ID()) {
+		m.refuse(cl, "You are blocking or blocked by that player.") // inc_trading.js:125-130
+		return
+	}
 	if cl.Street() == "" || target.Street() != cl.Street() {
 		m.refuse(cl, tradeTextElsewhere)
 		return

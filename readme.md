@@ -81,6 +81,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `rook.go` | Rook attacks fought by everyone on the street |
 | `races.go` | Grab 'Em Good and the finish-line races between real players |
 | `trade.go` | Trading items and currants |
+| `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
 offline hooks. The rules follow Tiny Speck's released server code
