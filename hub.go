@@ -100,13 +100,14 @@ type Hub struct {
 	onLeave      []func(cl *Client, street string)
 	onDisconnect []func(cl *Client)
 	afterFunc    func(d time.Duration, fn func()) func() bool
+	provided     map[string]any // hooks one module offers another (Registry.Provide)
 }
 
 func NewHub(now func() time.Time) *Hub {
 	if now == nil {
 		now = time.Now
 	}
-	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter}
+	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{}}
 	for _, m := range modules {
 		m(h).Register(&Registry{h: h})
 	}

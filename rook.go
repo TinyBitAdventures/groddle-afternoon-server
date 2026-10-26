@@ -15,8 +15,11 @@ package main
 //
 // Client to server:
 //
-//	{"t":"rook_sync","keys":["npc_piggy:0","trant_bean:2"]}  after a join: the street's attack, please;
-//	                                       keys are the rookable things this client has here
+//	{"t":"rook_sync","keys":["npc_piggy:0","trant_bean:2"],"objs":{"trant_bean:2":"tree:1"}}
+//	                                       after a join: the street's attack, please; keys are the
+//	                                       rookable things this client has here, objs pairs a tree's
+//	                                       key with its shared object (objects.go), so a rooked tree
+//	                                       loses its fruit for everyone and waits for reviving
 //	{"t":"rook_orb"}                        start a stun attack (Focusing Orb)
 //	{"t":"rook_orb_join","by":7}            focus your imagination on player 7's orb
 //	{"t":"rook_prime","bonus":1}            prime the street's shrine (bonus: your Shrine On card, 0-2)
@@ -298,6 +301,7 @@ type rookStreet struct {
 	attack    *rookAttack
 	rooked    map[string]*rookedThing
 	keys      map[string]string // key -> class, as clients report them
+	objs      map[string]string // key -> the shared tree it is (objects.go id), as clients pair them
 	restUntil time.Time
 }
 
@@ -336,6 +340,21 @@ func (m *rook) Register(r *Registry) {
 	r.OnJoin(m.joined)
 	r.OnLeave(m.left)
 	r.OnDisconnect(func(cl *Client) { delete(m.limits, cl.ID()) })
+	r.Provide("rook.treeRooked", m.treeRooked)
+}
+
+// treeRooked is whether the shared tree id on a street is rooked now (objects.go asks before a harvest).
+func (m *rook) treeRooked(street, id string) bool {
+	s := m.streets[street]
+	if s == nil {
+		return false
+	}
+	for key, obj := range s.objs {
+		if obj == id && s.rooked[key] != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *rook) allow(cl *Client) bool {
@@ -357,7 +376,7 @@ func (m *rook) allow(cl *Client) bool {
 func (m *rook) street(tsid string) *rookStreet {
 	s := m.streets[tsid]
 	if s == nil {
-		s = &rookStreet{rooked: map[string]*rookedThing{}, keys: map[string]string{}}
+		s = &rookStreet{rooked: map[string]*rookedThing{}, keys: map[string]string{}, objs: map[string]string{}}
 		m.streets[tsid] = s
 	}
 	return s
@@ -670,6 +689,12 @@ func (m *rook) wingBeat(a *rookAttack) {
 		if m.roll() < rookChance {
 			s.rooked[key] = &rookedThing{class: s.keys[key]}
 			hit = append(hit, key)
+			// A rooked tree loses its fruit and health for everyone (objects.go rookTree).
+			if id := s.objs[key]; id != "" {
+				if strip, ok := m.h.ProvidedLocked("objects.rookTree").(func(string, string) bool); ok {
+					strip(a.street, id)
+				}
+			}
 		}
 	}
 	a.stun, a.phase, a.angry, a.failures = 0, "build_up", "", 0
@@ -1177,9 +1202,10 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 
 func (m *rook) handleSync(cl *Client, frame json.RawMessage) {
 	var msg struct {
-		Keys []string `json:"keys"`
+		Keys []string          `json:"keys"`
+		Objs map[string]string `json:"objs"` // key -> shared tree id (js/street-objects.js treeId)
 	}
-	if json.Unmarshal(frame, &msg) != nil || len(msg.Keys) > 64 {
+	if json.Unmarshal(frame, &msg) != nil || len(msg.Keys) > 64 || len(msg.Objs) > 64 {
 		m.no(cl, "sync", "bad", "That rook message did not check out.")
 		return
 	}
@@ -1196,6 +1222,14 @@ func (m *rook) handleSync(cl *Client, frame json.RawMessage) {
 				continue
 			}
 			s.keys[key] = sm[1]
+		}
+		// A key keeps the first tree it was paired with, and only one of its own class (objects.go says).
+		treeClass, _ := m.h.ProvidedLocked("objects.treeClass").(func(string, string) string)
+		for key, id := range msg.Objs {
+			if treeClass == nil || s.keys[key] == "" || s.objs[key] != "" || treeClass(tsid, id) != s.keys[key] {
+				continue
+			}
+			s.objs[key] = id
 		}
 	}
 	snap := m.message(tsid, nil)

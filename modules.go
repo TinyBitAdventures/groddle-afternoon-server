@@ -52,6 +52,20 @@ func (r *Registry) OnDisconnect(fn func(cl *Client)) {
 	r.h.onDisconnect = append(r.h.onDisconnect, fn)
 }
 
+// Provide offers fn to the other modules under name ("<module>.<what>"): a hook between two shared
+// systems, such as the Rook stripping a shared tree's fruit. Callers look it up when they need it
+// (ProvidedLocked), so the order modules register in does not matter.
+func (r *Registry) Provide(name string, fn any) {
+	if _, taken := r.h.provided[name]; taken {
+		panic("realtime: two modules provide " + name)
+	}
+	r.h.provided[name] = fn
+}
+
+// ProvidedLocked is what a module offered under name, or nil when no module did (a build without it).
+// The caller asserts the type it expects: fn, ok := h.ProvidedLocked("objects.rookTree").(func(string, string) bool).
+func (h *Hub) ProvidedLocked(name string) any { return h.provided[name] }
+
 var coreKinds = map[string]struct{}{"auth": {}, "join": {}, "move": {}, "chat": {}, "emote": {}, "leave": {}, "ping": {}}
 
 // Helpers for modules. All need the hub lock, which every handler and hook already holds.

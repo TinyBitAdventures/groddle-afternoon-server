@@ -33,6 +33,10 @@ package main
 // game's modules, so the server checks the class and the place of every
 // object a player names, and that the player stands near it.
 //
+// A tree the Rook rooks (rook.go, through the hooks below) loses its fruit and
+// health for everyone, and refuses harvest, pet and water ("code":"rooked")
+// until it is revived.
+//
 // The server forgets an object once it is fresh again, and everything when it
 // restarts (accepted for now).
 
@@ -271,6 +275,45 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_sync", o.handleSync)
 	r.Handle("obj_act", o.handleAct)
 	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()) })
+	r.Provide("objects.treeClass", o.treeClass)
+	r.Provide("objects.rookTree", o.rookTree)
+}
+
+// treeClass is the class of the tree an id names on a street ("" when it names no tree there), so the
+// Rook can check the tree a client pairs with one of its keys (rook_sync "objs").
+func (o *objects) treeClass(street, id string) string {
+	spot := o.w.streets[street][id]
+	if spot == nil || spot.kind != "tree" {
+		return ""
+	}
+	return spot.class
+}
+
+// rookTree is items/include/trants.js onRooked 1140-1151 on the shared tree, as the client does on
+// its copy (js/rook-attack.js rookTrantState): every fruit gone, health down 2 (1 at health 2), never
+// below 1 (a tree at health 1 dies in the source; tree death is not shared yet). Everyone on the
+// street is told. False when the id names no tree there.
+func (o *objects) rookTree(street, id string) bool {
+	spot := o.w.streets[street][id]
+	if spot == nil || spot.kind != "tree" {
+		return false
+	}
+	ob := o.get(street, spot)
+	ob.fruit = 0
+	loss := 2
+	if ob.health == 2 {
+		loss = 1
+	}
+	ob.health = max(1, ob.health-loss)
+	o.broadcast(street, 0, ob)
+	return true
+}
+
+// rooked asks the Rook whether a shared tree is rooked: harvest, pet and water wait for its revival
+// (trants.js wantsWater 1120, wantsPet 1131, and its verbs while rooked 940).
+func (o *objects) rooked(street, id string) bool {
+	fn, ok := o.h.ProvidedLocked("rook.treeRooked").(func(string, string) bool)
+	return ok && fn(street, id)
 }
 
 func (o *objects) allow(cl *Client) bool {
@@ -485,7 +528,11 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	case "node":
 		v = o.useNode(street, ob, m.Verb, perks)
 	case "tree":
-		v = o.tendTree(ob, m.Verb, m.Skill)
+		if o.rooked(street, spot.id) {
+			v = refuse("rooked", "It's rooked. Revive it first.")
+		} else {
+			v = o.tendTree(ob, m.Verb, m.Skill)
+		}
 	}
 	after := o.state(ob)
 	if !v.ok {
