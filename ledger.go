@@ -42,6 +42,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -99,6 +100,9 @@ type httpLedger struct {
 
 // newLedgerFromFlags: the site's ledger the flags name; missing when trades
 // must settle there but no -ledger-url was given (trades are then refused).
+// ledgerLogOnce keeps the "settle at" line to one per process.
+var ledgerLogOnce sync.Once
+
 func newLedgerFromFlags() (site ledgerSite, missing bool) {
 	if *tradeLedgerFlag == "off" {
 		return nil, false
@@ -130,7 +134,8 @@ func newLedgerFromFlags() (site ledgerSite, missing bool) {
 		}
 		tr.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	log.Printf("trade ledger: trades settle at %s", base)
+	// trade.go, projects.go and party_spaces.go each build one: say it once.
+	ledgerLogOnce.Do(func() { log.Printf("trade ledger: trades settle at %s", base) })
 	return &httpLedger{base: base, secret: secret, client: &http.Client{Timeout: ledgerTimeout, Transport: tr}, now: time.Now, pause: time.Sleep}, false
 }
 
