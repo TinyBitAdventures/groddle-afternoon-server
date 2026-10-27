@@ -49,7 +49,8 @@ package main
 //   - inc_games.js games_end_quoin_grab 1529-1600 / games_end_race 1330-1390:
 //     the winner gets +50 iMG and +100 currants (achievements won), everyone
 //     else nothing (achievements lost). Each client applies its own (the
-//     save is the client's in this phase); the server says who won.
+//     save is the client's in this phase); the server says who won, and
+//     credits the winner's 100 currants to the site's ledger (credits.go).
 //
 // Ours: an open challenge belongs to the street it was made on (leaving that
 // street or going offline withdraws it, and the ticket comes back);
@@ -851,6 +852,9 @@ func (m *races) end(mt *raceMatch, winner *raceRef, why string, left *raceRef) {
 		msg["total"] = len(mt.course.Quoins)
 	}
 	m.sendMatch(mt, msg)
+	if winner != nil && why == "won" {
+		creditLocked(m.h, winner.ID, "race", tradeGoods{Currants: raceWinCurrants})
+	}
 	if left != nil {
 		if oc := m.h.ClientLocked(left.ID); oc != nil {
 			if mem := m.member(mt, left.ID); mem != nil && mem.gone {

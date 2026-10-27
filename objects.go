@@ -47,6 +47,12 @@ package main
 // health for everyone, and refuses harvest, pet and water ("code":"rooked")
 // until it is revived.
 //
+// What a player takes is theirs to apply, and the site's ledger is told what
+// the take was (credits.go, objCredit), so the save can show it outside the
+// earning budget: a rock's whole take, a tree's or Paper Tree's fruit, a Wood
+// Tree's planks, and a resource node's yield with no skill bonus (bonuses,
+// super harvests and drops are the client's and go through the budget).
+//
 // The server forgets an object once it is fresh again, and everything when it
 // restarts (accepted for now).
 
@@ -515,7 +521,23 @@ type verdict struct {
 	code    string
 	message string
 	extra   map[string]any
+	got     tradeGoods // what the player takes, credited to the site's ledger
 }
+
+// objFruit is each trant's fruit (js/trants.js:115-120; items/trant_*.js).
+var objFruit = map[string]string{"trant_fruit": "cherry", "trant_egg": "egg_plain", "trant_bean": "bean_plain", "trant_bubble": "plain_bubble", "trant_spice": "all_spice", "trant_gas": "general_vapour"}
+
+// objNodeYield is a resource node's yield with no skill package bonus
+// (js/resource-nodes.js:1377-1420: mortar_barnacle 1, ice_knob at least 1,
+// jellisac 1, dirt_pile 2 earth unless a drop rolls, peat_1 3). More than
+// this, and a dirt pile's drops, go through the budget.
+var objNodeYield = map[string]struct {
+	c string
+	n int
+}{"mortar_barnacle": {"barnacle", 1}, "ice_knob": {"ice", 1}, "jellisac": {"jellisac_clump", 1}, "dirt_pile": {"earth", 2}, "peat_1": {"peat", 3}}
+
+// woodPlanks is items/wood_tree.js:880 plankProdMap, the planks by maturity (endHarvest 766).
+var woodPlanks = [6]int{25, 30, 40, 50, 60, 80}
 
 func refuse(code, message string) verdict { return verdict{code: code, message: message} }
 
@@ -593,6 +615,9 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		msg[k] = val
 	}
 	o.h.SendLocked(cl, msg)
+	if !v.got.empty() {
+		creditLocked(o.h, cl.ID(), "take", v.got)
+	}
 	o.broadcast(street, cl.ID(), ob)
 	o.forget(street, ob)
 }
@@ -652,7 +677,8 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 	if bonus > 0 {
 		extra["help"] = map[string]any{"bonus": bonus, "by": by}
 	}
-	return verdict{ok: true, extra: extra}
+	// js/mining.js: the chunk is the rock's type (chunkId), the whole take and the help bonus.
+	return verdict{ok: true, extra: extra, got: creditItem(rule.Type, taken+bonus)}
 }
 
 // chopWood is items/wood_tree.js harvest (conditions 485-497, doHarvest/endHarvest 725-790) on the
@@ -674,13 +700,14 @@ func (o *objects) chopWood(ob *liveObj, verb string, harvester int64) verdict {
 		ob.woodBy = map[int64]bool{}
 	}
 	ob.woodBy[harvester] = true
+	got := creditItem("plank", woodPlanks[min(max(ob.maturity, 1), 6)-1])
 	if ob.maturity <= 2 || ob.woodCount != 0 {
 		ob.maturity--
 		ob.woodCount = 0
 	} else {
 		ob.woodCount = 1
 	}
-	return verdict{ok: true}
+	return verdict{ok: true, got: got}
 }
 
 // helpMineBonus is mining.js 335-337: min(i+1, 4) for each of up to 9 helps.
@@ -848,7 +875,8 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 	}
 	// The regrow timer restarts on every use (resource-nodes.js harvestResourceNode).
 	o.schedule(street, ob, o.regrowDelay(rule), o.regrowNode)
-	return verdict{ok: true}
+	y := objNodeYield[class]
+	return verdict{ok: true, got: creditItem(y.c, y.n)}
 }
 
 func (o *objects) regrowNode(street string, ob *liveObj) {
@@ -878,7 +906,7 @@ func (o *objects) tendPaper(street string, ob *liveObj, verb string, perks map[s
 		}
 		take := min(want, ob.units)
 		ob.units -= take
-		return verdict{ok: true, extra: map[string]any{"take": take}}
+		return verdict{ok: true, extra: map[string]any{"take": take}, got: creditItem("paper", take)}
 	case "water", "pet":
 		if verb == "water" && ob.watered {
 			return refuse("not_wanted", "I don't want to be watered!") // paper_tree.js:358
@@ -937,7 +965,7 @@ func (o *objects) tendTree(ob *liveObj, verb, skill string) verdict {
 		}
 		take := min(amount, ob.fruit)
 		ob.fruit -= take
-		return verdict{ok: true, extra: map[string]any{"take": take}}
+		return verdict{ok: true, extra: map[string]any{"take": take}, got: creditItem(objFruit[ob.spot.class], take)}
 	case "pet", "water":
 		if verb == "pet" && ob.petted {
 			return refuse("not_wanted", "This tree was already petted today.")

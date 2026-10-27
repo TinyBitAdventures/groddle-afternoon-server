@@ -7,7 +7,11 @@ package main
 // and what they rook, the outcome, each player's contribution and the
 // aftermath (which critters and trees are rooked, and the revive doses given).
 // Each player's own rewards and costs (iMG, energy, mood, favor, offerings out
-// of the pack) are sent to that player and applied by their client.
+// of the pack) are sent to that player and applied by their client. None of
+// them is currants or a tradeable item, so the site's ledger is told nothing
+// (credits.go; the source pays a Rook fight in iMG, energy, mood and favor
+// only: groups/rook_attack.js, items/include/shrines.js launchAttack). An
+// offering out of the pack is a loss the player's save shows.
 //
 // The rules are GameServerJS groups/rook_attack.js, locations/inc_rook.js,
 // items/include/rook.js, items/focusing_orb.js stun_attack and

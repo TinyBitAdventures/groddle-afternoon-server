@@ -17,6 +17,10 @@ package main
 // claim is checked against the claimer's last known position. The claimer's
 // own multiplier, the daily quoin limit (pc.stats.quoins_today, quoin.js
 // 159) and applying the reward stay with the claimer's client, as in solo.
+// Currants are the ledger's, so a currants grab and each currants shard are
+// also credited to the site (credits.go): the benefit times the multiplier
+// the claimer reported (quoin_status, capped at the source's 100), for the
+// first quoinCreditDaily grabs of a game day.
 // Personal quoins (Qurazy, quest and demo quoins, private instances) never
 // come here.
 //
@@ -143,6 +147,8 @@ type quoinsModule struct {
 	// gone[street][i]: unspawned until its respawn timer runs.
 	gone   map[string]map[int]func() bool
 	status map[int64]*quoinStatus
+	// grabs[id]: natural quoins a player grabbed this game day, for the credits' daily count.
+	grabs map[int64]quoinDay
 	// randInt is the source's randInt (common.js 691: lo..hi, both included).
 	randInt func(lo, hi int) int
 }
@@ -163,6 +169,7 @@ func newQuoinsWith(h *Hub, d *quoinData) *quoinsModule {
 		data:    d,
 		gone:    map[string]map[int]func() bool{},
 		status:  map[int64]*quoinStatus{},
+		grabs:   map[int64]quoinDay{},
 		randInt: func(lo, hi int) int { return lo + rand.IntN(hi-lo+1) },
 	}
 }
@@ -326,6 +333,36 @@ func (m *quoinsModule) claim(cl *Client, frame json.RawMessage) {
 
 	m.h.SendLocked(cl, map[string]any{"t": "quoin_got", "street": street, "i": i, "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards})
 	m.h.BroadcastStreetLocked(street, map[string]any{"t": "quoin_taken", "street": street, "i": i, "id": cl.ID(), "name": cl.Name(), "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards}, cl.ID())
+	m.credit(cl, spot.Type, amount, st.mult, shards)
+}
+
+// quoinDay counts one player's grabs in one game day (objects.go's day).
+type quoinDay struct {
+	day int64
+	n   int
+}
+
+// credit tells the site's ledger the currants a grab gave (credits.go): the
+// grabber's round(amount * multiplier) (quoin.js 171-174), while this game
+// day's grabs, every type counted as quoins_today counts them, are within
+// quoinCreditDaily; and every currants shard as sent.
+func (m *quoinsModule) credit(cl *Client, typ string, amount int, mult float64, shards []QuoinShard) {
+	day := int64(math.Floor(float64(m.h.Now().UnixMilli()-gameEpochMs) / gameDayMs))
+	g := m.grabs[cl.ID()]
+	if g.day != day {
+		g = quoinDay{day: day}
+	}
+	g.n++
+	m.grabs[cl.ID()] = g
+	if typ != "currants" {
+		return
+	}
+	if g.n <= quoinCreditDaily {
+		creditLocked(m.h, cl.ID(), "quoin", tradeGoods{Currants: int64(math.Round(float64(amount) * mult))})
+	}
+	for _, s := range shards {
+		creditLocked(m.h, s.ID, "shard", tradeGoods{Currants: int64(s.Amount)})
+	}
 }
 
 func (m *quoinsModule) respawn(street string, i int) {
