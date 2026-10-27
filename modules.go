@@ -52,6 +52,10 @@ func (r *Registry) OnDisconnect(fn func(cl *Client)) {
 	r.h.onDisconnect = append(r.h.onDisconnect, fn)
 }
 
+// OnChat runs after a character's street chat line is said (main.js 1766-1793 checks Charades after
+// pc_local_chat), under the hub lock, with the cleaned text.
+func (r *Registry) OnChat(fn func(cl *Client, text string)) { r.h.onChat = append(r.h.onChat, fn) }
+
 // OnShutdown runs once when the server stops (SIGTERM or an interrupt), after it stops taking requests.
 func (r *Registry) OnShutdown(fn func()) { r.h.onShutdown = append(r.h.onShutdown, fn) }
 

@@ -100,6 +100,7 @@ type Hub struct {
 	onLeave      []func(cl *Client, street string)
 	onDisconnect []func(cl *Client)
 	onShutdown   []func()
+	onChat       []func(cl *Client, text string)
 	joinGates    []func(cl *Client, street string) (ok bool, code, message string)
 	afterFunc    func(d time.Duration, fn func()) func() bool
 	provided     map[string]any // hooks one module offers another (Registry.Provide)
@@ -237,6 +238,9 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		msg := map[string]any{"t": "said", "id": cl.id, "name": cl.name, "text": text, "at": h.now().UnixMilli()}
 		h.queueLocked(cl, msg)
 		h.broadcastLocked(cl, msg)
+		for _, fn := range h.onChat {
+			fn(cl, text)
+		}
 	case "emote":
 		e := word(m.E, "")
 		if cl.street == "" || e == "" || !h.allowChatLocked(cl) {
