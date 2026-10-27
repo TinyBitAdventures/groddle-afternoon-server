@@ -104,6 +104,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `homes_help.go` | The owner's Butler takes a visitor's package and message from the home street through the site's signed `ledger/butler` (`butler_leave`, `butler_parcel` to the owner); relays key-holders' tending proofs (`home_tend_tell`, `home_tended`); tells an owner a hosted party (`home_hosted`) |
 | `hi.go` | Hi signs between players: the daily sign, the 400 px target, infection, the bonus, the day's tally with yesterday's winner and top spreader, street evasion records, and Sneezing and Sparkle Powder reaching the street |
 | `radiance.go` | Transcendental Radiation between players: range by rank and Radius cards, the rolled time, pulses every 3 s to everyone in range, the end and the Sharing the Oneness flag, from a rank the site signs (`radiance_watch`); who is meditating on a street (the orb bubble) and how many meditate together |
+| `gifts.go` | Giving a stack, a written note or a wrapped Gift Box to a player on your street (`gift_give`, `gift_given`, `gift_got`), moved through the site's signed `ledger/gift` |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
