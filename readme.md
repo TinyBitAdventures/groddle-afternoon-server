@@ -89,6 +89,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | File | System |
 |---|---|
 | `party.go` | Parties and party chat |
+| `party_spaces.go` | Party Spaces: a Party Pack opens one space for the party (spent through the site's ledger), with the shared clock, the Party ATM, party quoins and the creator's kick |
 | `quoins.go` | Shared street quoins: first to touch one gets it, players nearby get a shard |
 | `objects.go` | Rocks, resource nodes and trees: what one player takes is gone for everyone until it comes back |
 | `rook.go` | Rook attacks fought by everyone on the street |
@@ -123,7 +124,8 @@ The game's tests fail when this data is out of date.
 
 One test compares tree fruit caps with the game's data, reading `../groddle-afternoon` (or
 `GRODDLE_GAME_DIR`), and skips when the game isn't there. `GRODDLE_ROOK_DEV=1` turns on `rook_dev`
-messages that start an attack or a wing beat on demand, for testing only.
+messages that start an attack or a wing beat on demand, for testing only, and `GRODDLE_PARTY_DEV=1`
+turns on `party_space_dev`, which brings a Party Space's end near.
 
 ## Licence
 

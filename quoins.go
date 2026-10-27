@@ -208,7 +208,7 @@ func (m *quoinsModule) syncReq(cl *Client, frame json.RawMessage) {
 // sync tells a Glitch on a street its quoins and which are gone.
 func (m *quoinsModule) sync(cl *Client) {
 	street := cl.Street()
-	spots := m.data.streets[street]
+	spots := m.spotsOf(street)
 	if len(spots) == 0 {
 		m.h.SendLocked(cl, map[string]any{"t": "quoins", "street": street, "shared": false})
 		return
@@ -223,6 +223,20 @@ func (m *quoinsModule) sync(cl *Client) {
 	}
 	sort.Ints(gone)
 	m.h.SendLocked(cl, map[string]any{"t": "quoins", "street": street, "shared": true, "quoins": list, "gone": gone})
+}
+
+// spotsOf is a street's natural quoins. A Party Space's instance (PARTY_<id>,
+// party_spaces.go) has its template's, shared by the party in it.
+func (m *quoinsModule) spotsOf(street string) []quoinSpot {
+	if spots, ok := m.data.streets[street]; ok {
+		return spots
+	}
+	if fn, ok := m.h.ProvidedLocked("party.spaceStreet").(func(string) string); ok {
+		if t := fn(street); t != "" {
+			return m.data.streets[t]
+		}
+	}
+	return nil
 }
 
 func (m *quoinsModule) setStatus(cl *Client, frame json.RawMessage) {
@@ -284,7 +298,7 @@ func (m *quoinsModule) claim(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, msg.Street, i, "street")
 		return
 	}
-	spots := m.data.streets[street]
+	spots := m.spotsOf(street)
 	if i < 0 || i >= len(spots) {
 		m.refuse(cl, street, i, "unknown")
 		return

@@ -48,8 +48,8 @@ package main
 //
 // Ours: partyGrace (a socket that drops has a minute to come back before it
 // counts as logging out), the invite rate and the caps on pending invites.
-// Deferred: Party Spaces (party.js create_space and the rest), so the space
-// creator's kick (main.js:3963 party_space_kick) and the kicked list too.
+// Party Spaces (party.js create_space and the rest, the creator's kick and the
+// kicked list) are party_spaces.go, on this module.
 
 import (
 	"encoding/json"
@@ -92,6 +92,11 @@ type party struct {
 	members []*partyMember // in join order: promote_leader picks the first
 	invites map[int64]*partyInvite
 	settle  func() bool // a roster push waiting for a street change to finish
+
+	// Party Spaces (party_spaces.go).
+	space    *partySpace
+	starting bool           // a pack's spend is with the ledger
+	kicked   map[int64]bool // party.js kicked_players (kicked 129-135)
 }
 
 type bucket struct {
@@ -121,11 +126,15 @@ type parties struct {
 	chat    map[int64]*bucket
 	invites map[int64]*bucket
 	names   map[int64]string // everyone connected, for invites by name
+
+	spaces partySpaces // party_spaces.go
 }
 
 func newParties(h *Hub) Module {
-	return &parties{h: h, of: map[int64]*party{}, all: map[*party]struct{}{}, away: map[int64]func() bool{},
+	m := &parties{h: h, of: map[int64]*party{}, all: map[*party]struct{}{}, away: map[int64]func() bool{},
 		chat: map[int64]*bucket{}, invites: map[int64]*bucket{}, names: map[int64]string{}}
+	m.initSpaces()
+	return m
 }
 
 func (m *parties) Register(r *Registry) {
@@ -138,6 +147,7 @@ func (m *parties) Register(r *Registry) {
 	r.OnJoin(func(cl *Client) { m.moved(cl.ID(), false) })
 	r.OnLeave(func(cl *Client, _ string) { m.moved(cl.ID(), true) })
 	r.OnDisconnect(m.disconnected)
+	m.registerSpaces(r)
 }
 
 // —— Sending ——
@@ -239,6 +249,9 @@ func (m *parties) dropInvite(p *party, inv *partyInvite) {
 // reason "disband" tells the members; "invites-done" and "offline" are quiet
 // (inc_party.js party_left 185-209).
 func (m *parties) close(p *party, reason string) {
+	if p.space != nil {
+		m.deleteSpace(p, "closed") // party.js close 375-378
+	}
 	for _, inv := range p.invites {
 		m.dropInvite(p, inv)
 		m.to(inv.to, map[string]any{"t": "party_uninvited", "from": inv.from})
@@ -274,6 +287,7 @@ func (m *parties) remove(p *party, id int64, reason string) {
 		}
 	}
 	delete(m.of, id)
+	m.spaceMemberGone(p, id) // party.js leave 178-185: instances_exit('party_space')
 	if reason == "left" {
 		if wasShown {
 			m.to(id, map[string]any{"t": "party", "party": nil})
@@ -377,6 +391,9 @@ func (m *parties) invite(cl *Client, frame json.RawMessage) {
 		m.activity(cl.ID(), label+" is already in a party.")
 	case "full":
 		m.activity(cl.ID(), "Your party is full!")
+	case "kicked":
+		// inc_party.js:57-58.
+		m.activity(cl.ID(), label+" has been removed from your party - only the party creator can re-invite them.")
 	case "busy":
 		m.activity(cl.ID(), "Your party has a lot of invites waiting. Give them a moment to answer.")
 	case "held":
@@ -400,6 +417,9 @@ func (m *parties) sendInvite(p *party, from, to *Client) string {
 	if len(p.members) >= partyMaxSize {
 		return "full"
 	}
+	if why := m.kickedInvite(p, from.ID(), to.ID()); why != "" {
+		return why
+	}
 	if len(p.invites) >= partyMaxInvites {
 		return "busy"
 	}
@@ -414,9 +434,14 @@ func (m *parties) sendInvite(p *party, from, to *Client) string {
 }
 
 // sendInvited is inc_party.js party_invited: the prompt with OK / No thanks.
+// With a Party Space going it names the space (inc_party.js:110-121).
 func (m *parties) sendInvited(to int64, inv *partyInvite, seconds int) {
+	where := "Party Chat."
+	if p := m.partyOfInvite(inv); p != nil && p.space != nil {
+		where = "Party in " + partyTemplates[p.space.template].label + "."
+	}
 	m.to(to, map[string]any{"t": "party_invited", "from": map[string]any{"id": inv.from, "name": inv.fromName},
-		"text": inv.fromName + " has invited you to join their Party Chat.", "timeout": seconds})
+		"text": inv.fromName + " has invited you to join their " + where, "timeout": seconds})
 }
 
 func (m *parties) partyOfInvite(inv *partyInvite) *party {
@@ -544,6 +569,7 @@ func (m *parties) accept(p *party, inv *partyInvite, cl *Client) {
 		}
 	}
 	m.push(p)
+	m.spaceJoined(p, cl) // party.js accept_invite 305-316
 }
 
 func (m *parties) leaveParty(id int64) {
@@ -615,6 +641,7 @@ func (m *parties) connected(cl *Client) {
 			}
 		}
 		m.push(p)
+		m.spaceConnected(p, cl) // party.js player_login 431
 	}
 	// Invites still waiting for this player come back with the time they have left.
 	now := m.h.Now()
