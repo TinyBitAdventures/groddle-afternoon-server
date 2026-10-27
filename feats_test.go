@@ -139,8 +139,10 @@ func (r *featRig) add(cl *Client, feat string, n int64, extra ...any) map[string
 
 func TestFeatTableComesFromTheGame(t *testing.T) {
 	table := featTableForTest(t)
-	if len(table.Order) != 10 || table.Order[0] != "meditation_of_groddlocritus" || table.Order[9] != "makeup_feat_redux" {
-		t.Fatalf("the wired Feats in game_day order: %v", table.Order)
+	// The wired Feats in game_day order, then the multiplayer-only one (G172, The Good Neighbor) last,
+	// so every earlier Feat keeps its index (first and reward ids are built from it).
+	if len(table.Order) != 11 || table.Order[0] != "meditation_of_groddlocritus" || table.Order[9] != "makeup_feat_redux" || table.Order[10] != "visiting_stones" {
+		t.Fatalf("the wired Feats in game_day order, then visiting_stones: %v", table.Order)
 	}
 	// js/feats-mp.js GOALS: the minimum is 3 x the personal goal (animal_love 50), bonus x2, supermegabonus x3.
 	a := table.Feats["animal_love"]
@@ -265,6 +267,29 @@ func TestFeatActsFixTheAmountAndCountAStreetOnce(t *testing.T) {
 	r.now = r.now.Add(time.Duration(table.GameDayMs) * time.Millisecond)
 	if got := r.add(a, "streaking", 1, "act", "streak", "street", "GA5101HF7F429V5"); num(got["n"]) != 1 {
 		t.Fatalf("the next game day the street counts again: %v", got)
+	}
+}
+
+// G172: bag_butler.js 3802-3805, +2 for the first package left with a Butler; each neighbour's
+// HOME_<id> counts once a run.
+func TestFeatGoodNeighborCountsEachButlerOnce(t *testing.T) {
+	table := featTableForTest(t)
+	if f := table.Feats["visiting_stones"]; f.Epic != 4 || f.Goal != 12 || f.Acts["package"].N != 2 || f.Acts["package"].Dedupe != "street" {
+		t.Fatalf("The Good Neighbor: %+v", f)
+	}
+	start := featRunStart(t, table, "visiting_stones")
+	r := newFeatRig(t, "", nil, start.Add(time.Hour), nil)
+	a := r.player(1, "Ada")
+	drain(a)
+	if got := r.add(a, "visiting_stones", 9, "act", "package", "street", "HOME_7"); num(got["n"]) != 2 {
+		t.Fatalf("a package is 2 whatever the client says: %v", got)
+	}
+	r.now = r.now.Add(time.Minute)
+	if got := r.add(a, "visiting_stones", 2, "act", "package", "street", "HOME_7"); got["reason"] != "already" {
+		t.Fatalf("the same Butler once a run: %v", got)
+	}
+	if got := r.add(a, "visiting_stones", 2, "act", "package", "street", "HOME_8"); num(got["n"]) != 2 {
+		t.Fatalf("another neighbour's Butler counts: %v", got)
 	}
 }
 

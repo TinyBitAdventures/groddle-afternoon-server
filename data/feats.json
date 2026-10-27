@@ -4,9 +4,9 @@
 "runMs":86400000,
 "gameDayMs":14400000,
 "quickMs":1800000,
-"order":["meditation_of_groddlocritus","qurazy_quoin_collecting","donate_sparkly","reminscequests","hi_signs_1","pet_only","streaking","tottlys_toys","animal_love","makeup_feat_redux"],
+"order":["meditation_of_groddlocritus","qurazy_quoin_collecting","donate_sparkly","reminscequests","hi_signs_1","pet_only","streaking","tottlys_toys","animal_love","makeup_feat_redux","visiting_stones"],
 "epics":{"2":6,"4":3},
-"unwired":["mihceal_conch","graves_celebrating_mourning","inviting_friends","makeup_feat_1","visiting_stones"],
+"unwired":["mihceal_conch","graves_celebrating_mourning","inviting_friends","makeup_feat_1"],
 "reward":{"xp":272,"currants":170,"mood":0,"energy":102,"favor":[{"giant":"all","points":34}],"small":"petrified_rock_small","medium":"petrified_rock_medium","large":"petrified_rock_large","largePlaces":13,"topPlaces":26,"cigarPlaces":30},
 "feats":{
 "meditation_of_groddlocritus":{"title":"The Meditation of Groddlocritus","epic":0,"goal":33,"bonus":66,"super":99,"pace":{"n":1,"everyMs":60000,"burst":2}},
@@ -18,6 +18,7 @@
 "streaking":{"title":"The Lucky Streak","epic":0,"goal":15,"bonus":30,"super":45,"pace":{"n":1,"everyMs":10000,"burst":5},"acts":{"streak":{"n":1,"dedupe":"street-day"},"wheel":{"n":5}}},
 "tottlys_toys":{"title":"Tottly's Toys","epic":0,"goal":30,"bonus":60,"super":90,"pace":{"n":1,"everyMs":3000,"burst":10}},
 "animal_love":{"title":"Heebo's Happy Accident","epic":0,"goal":150,"bonus":300,"super":450,"pace":{"n":1,"everyMs":2000,"burst":10}},
-"makeup_feat_redux":{"title":"The First Glimmer of the Giants' Awakening","epic":0,"goal":18,"bonus":36,"super":54,"pace":{"n":3,"everyMs":15000,"burst":3},"elsewhere":true}
+"makeup_feat_redux":{"title":"The First Glimmer of the Giants' Awakening","epic":0,"goal":18,"bonus":36,"super":54,"pace":{"n":3,"everyMs":15000,"burst":3},"elsewhere":true},
+"visiting_stones":{"title":"The Good Neighbor","epic":4,"goal":12,"bonus":24,"super":36,"pace":{"n":2,"everyMs":6000,"burst":2},"acts":{"package":{"n":2,"dedupe":"street"}}}
 }
 }
