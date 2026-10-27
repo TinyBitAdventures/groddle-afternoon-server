@@ -105,6 +105,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `hi.go` | Hi signs between players: the daily sign, the 400 px target, infection, the bonus, the day's tally with yesterday's winner and top spreader, street evasion records, and Sneezing and Sparkle Powder reaching the street |
 | `radiance.go` | Transcendental Radiation between players: range by rank and Radius cards, the rolled time, pulses every 3 s to everyone in range, the end and the Sharing the Oneness flag, from a rank the site signs (`radiance_watch`); who is meditating on a street (the orb bubble) and how many meditate together |
 | `gifts.go` | Giving a stack, a written note or a wrapped Gift Box to a player on your street (`gift_give`, `gift_given`, `gift_got`), moved through the site's signed `ledger/gift` |
+| `crowns.go` | Game of Crowns between real players: a ticket challenges the street, four play in a private arena, the server decides the holder, tags, locks and the clock below the play line from reported positions, and the winner's currants go through the site's signed `ledger/crowns` |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
@@ -126,6 +127,7 @@ repo, so the server and the game agree. With the game checked out beside this re
     node tools/build-realtime-projects.mjs
     node tools/build-realtime-feats.mjs
     node tools/build-realtime-trade.mjs
+    node tools/build-realtime-crowns.mjs
 
 The game's tests fail when this data is out of date.
 
