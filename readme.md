@@ -101,6 +101,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `projects.go` | Street projects everyone on a street builds together: contributions through the site's ledger, the source's reward shares, the road opening for everyone |
 | `feats.go` | One Feat a day for everyone playing: contributions at the source's pace, the minimum, bonus and supermegabonus goals, ranks, rewards by place with their currants through the site's ledger |
 | `homes.go` | Visiting real players' homes: `HOME_<id>` and `HOUSE_<id>` gated by a pass the site signs, knocking and answering, house keys given and revoked live; a revoked key-holder, and anyone without a key when the owner goes offline, is walked out |
+| `homes_help.go` | The owner's Butler takes a visitor's package and message from the home street through the site's signed `ledger/butler` (`butler_leave`, `butler_parcel` to the owner); relays key-holders' tending proofs (`home_tend_tell`, `home_tended`); tells an owner a hosted party (`home_hosted`) |
 | `hi.go` | Hi signs between players: the daily sign, the 400 px target, infection, the bonus, the day's tally with yesterday's winner and top spreader, street evasion records, and Sneezing and Sparkle Powder reaching the street |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
