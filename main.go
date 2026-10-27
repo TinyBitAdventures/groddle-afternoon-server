@@ -32,6 +32,9 @@ const (
 	maxFrame  = 8192
 )
 
+// version names the build: deploy/install-remote.sh sets it to the release tag (-ldflags -X main.version=...).
+var version = "dev"
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8793", "where to listen")
 	secretFile := flag.String("secret-file", "", "the shared secret Minn signs tickets with")
@@ -112,7 +115,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/healthz", "/ws/healthz":
 		players, streets := s.hub.Stats()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]int{"players": players, "streets": streets})
+		json.NewEncoder(w).Encode(map[string]any{"players": players, "streets": streets, "version": version})
 	default:
 		http.NotFound(w, r)
 	}

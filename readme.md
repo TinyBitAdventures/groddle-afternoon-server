@@ -47,7 +47,7 @@ Options:
 The secret is the same file the site reads (`realtime.secret` beside its webroot by default). Make
 one with `openssl rand -hex 32 > realtime.secret` and keep it outside any webroot.
 
-`GET /healthz` answers `{"players":N,"streets":N}`.
+`GET /healthz` answers `{"players":N,"streets":N,"version":"..."}` (the release tag; `dev` for a local build).
 
 ### As a service
 
@@ -81,8 +81,8 @@ keep `-ledger-url https://groddleafternoon.com`, and give both sides the same se
         reverse_proxy /ws 127.0.0.1:8793
     }
 
-`deploy/install-remote.sh root@<host> [<clean checkout>]` builds the committed server for Linux and
-installs it there (it refuses while players are online unless `FORCE=1`).
+`deploy/install-remote.sh root@<host> <tag>` builds that release for Linux from a temporary worktree and
+installs it there (it refuses while players are online unless `FORCE=1`). Releases are tagged `vX.Y.Z`.
 
 ## Trust model
 
