@@ -107,6 +107,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `gifts.go` | Giving a stack, a written note or a wrapped Gift Box to a player on your street (`gift_give`, `gift_given`, `gift_got`), moved through the site's signed `ledger/gift` |
 | `crowns.go` | Game of Crowns between real players: a ticket challenges the street, four play in a private arena, the server decides the holder, tags, locks and the clock below the play line from reported positions, and the winner's currants go through the site's signed `ledger/crowns` |
 | `credits.go` | What the server decides a player gets (currants quoins and their shards, race wins, takes from shared rocks, trees and nodes) goes to the site's ledger as signed batches (`POST /groddle/v1/ledger/credits`, idempotent per event id); at least once while the process runs (in-memory outbox, backoff 1 s to 60 s); needs `-ledger-url` |
+| `follow.go` | Following another player: the ask and the leader's OK, the follower sent where the leader went (street to street and on a teleport), what ends it (any input, a private place, offline), streets followed (Stalker), teleports with followers counted at teleport_complete (Three's a Cloud, the Licensed Teleporter counters) and the Glitch Train chain |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
