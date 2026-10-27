@@ -147,7 +147,8 @@ func TestTheLayoutLoads(t *testing.T) {
 		t.Skipf("the fruit caps are checked against the game repo's trants.json: none at %s (set GRODDLE_GAME_DIR)", game)
 	}
 	var trants map[string]struct {
-		FruitCapMap [][]int `json:"fruitCapMap"`
+		FruitCapMap  [][]int `json:"fruitCapMap"`
+		FruitProdMap [][]int `json:"fruitProdMap"`
 	}
 	if err := json.Unmarshal(raw, &trants); err != nil {
 		t.Fatal(err)
@@ -157,6 +158,9 @@ func TestTheLayoutLoads(t *testing.T) {
 			for h := 1; h <= 10; h++ {
 				if got, want := w.capAt(class, m, h), row.FruitCapMap[m-1][h-1]; got != want {
 					t.Fatalf("%s cap(%d,%d) = %d, trants.json has %d", class, m, h, got, want)
+				}
+				if got, want := w.prodAt(class, m, h), row.FruitProdMap[m-1][h-1]; got != want {
+					t.Fatalf("%s prod(%d,%d) = %d, trants.json has %d", class, m, h, got, want)
 				}
 			}
 		}
@@ -326,8 +330,21 @@ func TestATreeIsSharedButHarvestLimitsAreNot(t *testing.T) {
 	r.act(b, 2, "tree:0", "water", map[string]any{"skill": "light_green_thumb_1"})
 	ok = r.only(b, "obj_ok")
 	tree := objOf(ok, "tree:0")
-	if tree["watered"] != true || num(tree["health"]) != 8 || num(tree["cap"]) != float64(sharedWorld.capAt("trant_fruit", 10, 8)) {
-		t.Fatalf("water after pet answered %v", ok)
+	// G361: the health rise regrows the fruit (plusHealth's onFruitCycle: fruitProdMap, up to the cap).
+	cap8 := sharedWorld.capAt("trant_fruit", 10, 8)
+	fruit8 := min(cap8, capFresh-12+sharedWorld.prodAt("trant_fruit", 10, 8))
+	if tree["watered"] != true || num(tree["health"]) != 8 || num(tree["cap"]) != float64(cap8) || num(tree["fruit"]) != float64(fruit8) || num(ok["grew"]) != float64(fruit8-(capFresh-12)) {
+		t.Fatalf("water after pet answered %v, want fruit %d", ok, fruit8)
+	}
+	if got := objOf(r.only(a, "objs"), "tree:0"); num(got["fruit"]) != float64(fruit8) {
+		t.Fatalf("Ada sees the regrown tree as %v", got)
+	}
+	// Ada harvests again: the tree is short until someone tends it.
+	r.now = r.now.Add(time.Second)
+	r.act(a, 3, "tree:0", "harvest", map[string]any{"skill": "gardening_3"})
+	left := num(objOf(r.only(a, "obj_ok"), "tree:0")["fruit"])
+	if left != float64(fruit8-12) {
+		t.Fatalf("the second harvest left %v", left)
 	}
 	// A failed pet sets nothing (0.7 * 100 >= 60).
 	spot1 := sharedWorld.streets[defaultStreet]["tree:1"]
@@ -338,16 +355,126 @@ func TestATreeIsSharedButHarvestLimitsAreNot(t *testing.T) {
 		t.Fatalf("a failed pet answered %v", ok)
 	}
 
-	// The new game day: flags clear and fruit refills to 55-80% of the cap.
+	// G361: the new game day clears the flags and leaves the fruit as it was (GSJS never refills
+	// at the day turn: fruit comes back from tending and Fertilidust).
 	r.drain(a)
 	r.drain(b)
-	r.mod.roll = func() float64 { return 0 }
 	r.advance(time.Duration(gameDayMs) * time.Millisecond)
 	got := objOf(r.only(a, "objs"), "tree:0")
-	capNow := sharedWorld.capAt("trant_fruit", 10, 8)
-	want := max(capFresh-12, int(float64(capNow)*0.55))
-	if got["petted"] != false || got["watered"] != false || num(got["fruit"]) != float64(want) {
-		t.Fatalf("the new day reads %v, want fruit %d", got, want)
+	if got["petted"] != false || got["watered"] != false || num(got["fruit"]) != left || num(got["health"]) != 8 {
+		t.Fatalf("the new day reads %v, want fruit %v", got, left)
+	}
+	// A new window: pet and water again lift health once more and regrow the fruit.
+	r.drain(b)
+	r.mod.roll = func() float64 { return 0.5 }
+	r.act(a, 4, "tree:0", "pet", nil)
+	r.drain(a)
+	r.act(a, 5, "tree:0", "water", nil)
+	tree = objOf(r.only(a, "obj_ok"), "tree:0")
+	cap9 := sharedWorld.capAt("trant_fruit", 10, 9)
+	if num(tree["health"]) != 9 || num(tree["fruit"]) != float64(min(cap9, int(left)+sharedWorld.prodAt("trant_fruit", 10, 9))) {
+		t.Fatalf("the next day's tending reads %v", tree)
+	}
+}
+
+func TestTheDayTurnNeverRefillsATree(t *testing.T) {
+	r := newObjRig(t)
+	spot := sharedWorld.streets[defaultStreet]["tree:3"] // trant_fruit, maturity 7, health 7
+	a := r.player(1, "Ada", defaultStreet, spot.x, spot.y)
+	r.mod.get(defaultStreet, spot).fruit = 0
+	for day := 1; day <= 3; day++ {
+		r.drain(a)
+		r.advance(time.Duration(gameDayMs) * time.Millisecond)
+		if got := objOf(r.only(a, "objs"), "tree:3"); got == nil || num(got["fruit"]) != 0 {
+			t.Fatalf("day %d: an untended tree reads %v", day, got)
+		}
+	}
+	// One tending alone (pet only) grows nothing.
+	r.act(a, 1, "tree:3", "pet", nil)
+	if got := objOf(r.only(a, "obj_ok"), "tree:3"); num(got["fruit"]) != 0 || num(got["health"]) != 7 {
+		t.Fatalf("a pet alone reads %v", got)
+	}
+}
+
+func TestFertilidustGrowsTheStreetsTreesForEveryone(t *testing.T) {
+	r := newObjRig(t)
+	spots := sharedWorld.streets[defaultStreet]
+	t3, t5, wood := spots["tree:3"], spots["tree:5"], spots["tree:7"] // trant_fruit 7/7, trant_bubble 7/9, a Wood Tree
+	a := r.player(1, "Ada", defaultStreet, t3.x, t3.y)
+	b := r.player(2, "Bo", defaultStreet, 0, 0)
+	r.mod.get(defaultStreet, t3).fruit = 3
+	r.mod.get(defaultStreet, wood).maturity = 4
+	r.mod.get(defaultStreet, spots["tree:4"]).dead = true
+	r.drain(a)
+	r.drain(b)
+
+	r.send(a, map[string]any{"t": "obj_dust", "req": 1})
+	done := r.only(a, "obj_dusted")
+	ids, _ := done["ids"].([]any)
+	if num(done["req"]) != 1 || len(ids) != 7 { // every tree but the dead one
+		t.Fatalf("the dust answered %v", done)
+	}
+	seen := r.only(b, "objs")
+	// onFertilidust: maturity 7 -> 8, health 10, and plusHealth's fruit push.
+	got := objOf(seen, "tree:3")
+	want := min(sharedWorld.capAt("trant_fruit", 8, 10), 3+sharedWorld.prodAt("trant_fruit", 8, 10))
+	if num(got["maturity"]) != 8 || num(got["health"]) != 10 || num(got["fruit"]) != float64(want) || num(got["cap"]) != float64(sharedWorld.capAt("trant_fruit", 8, 10)) {
+		t.Fatalf("Bo sees the dusted tree as %v, want fruit %d", got, want)
+	}
+	if got := objOf(seen, "tree:5"); num(got["maturity"]) != 8 || num(got["health"]) != 10 || t5.class != "trant_bubble" {
+		t.Fatalf("Bo sees the dusted bubble tree as %v", got)
+	}
+	if got := objOf(seen, "tree:7"); num(got["maturity"]) != 5 {
+		t.Fatalf("the dusted Wood Tree reads %v", got)
+	}
+	if objOf(seen, "tree:4") != nil {
+		t.Fatal("a dead tree took the dust")
+	}
+	// A tree at maturity 10 stays at 10 and still goes to health 10 (tree:0 starts 10/7).
+	if got := objOf(seen, "tree:0"); num(got["maturity"]) != 10 || num(got["health"]) != 10 {
+		t.Fatalf("the grown tree reads %v", got)
+	}
+
+	// Fertilidust Lite: the tree named, if it is near.
+	r.now = r.now.Add(time.Second)
+	r.send(b, map[string]any{"t": "obj_dust", "req": 2, "id": "tree:3"})
+	if no := r.only(b, "obj_no"); no["code"] != "far" {
+		t.Fatalf("a Lite dust from across the street answered %v", no)
+	}
+	r.send(a, map[string]any{"t": "obj_dust", "req": 3, "id": "tree:3"})
+	if done := r.only(a, "obj_dusted"); len(done["ids"].([]any)) != 1 {
+		t.Fatalf("the Lite dust answered %v", done)
+	}
+	if got := objOf(r.only(b, "objs"), "tree:3"); num(got["maturity"]) != 9 {
+		t.Fatalf("Bo sees the Lite-dusted tree as %v", got)
+	}
+	for _, id := range []string{"rock:1", "pig:0", "tree:99"} {
+		r.now = r.now.Add(time.Second)
+		r.send(a, map[string]any{"t": "obj_dust", "req": 4, "id": id})
+		if no := r.only(a, "obj_no"); no["code"] != "unknown" {
+			t.Fatalf("a Lite dust on %s answered %v", id, no)
+		}
+	}
+	r.send(a, map[string]any{"t": "obj_dust", "req": 0})
+	if e := r.only(a, "error"); e["code"] != "bad_obj" {
+		t.Fatalf("a bad req answered %v", e)
+	}
+}
+
+func TestDevDayTurnOnlyWithTheFlag(t *testing.T) {
+	r := newObjRig(t)
+	spot := sharedWorld.streets[defaultStreet]["tree:0"]
+	a := r.player(1, "Ada", defaultStreet, spot.x, spot.y)
+	r.act(a, 1, "tree:0", "pet", nil)
+	r.drain(a)
+	r.send(a, map[string]any{"t": "obj_day_dev"})
+	if f := r.drain(a); len(f) != 0 {
+		t.Fatalf("without the flag obj_day_dev did %v", f)
+	}
+	r.mod.dev = true
+	r.send(a, map[string]any{"t": "obj_day_dev"})
+	if got := objOf(r.only(a, "objs"), "tree:0"); got["petted"] != false || num(got["fruit"]) != float64(sharedWorld.capAt("trant_fruit", 10, 7)) {
+		t.Fatalf("the dev day turn reads %v", got)
 	}
 }
 

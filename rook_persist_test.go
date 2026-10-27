@@ -92,6 +92,11 @@ func TestARookedTreeStaysRookedAcrossARestart(t *testing.T) {
 	if no := lastNo(r.drain(b)); no == nil || no["code"] != "rooked" || num(objOf(no, "tree:0")["fruit"]) != 0 {
 		t.Fatalf("watering it after the restart answered %v", no)
 	}
+	// G361: the rooked tree's fruit push the restart stopped goes on (objects.go get re-arms it).
+	r.advance(rookFruitEvery)
+	if tr := objs.streets[rookTestStreet]["tree:0"]; tr == nil || tr.fruit == 0 {
+		t.Fatalf("the rooked tree grew no fruit after the restart: %+v", tr)
+	}
 	// Ada's dose counted: she cannot give a second; two more finish it, and that is kept too.
 	a = r.player(1, "Ada")
 	r.send(a, map[string]any{"t": "rook_revive", "key": key})

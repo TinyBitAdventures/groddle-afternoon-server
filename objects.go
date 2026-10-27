@@ -14,6 +14,9 @@ package main
 //	{"t":"obj_mine","id":"rock:2","do":"start"}         a mining swing begins (or "stop": cancelled)
 //	{"t":"obj_dig","id":"node:dirt_pile:0","do":"start"} a dig at a Dirt Pile begins (or "stop")
 //	{"t":"obj_act","req":8,"id":"tree:1","verb":"poison"}  a Tree Poison pour landed ("antidote" too)
+//	{"t":"obj_dust","req":10}                            Fertilidust landed: every living tree on the street
+//	{"t":"obj_dust","req":11,"id":"tree:2"}              Fertilidust Lite landed on that tree (near you)
+//	{"t":"obj_day_dev"}                                  QA only, GRODDLE_TREES_DEV=1: the game day turns now
 //	{"t":"obj_dev","id":"pig:0","hunger":5,"tick":true}  QA only, GRODDLE_TREES_DEV=1 (objects_pigs.go pigDev)
 //	{"t":"obj_act","req":9,"id":"pig:0","verb":"pet","skill":"animalkinship_2"}  a Piggy (objects_pigs.go):
 //	                                                       pet, nibble, feed (perks ["sate"]), eat
@@ -27,7 +30,10 @@ package main
 //	{"t":"objs","street":"GA5…","objs":[State…]}           a change (to the others on the street)
 //	                                                       or a regrowth, respawn or new day (to everyone)
 //	{"t":"obj_ok","req":7,"id":"rock:2","verb":"mine","before":State,"obj":State,"chunks":7,"roll":0.31}
+//	                                                       (a tree's pet or water: "roll", "success", and
+//	                                                       "grew": the fruit the health rise brought back)
 //	{"t":"obj_no","req":7,"id":"rock:2","verb":"mine","code":"empty","message":"…","obj":State}
+//	{"t":"obj_dusted","req":10,"ids":["tree:0","tree:3"]}  the trees the dust grew (all hear "objs")
 //	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
 //	{"t":"obj_dig","id":"node:dirt_pile:0","helping":true}    your dig joined someone else's
 //	{"t":"obj_ev","street":"GA5…","id":"pig:0","ev":"happy"}  a Piggy's twice-daily tick ("croak", or
@@ -81,7 +87,19 @@ package main
 //
 // A tree the Rook rooks (rook.go, through the hooks below) loses its fruit and
 // health for everyone, and refuses harvest, pet and water ("code":"rooked")
-// until it is revived.
+// until it is revived. While it stays rooked its fruit grows back, as the
+// source's rooked sequence and complaint run plusHealth (see rookFruit).
+//
+// Fruit (G361): a shared trant regrows fruit only as the source's do, never at
+// the game day turn (nothing in GSJS refills trees then; the day clears only
+// the tending flags, the remake's tending window). Fruit comes back when the
+// tree's health rises: pet and water, once each a window, by any players
+// (performTending 670-684: plusHealth, whose onFruitCycle 1043-1054 pushes
+// fruitProdMap[maturity][health] up to the capacity, pushFruit 466-473), and
+// with Fertilidust (onFertilidust 1236-1244: a maturity step below 10, health
+// 9 then plusHealth). The amounts are the server's own tables (rules.prod, the
+// game's trants.json fruitProdMap); a client says only that a pet, water or
+// dust landed. Fertilidust's jar is the player's own, as Tree Poison's is.
 //
 // What a player takes is theirs to apply, and the site's ledger is told what
 // the take was (credits.go, objCredit), so the save can show it outside the
@@ -120,6 +138,11 @@ const (
 	// last move can trail the swing by a frame or two.
 	objReachX = 700
 	objReachY = 500
+
+	// The rooked tree's fruit push (rookFruit): onRookedStep 6 at 12 s (events_add 12), then
+	// onRookedComplaint's drop and lift, 2000 ms apart (apiSetTimer 2000).
+	rookFruitFirst = 12 * time.Second
+	rookFruitEvery = 4 * time.Second
 
 	objBurst = 6.0 // actions and syncs in a burst
 	objEvery = 4.0 // then this many a second
@@ -199,6 +222,9 @@ type objRules struct {
 	Harvest map[string]int                `json:"harvest"`
 	Care    map[string]map[string]float64 `json:"care"`
 	Trants  map[string][][]int            `json:"trants"`
+	// Prod is each trant's fruitProdMap (include/trants.js onFruitCycle 1043-1054): what one
+	// health rise pushes back on, by maturity and health.
+	Prod map[string][][]int `json:"prod"`
 	// Dig is catalog_skill_packages.js dig_dirt_pile by skill: drop_chance (percent) and bonus_amount.
 	Dig map[string]struct {
 		Drop  float64 `json:"drop"`
@@ -317,6 +343,15 @@ func (w *objWorld) capAt(class string, maturity, health int) int {
 	return t[maturity-1][health-1]
 }
 
+// prodAt is include/trants.js onFruitCycle's fruitProdMap[maturity-1][health-1], 0 outside the table.
+func (w *objWorld) prodAt(class string, maturity, health int) int {
+	t := w.rules.Prod[class]
+	if maturity < 1 || health < 1 || maturity > len(t) || health > len(t[maturity-1]) {
+		return 0
+	}
+	return t[maturity-1][health-1]
+}
+
 var sharedWorld *objWorld
 
 func init() {
@@ -377,6 +412,10 @@ type liveObj struct {
 	stop func() bool // that timer
 	// resetStop is the Paper Tree's flag reset timer.
 	resetStop func() bool
+	// rookStop is a rooked tree's next fruit push (rookFruit); rookSteady: its fruit stopped
+	// changing, so no push is due until it is rooked again or its health or maturity moves.
+	rookStop   func() bool
+	rookSteady bool
 }
 
 type objBucket struct {
@@ -423,6 +462,8 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_mine", o.kept(o.handleMine))
 	r.Handle("obj_dig", o.kept(o.handleDig))
 	r.Handle("obj_dev", o.kept(o.pigDev))
+	r.Handle("obj_dust", o.kept(o.handleDust))
+	r.Handle("obj_day_dev", o.kept(o.dayDev))
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
@@ -468,8 +509,45 @@ func (o *objects) rookTree(street, id string) bool {
 		loss = 1
 	}
 	ob.health = max(1, ob.health-loss)
+	ob.cap = o.w.capAt(spot.class, ob.maturity, ob.health)
 	o.broadcast(street, 0, ob)
+	// onRookedStep 6 (12 s on) is the sequence's last plusHealth; the complaint follows it.
+	o.armRookFruit(street, ob, rookFruitFirst)
 	return true
+}
+
+// rookFruit is the fruit a rooked trant grows back while it waits (include/trants.js 1170-1232):
+// onRookedStep 2 and 6 run plusHealth, and onRookedComplaint then drops its health one and lifts it
+// back every 2 s until it is revived, each lift a plusHealth whose onFruitCycle pushes
+// fruitProdMap[maturity][health], each drop an updateFruitCap that trims the fruit to the lower
+// health's capacity (minusHealth). The server keeps the sequence's net health (two down, as the
+// source's comment at 1144 says) and runs one drop and lift every 4 s from step 6 on, so a
+// revived tree has the fruit it grew while rooked (unRook leaves it; trants have no onRevived).
+// Harvest, pet and water still wait for the revival. The push stops once the fruit stops
+// changing, and goes on (get) after a restart or a change to the tree.
+func (o *objects) armRookFruit(street string, ob *liveObj, d time.Duration) {
+	if ob.rookStop != nil {
+		ob.rookStop()
+	}
+	ob.rookSteady = false
+	ob.rookStop = o.h.After(d, func() {
+		ob.rookStop = nil
+		if o.streets[street][ob.spot.id] != ob || ob.dead || !o.rooked(street, ob.spot.id) {
+			return
+		}
+		class := ob.spot.class
+		before := ob.fruit
+		low := o.w.capAt(class, ob.maturity, ob.health-1)
+		ob.cap = o.w.capAt(class, ob.maturity, ob.health)
+		ob.fruit = min(ob.cap, min(ob.fruit, low)+o.w.prodAt(class, ob.maturity, ob.health))
+		if ob.fruit == before {
+			ob.rookSteady = true
+			return
+		}
+		o.broadcast(street, 0, ob)
+		o.saveSoon()
+		o.armRookFruit(street, ob, rookFruitEvery)
+	})
 }
 
 // rooked asks the Rook whether a shared tree is rooked: harvest, pet and water wait for its revival
@@ -563,6 +641,10 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 	}
 	if spot.kind == "tree" {
 		o.newDay(ob)
+		// A rooked tree whose fruit push is not running (a restart, or a change since it settled).
+		if !ob.dead && ob.rookStop == nil && !ob.rookSteady && o.rooked(street, spot.id) {
+			o.armRookFruit(street, ob, rookFruitEvery)
+		}
 	}
 	if spot.kind == "wood" && ob.day < o.today() {
 		// A new game day: everyone may harvest it again (canHarvest by intervals[today]).
@@ -1284,12 +1366,17 @@ func (o *objects) tendTree(ob *liveObj, verb, skill string) verdict {
 			} else {
 				ob.watered = true
 			}
-			// include/trants.js performTending 670-684: both together lift health once.
+			// include/trants.js performTending 670-684: both together lift health once, and that
+			// plusHealth (697-704) regrows the fruit (onFruitCycle 1043-1054).
+			grew := 0
 			if ob.petted && ob.watered {
 				ob.health = min(10, max(1, ob.health+1))
+				grew = o.fruitCycle(ob)
+			} else {
+				ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
+				ob.fruit = min(ob.fruit, ob.cap)
 			}
-			ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
-			ob.fruit = min(ob.fruit, ob.cap)
+			return verdict{ok: true, extra: map[string]any{"roll": roll, "success": success, "grew": grew}}
 		}
 		return verdict{ok: true, extra: map[string]any{"roll": roll, "success": success}}
 	}
@@ -1358,9 +1445,19 @@ func (o *objects) killTree(street string, ob *liveObj, by int64) {
 	o.broadcast(street, 0, ob)
 }
 
-// newDay is game.js resetAllTrantsForNewDay for one tree: the tending flags
-// clear and the fruit refills to 55-80% of what it can hold (never less than
-// it has).
+// fruitCycle is include/trants.js onFruitCycle 1043-1054 on the shared tree, as plusHealth runs it:
+// the capacity for its maturity and health (updateFruitCap 1026-1041), then that fruitProdMap cell
+// pushed back on, never past the capacity (pushFruit 466-473). The fruit it added.
+func (o *objects) fruitCycle(ob *liveObj) int {
+	ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
+	before := min(ob.fruit, ob.cap)
+	ob.fruit = min(ob.cap, before+o.w.prodAt(ob.spot.class, ob.maturity, ob.health))
+	return ob.fruit - before
+}
+
+// newDay is game.js resetAllTrantsForNewDay for one tree: the tending flags clear, a new window
+// to pet and water it. The fruit stays as it is: GSJS never refills trees at the day turn (fruit
+// comes back from tending and Fertilidust: fruitCycle).
 func (o *objects) newDay(ob *liveObj) bool {
 	today := o.today()
 	if ob.day >= today || ob.dead {
@@ -1369,8 +1466,7 @@ func (o *objects) newDay(ob *liveObj) bool {
 	ob.day = today
 	ob.petted, ob.watered = false, false
 	ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
-	target := int(math.Floor(float64(ob.cap) * (0.55 + o.roll()*0.25)))
-	ob.fruit = min(ob.cap, max(ob.fruit, target))
+	ob.fruit = min(ob.fruit, ob.cap)
 	return true
 }
 
@@ -1383,28 +1479,144 @@ func (o *objects) armDay() {
 	next := gameEpochMs + (o.today()+1)*gameDayMs
 	o.dayStop = o.h.After(time.Duration(next-now+50)*time.Millisecond, func() {
 		o.dayStop = nil
-		trees := false
-		for street, room := range o.streets {
-			var changed []*liveObj
-			for _, ob := range room {
-				if ob.spot.kind != "tree" {
-					continue
-				}
-				trees = true
-				if o.newDay(ob) {
-					changed = append(changed, ob)
-				}
-			}
-			if len(changed) > 0 {
-				o.broadcast(street, 0, changed...)
-			}
-			for _, ob := range changed {
-				o.forget(street, ob)
-			}
-		}
-		o.saveSoon()
-		if trees {
+		if o.rollDay() {
 			o.armDay()
 		}
 	})
+}
+
+// rollDay runs newDay on every touched tree and tells each street what changed; false when no
+// tree is held.
+func (o *objects) rollDay() bool {
+	trees := false
+	for street, room := range o.streets {
+		var changed []*liveObj
+		for _, ob := range room {
+			if ob.spot.kind != "tree" {
+				continue
+			}
+			trees = true
+			if o.newDay(ob) {
+				changed = append(changed, ob)
+			}
+		}
+		if len(changed) > 0 {
+			o.broadcast(street, 0, changed...)
+		}
+		for _, ob := range changed {
+			o.forget(street, ob)
+		}
+	}
+	o.saveSoon()
+	return trees
+}
+
+// dayDev is GRODDLE_TREES_DEV=1 only, for QA: {"t":"obj_day_dev"} turns the game day for every
+// shared tree now, as armDay's timer does at the real turn.
+func (o *objects) dayDev(cl *Client, _ json.RawMessage) {
+	if !o.dev || cl.Street() == "" {
+		return
+	}
+	today := o.today()
+	for _, room := range o.streets {
+		for _, ob := range room {
+			if ob.spot.kind == "tree" && ob.day >= today {
+				ob.day = today - 1
+			}
+		}
+	}
+	log.Printf("objects: dev day turn for every shared tree (asked by %d)", cl.ID())
+	o.rollDay()
+}
+
+// handleDust is Fertilidust landing on the street's shared trees (fertilidust.js onUse 266-345:
+// every trant and Wood Tree of the location, the onFertilidust event 3 s on, which the client
+// waits before it sends this; fertilidust_lite.js onUse 266-296: the closest tree, findCloseStack,
+// so its id must be near). The jar, its charge and its lines are the player's own. Trees a client
+// grew in its own Patches are not shared and never named here.
+func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
+	var m struct {
+		Req int64  `json:"req"`
+		ID  string `json:"id"`
+	}
+	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.ID) > 40 {
+		o.h.ErrorLocked(cl, "bad_obj", "That object message did not check out.")
+		return
+	}
+	no := func(code, message string) {
+		o.h.SendLocked(cl, map[string]any{"t": "obj_no", "req": m.Req, "id": m.ID, "verb": "dust", "code": code, "message": message})
+	}
+	if !o.allow(cl) {
+		no("slow_down", "Slow down a little.")
+		return
+	}
+	street := cl.Street()
+	spots := o.w.streets[street]
+	var targets []*objSpot
+	if m.ID != "" {
+		spot := spots[m.ID]
+		if street == "" || spot == nil || (spot.kind != "tree" && spot.kind != "wood") {
+			no("unknown", "That is not something here.")
+			return
+		}
+		if x, y := cl.Pos(); math.Abs(x-spot.x) > objReachX || math.Abs(y-spot.y) > objReachY {
+			no("far", "You need to be closer.")
+			return
+		}
+		targets = append(targets, spot)
+	} else {
+		for _, spot := range spots {
+			if spot.kind == "tree" || spot.kind == "wood" {
+				targets = append(targets, spot)
+			}
+		}
+		sort.Slice(targets, func(i, j int) bool { return targets[i].id < targets[j].id })
+	}
+	ids := []string{}
+	var touched, changed []*liveObj
+	for _, spot := range targets {
+		ob := o.get(street, spot)
+		touched = append(touched, ob)
+		if o.fertilize(street, ob) {
+			ids = append(ids, spot.id)
+			changed = append(changed, ob)
+		}
+	}
+	log.Printf("objects: Fertilidust on %s by %d grew %d of %d trees", street, cl.ID(), len(ids), len(targets))
+	o.h.SendLocked(cl, map[string]any{"t": "obj_dusted", "req": m.Req, "ids": ids})
+	if len(changed) > 0 {
+		o.broadcast(street, 0, changed...)
+	}
+	for _, ob := range touched {
+		o.forget(street, ob)
+	}
+}
+
+// fertilize is one tree's onFertilidust: a trant (include/trants.js 1236-1244) grows one maturity
+// below 10 (plusMaturity 785-790) and goes to health 9 and then plusHealth, which lifts it to 10 and
+// regrows its fruit (fruitCycle); a Wood Tree (wood_tree.js onFertilidust 870-874) grows one below
+// 6. A dead tree, or a Wood Tree already cleared (onDie: gone in the source), takes nothing. True
+// when the tree changed.
+func (o *objects) fertilize(street string, ob *liveObj) bool {
+	if ob.dead {
+		return false
+	}
+	if ob.spot.kind == "wood" {
+		if ob.maturity <= 0 || ob.maturity >= 6 {
+			return false
+		}
+		ob.maturity++
+		return true
+	}
+	before := [3]int{ob.maturity, ob.health, ob.fruit}
+	if ob.maturity < min(10, len(o.w.rules.Trants[ob.spot.class])) {
+		ob.maturity++
+	}
+	ob.health = 10
+	o.fruitCycle(ob)
+	if o.rooked(street, ob.spot.id) {
+		// Its capacity moved: the rooked tree's fruit push goes on from here.
+		o.armRookFruit(street, ob, rookFruitEvery)
+	}
+	return before != [3]int{ob.maturity, ob.health, ob.fruit}
 }
