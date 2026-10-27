@@ -12,6 +12,12 @@ package main
 //	{"t":"obj_sync"}                                    after a join: the street's state, please
 //	{"t":"obj_act","req":7,"id":"rock:2","verb":"mine","perks":["luck"],"skill":"gardening_2"}
 //	{"t":"obj_mine","id":"rock:2","do":"start"}         a mining swing begins (or "stop": cancelled)
+//	{"t":"obj_dig","id":"node:dirt_pile:0","do":"start"} a dig at a Dirt Pile begins (or "stop")
+//	{"t":"obj_act","req":8,"id":"tree:1","verb":"poison"}  a Tree Poison pour landed ("antidote" too)
+//	{"t":"obj_dev","id":"pig:0","hunger":5,"tick":true}  QA only, GRODDLE_TREES_DEV=1 (objects_pigs.go pigDev)
+//	{"t":"obj_act","req":9,"id":"pig:0","verb":"pet","skill":"animalkinship_2"}  a Piggy (objects_pigs.go):
+//	                                                       pet, nibble, feed (perks ["sate"]), eat
+//	                                                       ("on":"tree:3" when it ate a tree's fruit)
 //
 // Server to client:
 //
@@ -23,14 +29,44 @@ package main
 //	{"t":"obj_ok","req":7,"id":"rock:2","verb":"mine","before":State,"obj":State,"chunks":7,"roll":0.31}
 //	{"t":"obj_no","req":7,"id":"rock:2","verb":"mine","code":"empty","message":"…","obj":State}
 //	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
+//	{"t":"obj_dig","id":"node:dirt_pile:0","helping":true}    your dig joined someone else's
+//	{"t":"obj_ev","street":"GA5…","id":"pig:0","ev":"happy"}  a Piggy's twice-daily tick ("croak", or
+//	                                                       "ate" with "on":"tree:3": it ate that fruit)
 //
 // A Wood Tree is tree:<i> too: {"id":"tree:3","maturity":5,"count":1}.
+//
+// Tree death (G334): a street tree is everyone's, so its poison and its death are the server's.
+// A pour of Tree Poison (trant_base / wood_tree apply_poison, the potion's onPourComplete) starts
+// the source's three-minute die timer (include/trants.js applyPoison 1268-1274, wood_tree.js
+// 578-586); anyone's antidote (apply_antidote, cure) stops it; at the end the tree dies for
+// everyone, on the street or off it (die 734-773: the dead trant class; wood_tree.js onDie: a
+// Patch and 25 Planks). A tree State then reads "poison": ms left and "by": who poured it, and
+// "dead": true once it died. A dead tree refuses every verb ("code":"dead") and never comes back
+// while the server runs: what grows in its plot is each player's own Patch, as every street Patch
+// is in multiplayer. The poisoner is credited the dead Wood Tree's 25 Planks (credits.go "take").
+// A rooked tree at health 1 dies too (trants.js onRooked 1151); solo keeps it at 1.
+// The source's hourly neglect (onInterval 576-664: health falls every 15 to 120 minutes by
+// health_change_rate unless petted and watered in time, onMaturityCycle's 10-35% death roll at
+// health 1-3, a 2% a day old-age roll) is not run, in solo or here: register G45 is Austin's open
+// call ("later; a gentle hourly-care version"). With real players it would reward a busy street
+// (any player's pet and water count, and a pair resets the fall clock) and kill nearly every
+// tree on the empty ones, which is why it waits.
+//
+// Help digging (G329, dirt_pile.js addDigger 153-166, removeDigger 497-521, onDigComplete
+// 293-485): a Dirt Pile keeps a dig crew the way a rock keeps miners. Each digger's helpers are
+// the others who started digging while that dig ran (each counts once); when a dig lands its
+// answer carries "help":{"n":2,"items":1,"class":"earth","loam":false,"by":[…]}: 1 more item with
+// one helper, 2 with three, 3 with six; a 5% (two helpers) or 15% (six) chance that the dig's
+// yield is Loam, normalised against the skill's own drop chance (which the server rolls too: "roll"
+// is the client's first draw); the bonus items are Loam when either Loam came. Peat Bogs have no
+// helpers in the source (peat_1.js), so they have none here.
 //
 // State: {"id":"rock:2","chunks":43,"mega":false,"in":0,"miners":[3,7]} (in: ms to the
 // respawn; miners: who is swinging at it now, so the verb reads "Help mine"),
 // {"id":"node:peat_1:0","units":3,"in":120000} (in: ms to the next +1; a Paper
-// Tree adds "petted","watered","reset"), {"id":"tree:1","fruit":40,"cap":98,
-// "health":8,"maturity":7,"petted":true,"watered":false}.
+// Tree adds "petted","watered","reset"; a Dirt Pile "diggers"), {"id":"tree:1","fruit":40,"cap":98,
+// "health":8,"maturity":7,"petted":true,"watered":false}, {"id":"pig:0","mood":1,"hunger":3,
+// "petted":false,"daily":true,"croak":false,"in":3600000} (in: ms to its next twice-daily tick).
 //
 // Ids are the client's own (js/street-objects.js): rock:<i>, tree:<i>,
 // node:<class>:<n>. data/objects.json (tools/build-realtime-objects.mjs) lays
@@ -62,6 +98,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -88,12 +125,18 @@ const (
 	// js/game-day.js: Glitch's game day is four real hours from GAME_EPOCH_MS.
 	gameEpochMs = 1_238_562_000_000
 	gameDayMs   = 14_400_000
+
+	// include/trants.js applyPoison 1268-1274 (wood_tree.js 578-586): var duration = 3*60.
+	treePoison = 3 * time.Minute
+	// wood_tree.js onDie: createItemStack('plank', 25) beside the Patch (js/tree-poison.js DEAD_WOOD_PLANKS).
+	deadWoodPlanks = 25
 )
 
 var (
-	objIDRe  = regexp.MustCompile(`^(?:(rock|tree):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
-	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true}
-	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true}
+	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
+	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
+		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true}
+	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true}
 )
 
 // The source's refusals (items/*.js), with the remake's copy where the source
@@ -108,6 +151,14 @@ var notReady = map[string]string{
 	"rock":            "This is not the rock you are looking for.", // include/mining.js:216
 	"tree":            "There's nothing to pick, cowboy.",          // include/trants.js:235
 }
+
+// Tree Poison copy (js/tree-poison.js POISON_COPY, from trant_base and the potions; the remake's
+// plain words where the source only hides the verb).
+const (
+	noPoisonedTree = "There are no poisoned trees nearby." // tree_poison_antidote.js canPour
+	alreadyPoison  = "That tree is already poisoned."
+	treeIsDead     = "This tree has died."
+)
 
 // ---------------------------------------------------------------------------
 // The layout and rules (data/objects.json)
@@ -146,12 +197,19 @@ type objRules struct {
 	Harvest map[string]int                `json:"harvest"`
 	Care    map[string]map[string]float64 `json:"care"`
 	Trants  map[string][][]int            `json:"trants"`
+	// Dig is catalog_skill_packages.js dig_dirt_pile by skill: drop_chance (percent) and bonus_amount.
+	Dig map[string]struct {
+		Drop  float64 `json:"drop"`
+		Bonus int     `json:"bonus"`
+	} `json:"dig"`
+	// Pig is the Animal Kinship success rates (percent) for a Piggy's pet and nibble by rank.
+	Pig map[string]map[string]float64 `json:"pig"`
 }
 
 // objSpot is one object as laid out: its kind, class, place and (trees) its fresh maturity and health.
 type objSpot struct {
 	id       string
-	kind     string // rock | node | tree | wood (a Wood Tree: tree:<i> like the trants)
+	kind     string // rock | node | tree | wood (a Wood Tree: tree:<i> like the trants) | pig
 	class    string
 	x, y     float64
 	maturity int
@@ -161,6 +219,9 @@ type objSpot struct {
 type objWorld struct {
 	rules   objRules
 	streets map[string]map[string]*objSpot
+	// sad: streets where a Piggy is sad (include/animal_sadness.js locationIsDepressing); its tick
+	// waits and its verbs refuse (npc_piggy.js onTwiceDaily 1834, verb conditions).
+	sad map[string]bool
 }
 
 func loadObjWorld(raw []byte) (*objWorld, error) {
@@ -170,12 +231,14 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			Rocks [][]any `json:"rocks"`
 			Trees [][]any `json:"trees"`
 			Nodes [][]any `json:"nodes"`
+			Pigs  [][]any `json:"pigs"`
+			Sad   bool    `json:"sad"`
 		} `json:"streets"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}}
+	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}, sad: map[string]bool{}}
 	num := func(v any) (float64, bool) { f, ok := v.(float64); return f, ok }
 	str := func(v any) (string, bool) { s, ok := v.(string); return s, ok }
 	for tsid, row := range file.Streets {
@@ -221,6 +284,22 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			}
 			id := "node:" + key
 			spots[id] = &objSpot{id: id, kind: "node", class: class, x: x, y: y}
+		}
+		for _, r := range row.Pigs {
+			if len(r) < 3 {
+				return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
+			}
+			i, ok1 := num(r[0])
+			x, ok2 := num(r[1])
+			y, ok3 := num(r[2])
+			if !(ok1 && ok2 && ok3) {
+				return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
+			}
+			id := "pig:" + strconv.Itoa(int(i))
+			spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y}
+		}
+		if row.Sad {
+			w.sad[tsid] = true
 		}
 		w.streets[tsid] = spots
 	}
@@ -269,8 +348,25 @@ type liveObj struct {
 	woodCount  int            // wood: harvest_count (wood_tree.js 732-782)
 	woodBy     map[int64]bool // wood: who harvested it this game day (the source's intervals[today][pc])
 
+	// tree, wood: Tree Poison's die timer and who poured it; dead once it ran out (or the Rook
+	// struck a tree at health 1), with deadBy the poisoner (0: the Rook).
+	poisonEnd  time.Time
+	poisonBy   int64
+	poisonStop func() bool
+	dead       bool
+	deadBy     int64
+
+	// pig (objects_pigs.go): npc_piggy.js instanceProps mood and hunger, is_daily, has_been_petted,
+	// the croak, the next onTwiceDaily tick, and who petted it on which game day (petters).
+	mood, hunger int
+	daily        bool
+	croak        bool
+	tickAt       time.Time
+	petters      map[int64]int64
+
 	// rock: who is mining it now, in the order they started, and each miner's helpers with how
-	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122).
+	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122). A Dirt Pile keeps its
+	// diggers and their helpers here too (dirt_pile.js addDigger 153-166: each helper once).
 	miners  []int64
 	helpers map[int64]map[int64]int
 
@@ -292,10 +388,15 @@ type objects struct {
 	streets map[string]map[string]*liveObj
 	limits  map[int64]*objBucket
 	dayStop func() bool
+	pigStop func() bool // the one timer for the next Piggy tick (objects_pigs.go)
+	pigDue  time.Time
+	// dev (GRODDLE_TREES_DEV=1): a poison pour may name its own die time ("ms"), for QA.
+	dev bool
 }
 
 func newObjects(h *Hub) Module {
-	return &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{}}
+	return &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{},
+		dev: os.Getenv("GRODDLE_TREES_DEV") == "1"}
 }
 
 func (o *objects) Register(r *Registry) {
@@ -303,31 +404,43 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_act", o.handleAct)
 	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()) })
 	r.Handle("obj_mine", o.handleMine)
+	r.Handle("obj_dig", o.handleDig)
+	r.Handle("obj_dev", o.pigDev)
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
 }
 
-// treeClass is the class of the tree an id names on a street ("" when it names no tree there), so the
-// Rook can check the tree a client pairs with one of its keys (rook_sync "objs").
+// treeClass is the class of the tree an id names on a street ("" when it names no tree there, or a
+// tree that died), so the Rook can check the tree a client pairs with one of its keys (rook_sync "objs").
 func (o *objects) treeClass(street, id string) string {
 	spot := o.w.streets[street][id]
 	if spot == nil || (spot.kind != "tree" && spot.kind != "wood") {
+		return ""
+	}
+	if ob := o.streets[street][id]; ob != nil && ob.dead {
 		return ""
 	}
 	return spot.class
 }
 
 // rookTree is items/include/trants.js onRooked 1140-1151 on the shared tree, as the client does on
-// its copy (js/rook-attack.js rookTrantState): every fruit gone, health down 2 (1 at health 2), never
-// below 1 (a tree at health 1 dies in the source; tree death is not shared yet). Everyone on the
-// street is told. False when the id names no tree there.
+// its copy (js/rook-attack.js rookTrantState): every fruit gone, health down 2 (1 at health 2). A tree
+// already at health 1 dies, as in the source (1151; solo keeps it at 1). Everyone on the street is
+// told. False when the id names no living tree there.
 func (o *objects) rookTree(street, id string) bool {
 	spot := o.w.streets[street][id]
 	if spot == nil || spot.kind != "tree" {
 		return false
 	}
 	ob := o.get(street, spot)
+	if ob.dead {
+		return false
+	}
+	if ob.health <= 1 {
+		o.killTree(street, ob, 0)
+		return true
+	}
 	ob.fruit = 0
 	loss := 2
 	if ob.health == 2 {
@@ -387,6 +500,8 @@ func (o *objects) fresh(spot *objSpot) *liveObj {
 		ob.day = o.today()
 	case "wood":
 		ob.maturity, ob.day = spot.maturity, o.today()
+	case "pig":
+		o.freshPig(ob)
 	}
 	return ob
 }
@@ -397,12 +512,13 @@ func (o *objects) isFresh(ob *liveObj) bool {
 	case "rock":
 		return ob.chunks == o.w.rules.Rocks[s.class].Chunks && !ob.mega && ob.stop == nil && len(ob.miners) == 0
 	case "node":
-		return ob.units == o.w.rules.Nodes[s.class].Initial && !ob.petted && !ob.watered && ob.stop == nil && ob.resetStop == nil
+		return ob.units == o.w.rules.Nodes[s.class].Initial && !ob.petted && !ob.watered && ob.stop == nil && ob.resetStop == nil && len(ob.miners) == 0
 	case "tree":
-		return ob.fruit == ob.cap && ob.maturity == s.maturity && ob.health == s.health && !ob.petted && !ob.watered
+		return ob.fruit == ob.cap && ob.maturity == s.maturity && ob.health == s.health && !ob.petted && !ob.watered && !ob.dead && ob.poisonEnd.IsZero()
 	case "wood":
-		return ob.maturity == s.maturity && ob.woodCount == 0 && len(ob.woodBy) == 0
+		return ob.maturity == s.maturity && ob.woodCount == 0 && len(ob.woodBy) == 0 && !ob.dead && ob.poisonEnd.IsZero()
 	}
+	// A Piggy keeps its own clock once the street has one: never forgotten.
 	return false
 }
 
@@ -419,6 +535,9 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 		room[spot.id] = ob
 		if spot.kind == "tree" {
 			o.armDay()
+		}
+		if spot.kind == "pig" {
+			o.armPigs()
 		}
 	}
 	if spot.kind == "tree" {
@@ -464,12 +583,31 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		if o.w.rules.Nodes[s.class].Tend != nil {
 			m["petted"], m["watered"], m["reset"] = ob.petted, ob.watered, left(ob.resetAt)
 		}
+		if len(ob.miners) > 0 {
+			m["diggers"] = append([]int64(nil), ob.miners...)
+		}
 		return m
+	case "pig":
+		return map[string]any{"id": s.id, "mood": ob.mood, "hunger": ob.hunger, "petted": ob.petted, "daily": ob.daily, "croak": ob.croak, "in": left(ob.tickAt)}
 	case "wood":
-		return map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount}
+		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
 	default:
-		return map[string]any{"id": s.id, "fruit": ob.fruit, "cap": ob.cap, "health": ob.health, "maturity": ob.maturity, "petted": ob.petted, "watered": ob.watered}
+		return o.deathState(ob, map[string]any{"id": s.id, "fruit": ob.fruit, "cap": ob.cap, "health": ob.health, "maturity": ob.maturity, "petted": ob.petted, "watered": ob.watered})
 	}
+}
+
+// deathState adds a tree's poison ("poison": ms left, "by": who poured it) and death ("dead", "by").
+func (o *objects) deathState(ob *liveObj, m map[string]any) map[string]any {
+	if ob.dead {
+		m["dead"] = true
+		if ob.deadBy > 0 {
+			m["by"] = ob.deadBy
+		}
+	} else if !ob.poisonEnd.IsZero() {
+		m["poison"] = max(1, ob.poisonEnd.Sub(o.h.Now()).Milliseconds())
+		m["by"] = ob.poisonBy
+	}
+	return m
 }
 
 func (o *objects) broadcast(street string, except int64, obs ...*liveObj) {
@@ -494,6 +632,8 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 		o.h.SendLocked(cl, map[string]any{"t": "objs", "street": street, "snap": true, "none": true, "objs": []any{}})
 		return
 	}
+	// A street's Piggies start their clocks the first time anyone is there (objects_pigs.go).
+	o.wakePigs(street)
 	ids := make([]string, 0, len(o.streets[street]))
 	for id := range o.streets[street] {
 		ids = append(ids, id)
@@ -513,6 +653,8 @@ type objAct struct {
 	Verb  string   `json:"verb"`
 	Perks []string `json:"perks"`
 	Skill string   `json:"skill"`
+	On    string   `json:"on"` // eat: the tree whose fruit a Piggy ate
+	Ms    int64    `json:"ms"` // poison, GRODDLE_TREES_DEV=1 only: the die timer for QA
 }
 
 // verdict is what one verb decided: ok, or a refusal code and line; extra rides on obj_ok.
@@ -522,6 +664,7 @@ type verdict struct {
 	message string
 	extra   map[string]any
 	got     tradeGoods // what the player takes, credited to the site's ledger
+	also    []*liveObj // other objects the verb changed
 }
 
 // objFruit is each trant's fruit (js/trants.js:115-120; items/trant_*.js).
@@ -543,7 +686,7 @@ func refuse(code, message string) verdict { return verdict{code: code, message: 
 
 func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	var m objAct
-	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.Perks) > 8 || len(m.Skill) > 32 {
+	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.Perks) > 8 || len(m.Skill) > 32 || len(m.On) > 40 {
 		o.h.ErrorLocked(cl, "bad_obj", "That object message did not check out.")
 		return
 	}
@@ -568,7 +711,12 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		no("unknown", "That is not something here.", nil)
 		return
 	}
-	if x, y := cl.Pos(); math.Abs(x-spot.x) > objReachX || math.Abs(y-spot.y) > objReachY {
+	reachX, reachY := float64(objReachX), float64(objReachY)
+	if spot.kind == "pig" {
+		// A Piggy wanders and walks to food, each client's its own way: about two screens.
+		reachX, reachY = pigReachX, pigReachY
+	}
+	if x, y := cl.Pos(); math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY {
 		no("far", "You need to be closer.", nil)
 		return
 	}
@@ -581,26 +729,26 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	ob := o.get(street, spot)
 	before := o.state(ob)
 	var v verdict
-	switch spot.kind {
-	case "rock":
+	switch {
+	case spot.kind == "rock":
 		v = o.mine(street, ob, m.Verb, perks, cl.ID())
-	case "node":
-		v = o.useNode(street, ob, m.Verb, perks)
-	case "wood":
-		if o.rooked(street, spot.id) {
-			v = refuse("rooked", "It's rooked. Revive it first.")
-		} else {
-			v = o.chopWood(ob, m.Verb, cl.ID())
-		}
-	case "tree":
-		if o.rooked(street, spot.id) {
-			v = refuse("rooked", "It's rooked. Revive it first.")
-		} else {
-			v = o.tendTree(ob, m.Verb, m.Skill)
-		}
+	case spot.kind == "node":
+		v = o.useNode(street, ob, m.Verb, perks, cl.ID(), m.Skill)
+	case spot.kind == "pig":
+		v = o.tendPig(street, ob, m, perks, cl.ID())
+	case ob.dead:
+		v = refuse("dead", treeIsDead)
+	case m.Verb == "poison" || m.Verb == "antidote":
+		v = o.pour(street, ob, m.Verb, cl.ID(), m.Ms)
+	case o.rooked(street, spot.id):
+		v = refuse("rooked", "It's rooked. Revive it first.")
+	case spot.kind == "wood":
+		v = o.chopWood(ob, m.Verb, cl.ID())
+	default:
+		v = o.tendTree(ob, m.Verb, m.Skill)
 	}
-	if !v.ok && spot.kind == "rock" && ob.mining(cl.ID()) {
-		// A refused swing is over (cancelMining): off the rock, its helps taken back.
+	if !v.ok && (spot.kind == "rock" || spot.kind == "node") && ob.mining(cl.ID()) {
+		// A refused swing or dig is over (cancelMining, removeDigger): off the rock or pile, its helps taken back.
 		ob.removeMiner(cl.ID(), true)
 		o.broadcast(street, cl.ID(), ob)
 	}
@@ -619,6 +767,11 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		creditLocked(o.h, cl.ID(), "take", v.got)
 	}
 	o.broadcast(street, cl.ID(), ob)
+	for _, other := range v.also {
+		// Something else the verb changed (a Piggy ate a tree's fruit): everyone hears it.
+		o.broadcast(street, 0, other)
+		o.forget(street, other)
+	}
 	o.forget(street, ob)
 }
 
@@ -796,10 +949,47 @@ func (o *objects) handleMine(cl *Client, frame json.RawMessage) {
 	o.broadcast(street, 0, ob)
 }
 
-// leftStreet is miningSanityCheck 53-66: a player who leaves is off every rock, their helps taken back.
+// handleDig is a dig at a Dirt Pile starting or stopping (dirt_pile.js doDigging 202-234 adds the
+// digger before the skill package runs; onOverlayDismissed 486-489 is a cancel). "Help dig" is the
+// verb while someone else digs (getVerbLabel 273-281).
+func (o *objects) handleDig(cl *Client, frame json.RawMessage) {
+	var m struct {
+		ID string `json:"id"`
+		Do string `json:"do"`
+	}
+	if json.Unmarshal(frame, &m) != nil || (m.Do != "start" && m.Do != "stop") || !o.allow(cl) {
+		return
+	}
+	street := cl.Street()
+	spot := o.w.streets[street][m.ID]
+	if street == "" || spot == nil || spot.kind != "node" || spot.class != "dirt_pile" {
+		return
+	}
+	ob := o.get(street, spot)
+	if m.Do == "stop" {
+		if ob.mining(cl.ID()) {
+			ob.removeMiner(cl.ID(), true)
+			o.broadcast(street, 0, ob)
+		}
+		o.forget(street, ob)
+		return
+	}
+	if x, y := cl.Pos(); ob.units < o.w.rules.Nodes[spot.class].Ready || math.Abs(x-spot.x) > objReachX || math.Abs(y-spot.y) > objReachY {
+		o.forget(street, ob)
+		return
+	}
+	ob.removeMiner(cl.ID(), true)
+	helping := len(ob.miners) > 0
+	ob.addMiner(cl.ID())
+	o.h.SendLocked(cl, map[string]any{"t": "obj_dig", "id": m.ID, "helping": helping})
+	o.broadcast(street, 0, ob)
+}
+
+// leftStreet is miningSanityCheck 53-66 (dirt_pile.js onPlayerExit 491-495): a player who leaves is off
+// every rock and Dirt Pile, their helps taken back.
 func (o *objects) leftStreet(cl *Client, street string) {
 	for _, ob := range o.streets[street] {
-		if ob.spot.kind == "rock" && ob.mining(cl.ID()) {
+		if (ob.spot.kind == "rock" || ob.spot.kind == "node") && ob.mining(cl.ID()) {
 			ob.removeMiner(cl.ID(), true)
 			o.broadcast(street, 0, ob)
 			o.forget(street, ob)
@@ -850,7 +1040,7 @@ func (o *objects) regrowDelay(rule nodeRule) time.Duration {
 	return time.Duration(int64(n)*step) * time.Millisecond
 }
 
-func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[string]bool) verdict {
+func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[string]bool, user int64, skill string) verdict {
 	class := ob.spot.class
 	rule := o.w.rules.Nodes[class]
 	known := false
@@ -866,6 +1056,11 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 	if ob.units < rule.Ready {
 		return refuse("not_ready", notReady[class])
 	}
+	var dig verdict
+	if class == "dirt_pile" {
+		// The crew's bonus, read before the dig comes off (onDigComplete 293-462).
+		dig = o.digHelp(ob, user, skill)
+	}
 	if rule.After != nil {
 		// mortar_barnacle.js / ice_knob.js / jellisac.js: back to the first state.
 		ob.units = *rule.After
@@ -875,8 +1070,82 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 	}
 	// The regrow timer restarts on every use (resource-nodes.js harvestResourceNode).
 	o.schedule(street, ob, o.regrowDelay(rule), o.regrowNode)
+	if class == "dirt_pile" {
+		return dig
+	}
 	y := objNodeYield[class]
 	return verdict{ok: true, got: creditItem(y.c, y.n)}
+}
+
+// digHelp is dirt_pile.js onDigComplete 293-462 for one landed dig: the skill package's own Loam
+// drop (rolled here, sent as "roll" for the client's first draw), then the crew's bonus. With n
+// helpers (each counted once, num_keys(this.helpers[pc.tsid])): 1 bonus item past 0 helpers, 2
+// past 2, 3 past 5; a 5% chance past 1 helper, 15% past 5, that the dig's own yield is Loam
+// (normalised by 1 - drop_chance, since the drop was already missed: 380-389); the bonus items are
+// Loam when either Loam came (bonus_item_class). The digger is off the pile, its helpers kept for
+// the others (removeDigger(pc, false), 484). What the server decided is credited: the yield (the
+// skill's bonus_amount of Earth or Loam; a drop's Loam goes through the budget) and the bonus.
+func (o *objects) digHelp(ob *liveObj, digger int64, skill string) verdict {
+	pkg, ok := o.w.rules.Dig[skill]
+	if !ok {
+		pkg = o.w.rules.Dig["no_skill"]
+	}
+	n, by := 0, []string{}
+	for id := range ob.helpers[digger] {
+		n++
+		if cl := o.h.ClientLocked(id); cl != nil {
+			by = append(by, cl.Name())
+		}
+	}
+	sort.Strings(by)
+	items, chance := 0, 0.0
+	if n > 0 {
+		items++
+	}
+	if n > 1 {
+		chance += 0.05
+	}
+	if n > 2 {
+		items++
+	}
+	if n > 5 {
+		items++
+		chance += 0.1
+	}
+	roll := o.roll()
+	dropped := pkg.Drop > 0 && roll*100 < pkg.Drop
+	loam := false
+	if !dropped && chance > 0 {
+		c := chance / (1 - pkg.Drop/100)
+		loam = o.roll() < math.Min(1, c)
+	}
+	class := "earth"
+	if dropped || loam {
+		class = "loam"
+	}
+	ob.removeMiner(digger, false)
+	extra := map[string]any{"roll": roll}
+	var got tradeGoods
+	if !dropped {
+		yield := "earth"
+		if loam {
+			yield = "loam"
+		}
+		got = creditItem(yield, max(1, pkg.Bonus))
+	}
+	if n > 0 {
+		extra["help"] = map[string]any{"n": n, "items": items, "class": class, "loam": loam, "by": by}
+		if bonus := creditItem(class, items); !bonus.empty() {
+			if got.empty() {
+				got = bonus
+			} else if got.Items[0].C == class {
+				got.Items[0].N += items
+			} else {
+				got.Items = append(got.Items, bonus.Items[0])
+			}
+		}
+	}
+	return verdict{ok: true, extra: extra, got: got}
 }
 
 func (o *objects) regrowNode(street string, ob *liveObj) {
@@ -1000,12 +1269,62 @@ func (o *objects) tendTree(ob *liveObj, verb, skill string) verdict {
 	return refuse("bad_verb", "You can't do that to a tree.")
 }
 
+// pour is a Tree Poison or Antidote pour landing on a shared tree (the potions' onPourComplete:
+// trant_base / wood_tree applyPoison 1268-1274 and cure). The bottle, the guilt, the mood and the
+// Botany gate are the pourer's own (js/tree-poison.js). Poison starts the die timer for everyone;
+// an antidote from anyone stops it.
+func (o *objects) pour(street string, ob *liveObj, verb string, by int64, ms int64) verdict {
+	if verb == "antidote" {
+		if ob.poisonEnd.IsZero() {
+			return refuse("not_poisoned", noPoisonedTree)
+		}
+		if ob.poisonStop != nil {
+			ob.poisonStop()
+		}
+		ob.poisonEnd, ob.poisonBy, ob.poisonStop = time.Time{}, 0, nil
+		return verdict{ok: true}
+	}
+	if !ob.poisonEnd.IsZero() {
+		return refuse("poisoned", alreadyPoison)
+	}
+	d := treePoison
+	if o.dev && ms >= 1000 && ms < treePoison.Milliseconds() {
+		d = time.Duration(ms) * time.Millisecond
+	}
+	ob.poisonEnd, ob.poisonBy = o.h.Now().Add(d), by
+	var stop func() bool
+	stop = o.h.After(d, func() {
+		if o.streets[street][ob.spot.id] != ob || ob.poisonStop == nil || ob.dead {
+			return
+		}
+		o.killTree(street, ob, ob.poisonBy)
+	})
+	ob.poisonStop = stop
+	return verdict{ok: true, extra: map[string]any{"poison": d.Milliseconds()}}
+}
+
+// killTree is include/trants.js die 734-773 (and wood_tree.js onDie) on the shared tree: it is dead
+// for everyone from now on, here or away. The poisoner of a Wood Tree is credited its 25 Planks
+// (their client drops them beside the Patch). by 0: the Rook.
+func (o *objects) killTree(street string, ob *liveObj, by int64) {
+	if ob.poisonStop != nil {
+		ob.poisonStop()
+	}
+	ob.poisonEnd, ob.poisonBy, ob.poisonStop = time.Time{}, 0, nil
+	ob.dead, ob.deadBy = true, by
+	ob.fruit, ob.petted, ob.watered = 0, false, false
+	if ob.spot.kind == "wood" && by > 0 {
+		creditLocked(o.h, by, "take", creditItem("plank", deadWoodPlanks))
+	}
+	o.broadcast(street, 0, ob)
+}
+
 // newDay is game.js resetAllTrantsForNewDay for one tree: the tending flags
 // clear and the fruit refills to 55-80% of what it can hold (never less than
 // it has).
 func (o *objects) newDay(ob *liveObj) bool {
 	today := o.today()
-	if ob.day >= today {
+	if ob.day >= today || ob.dead {
 		return false
 	}
 	ob.day = today

@@ -94,7 +94,8 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `party.go` | Parties and party chat |
 | `party_spaces.go` | Party Spaces: a Party Pack opens one space for the party (spent through the site's ledger), with the shared clock, the Party ATM, party quoins and the creator's kick |
 | `quoins.go` | Shared street quoins: first to touch one gets it, players nearby get a shard |
-| `objects.go` | Rocks, resource nodes and trees: what one player takes is gone for everyone until it comes back |
+| `objects.go` | Rocks, resource nodes and trees: what one player takes is gone for everyone until it comes back; Tree Poison, its antidote and a street tree's death are shared (a dead Wood Tree's Planks credited to its poisoner; a rooked tree at health 1 dies); Dirt Pile dig crews |
+| `objects_pigs.go` | Street Piggies (`pig:<i>`): one mood, hunger and twice-daily tick for everyone; pet, nibble, feed and eating a tree's fruit decided by the server |
 | `rook.go` | Rook attacks fought by everyone on the street |
 | `races.go` | Grab 'Em Good and the finish-line races between real players |
 | `hoghaul.go` | The Great Hog Haul between real players on races.go's challenge: sacks, hogties, the pen and three wins decided from `data/hoghaul.json`; the winner credited through credits.go |
@@ -143,7 +144,7 @@ The game's tests fail when this data is out of date.
 One test compares tree fruit caps with the game's data, reading `../groddle-afternoon` (or
 `GRODDLE_GAME_DIR`), and skips when the game isn't there. `GRODDLE_ROOK_DEV=1` turns on `rook_dev`
 messages that start an attack or a wing beat on demand, for testing only, and `GRODDLE_PARTY_DEV=1`
-turns on `party_space_dev`, which brings a Party Space's end near. `GRODDLE_FEATS_DEV=1` turns on `feat_dev`, which ends today's Feat soon or opens another now.
+turns on `party_space_dev`, which brings a Party Space's end near. `GRODDLE_FEATS_DEV=1` turns on `feat_dev`, which ends today's Feat soon or opens another now. `GRODDLE_TREES_DEV=1` lets `obj_act` carry `ms` for a poison's clock and turns on `obj_dev`, which sets a Piggy's hunger or mood or runs its tick.
 
 ## Licence
 

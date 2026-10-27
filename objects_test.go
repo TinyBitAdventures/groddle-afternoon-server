@@ -236,7 +236,7 @@ func TestTheServerChecksWhereAndWhat(t *testing.T) {
 			t.Fatalf("%s answered %v", id, no)
 		}
 	}
-	r.act(a, 3, "rock:1", "eat", nil)
+	r.act(a, 3, "rock:1", "lick", nil)
 	if no := r.only(a, "obj_no"); no["code"] != "unknown" {
 		t.Fatalf("an unknown verb answered %v", no)
 	}
@@ -277,7 +277,8 @@ func TestSyncSendsWhatDiffersFromFresh(t *testing.T) {
 	spot := sharedWorld.streets[defaultStreet]["rock:1"]
 	a := r.player(1, "Ada", defaultStreet, spot.x, spot.y)
 	r.send(a, map[string]any{"t": "obj_sync"})
-	if snap := r.only(a, "objs"); snap["snap"] != true || len(snap["objs"].([]any)) != 0 || snap["none"] != nil {
+	// Only the street's Piggies, whose clocks start now (objects_pigs.go).
+	if snap := r.only(a, "objs"); snap["snap"] != true || len(notPigs(snap)) != 0 || snap["none"] != nil {
 		t.Fatalf("an untouched street syncs as %v", snap)
 	}
 	r.act(a, 1, "rock:1", "mine", nil)
