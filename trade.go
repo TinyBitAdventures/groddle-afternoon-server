@@ -86,6 +86,14 @@ package main
 // and voided.
 //
 // Server to client while settling: trade_state carries "settling":true.
+//
+// Trade requests (requests.go, register G329, players/inc_requests.js), part of this module:
+//
+//	{"t":"trade_request"}                    client: look for someone to trade with on this street (5 minutes)
+//	{"t":"trade_request_cancel"}             client: End trade
+//	{"t":"trade_request_accept","from":7}    client: Start negotiation! (a trade_start with the requester)
+//	{"t":"trade_requested","from":{"id":7,"name":"Ada"},"text":"…","timeout":300,"mine":false}  server: to the street and arrivals
+//	{"t":"trade_unrequested","from":7,"text":"…"}  server: it ended (accepted, End trade, timed out, the requester left)
 
 import (
 	"bufio"
@@ -267,6 +275,7 @@ type trades struct {
 	noLedger bool                   // the ledger is on but not set up: trades are refused
 	settling map[string]*settleWait // by trade id
 	spawn    func(func())           // runs a ledger call off the hub lock (tests run it in place)
+	req      *tradeRequests         // trade requests (requests.go)
 }
 
 func newTrades(h *Hub) Module {
@@ -336,6 +345,17 @@ func (m *trades) Register(r *Registry) {
 	r.Handle("trade_cancel", m.cancelMsg)
 	r.Handle("trade_check", m.check)
 	r.Handle("trade_ack", m.ack)
+	// Trade requests (requests.go, players/inc_requests.js): the player who accepts one starts a
+	// trade with the requester (inc_requests.js:117 from.trading_request_start), with start's checks.
+	m.req = newTradeRequests(m.h, func(cl *Client, id int64) {
+		m.start(cl, json.RawMessage(`{"id":`+strconv.FormatInt(id, 10)+`}`))
+	})
+	r.Handle("trade_request", m.req.post)
+	r.Handle("trade_request_cancel", m.req.cancelMsg)
+	r.Handle("trade_request_accept", m.req.accept)
+	r.OnJoin(m.req.joined)
+	r.OnLeave(m.req.left)
+	r.OnDisconnect(m.req.offline)
 	r.OnConnect(m.connected)
 	r.OnJoin(m.joined)
 	r.OnLeave(func(cl *Client, _ string) { m.left(cl) })
