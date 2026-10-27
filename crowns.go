@@ -128,13 +128,13 @@ var crownsJSON []byte
 const (
 	ledgerRouteCrowns = "/groddle/v1/ledger/crowns"
 
-	crownsInviteTimeout = 60 * time.Second  // inc_games.js 2398 / 2409
-	crownsStartDelay    = 5 * time.Second   // inc_games.js 2559
-	crownsAutoLeave     = 2 * time.Minute   // shared_instance_manager.js:210
-	crownsSoon          = 5 * time.Second   // shared_instance_manager.js:276
-	crownsGrace         = 15 * time.Second  // ours
-	crownsMaxLife       = 30 * time.Minute  // ours
-	crownsLinger        = 5 * time.Minute   // ours: a finished, empty match is forgotten
+	crownsInviteTimeout = 60 * time.Second // inc_games.js 2398 / 2409
+	crownsStartDelay    = 5 * time.Second  // inc_games.js 2559
+	crownsAutoLeave     = 2 * time.Minute  // shared_instance_manager.js:210
+	crownsSoon          = 5 * time.Second  // shared_instance_manager.js:276
+	crownsGrace         = 15 * time.Second // ours
+	crownsMaxLife       = 30 * time.Minute // ours
+	crownsLinger        = 5 * time.Minute  // ours: a finished, empty match is forgotten
 	crownsTickEvery     = 100 * time.Millisecond
 	crownsStateEvery    = time.Second // global_game.js it_game_tick every 1000 ms
 	crownsSlack         = 12.0        // px more across for a tag or a lock: moves arrive every 100 ms
