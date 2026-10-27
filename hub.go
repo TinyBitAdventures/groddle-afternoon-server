@@ -99,6 +99,7 @@ type Hub struct {
 	onJoin       []func(cl *Client)
 	onLeave      []func(cl *Client, street string)
 	onDisconnect []func(cl *Client)
+	onShutdown   []func()
 	joinGates    []func(cl *Client, street string) (ok bool, code, message string)
 	afterFunc    func(d time.Duration, fn func()) func() bool
 	provided     map[string]any // hooks one module offers another (Registry.Provide)
@@ -113,6 +114,16 @@ func NewHub(now func() time.Time) *Hub {
 		m(h).Register(&Registry{h: h})
 	}
 	return h
+}
+
+// Shutdown runs each module's shutdown hook once, under mu, after the HTTP server has stopped:
+// state saved within a second of a change is written now, not lost with the process.
+func (h *Hub) Shutdown() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, fn := range h.onShutdown {
+		fn()
+	}
 }
 
 // Stats counts characters online and streets with someone on them.

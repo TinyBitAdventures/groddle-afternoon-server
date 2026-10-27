@@ -52,6 +52,9 @@ func (r *Registry) OnDisconnect(fn func(cl *Client)) {
 	r.h.onDisconnect = append(r.h.onDisconnect, fn)
 }
 
+// OnShutdown runs once when the server stops (SIGTERM or an interrupt), after it stops taking requests.
+func (r *Registry) OnShutdown(fn func()) { r.h.onShutdown = append(r.h.onShutdown, fn) }
+
 // GateJoin may refuse a join before it happens (a private street such as a race's instance): the
 // character stays where it was and is told code and message. Every gate must agree.
 func (r *Registry) GateJoin(fn func(cl *Client, street string) (ok bool, code, message string)) {

@@ -417,6 +417,7 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_sync", o.kept(o.handleSync))
 	r.Handle("obj_act", o.kept(o.handleAct))
 	r.OnConnect(func(*Client) { o.resume() })
+	r.OnShutdown(func() { o.save() })
 	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()) })
 	r.Handle("obj_mine", o.kept(o.handleMine))
 	r.Handle("obj_dig", o.kept(o.handleDig))

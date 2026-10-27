@@ -196,6 +196,7 @@ func (m *quoinsModule) Register(r *Registry) {
 	r.OnConnect(func(cl *Client) { m.resume(); m.status[cl.ID()] = &quoinStatus{mult: 1} })
 	r.OnDisconnect(func(cl *Client) { delete(m.status, cl.ID()) })
 	r.Handle("quoin_sync", m.syncReq)
+	r.OnShutdown(func() { m.save() })
 }
 
 func (m *quoinsModule) statusOf(cl *Client) *quoinStatus {
