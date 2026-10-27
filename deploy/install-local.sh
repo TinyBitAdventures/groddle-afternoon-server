@@ -21,6 +21,12 @@ sed -e "s#__BIN__#$SITE/realtime/groddle-realtime#" -e "s#__ADDR__#$ADDR#" \
  -e "s#__LEDGER_URL__#$LEDGER_URL#" -e "s#__LEDGER_CA__#$LEDGER_CA#" \
     -e "s#__LABEL__#$LABEL#" "$(dirname "$0")/launchd.plist" > "$PLIST"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# bootout returns before the old agent is gone; bootstrapping too soon fails with "5: Input/output error".
+i=0
+while launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; do
+  i=$((i + 1)); [ $i -gt 40 ] && break
+  sleep 0.25
+done
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 i=0
 until curl -fsS "http://$ADDR/healthz" >/dev/null 2>&1; do
