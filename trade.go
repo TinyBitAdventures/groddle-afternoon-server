@@ -65,12 +65,27 @@ package main
 // the trade; a new socket for a character ends its open trade (the old page's
 // escrow comes back through trade_check); rates and caps.
 //
-// Client-trusted limits (saves are the client's in this phase): the server
-// cannot see packs, so it trusts that an offer is backed by items the client
-// moved into its hold; a modified client can offer what it does not have, or
-// never apply a done. What the server does guarantee: an offer is only ever
-// swapped once, both sides get the same record, and a swap is never both
-// completed and voided.
+// The ledger (G335, ledger.go): the Groddle site holds every multiplayer
+// character's currants and tradeable things. When both sides have accepted,
+// the trade is settling: it is journalled, the site is asked to move both
+// ledgers (refusing when a giver's ledger lacks what it gives), and only a
+// settled trade becomes a trade_done. While it settles neither side can
+// change, cancel or start a trade, and leaving or going offline does not end
+// it. With no answer the server voids it at the site; until the site has said
+// settled or void (it records exactly one), both players stay unsettled, and a
+// restart asks again when either one connects. The client's hold, done and
+// ack are unchanged: the site already counts a settled trade, and holds a
+// save that has not applied it yet to the ledger as it was before the trade.
+// A tool's points r are clamped to the class's capacity (trade.json pts).
+//
+// -trade-ledger off brings back the client-trusted swap (development only):
+// the server cannot see packs then, so a modified client can offer what it
+// does not have, or never apply a done. Without -ledger-url and with the
+// ledger on, trades are refused. Either way an offer is only ever swapped
+// once, both sides get the same record, and a swap is never both completed
+// and voided.
+//
+// Server to client while settling: trade_state carries "settling":true.
 
 import (
 	"bufio"
@@ -125,6 +140,8 @@ const (
 	tradeTextCurrants     = "You don't have enough currants for that."                                                                              // 846
 	tradeTextSeenStale    = "Their offer just changed. Have another look before you accept."                                                        // ours
 	tradeTextNotFinished  = "The trade could not be finished, so nothing changed hands."                                                            // ours
+	tradeTextSettling     = "The trade is being finished."                                                                                          // ours
+	tradeTextNoLedger     = "Trading is not set up on this server."                                                                                 // ours
 	tradeTextBusyHeard    = " wanted to trade with you, but you are busy."                                                                          // 151
 	tradeTextUnsettledHrd = " wanted to trade with you, but you have an unsettled previous trade."                                                  // 163
 )
@@ -143,6 +160,7 @@ type tradeClass struct {
 	Max    int    `json:"max"`
 	Name   string `json:"name"`
 	Plural string `json:"plural"`
+	Pts    int    `json:"pts,omitempty"` // a tool's points capacity
 }
 
 type tradeTable struct {
@@ -187,11 +205,21 @@ type tradeSide struct {
 }
 
 type openTrade struct {
-	id     string
-	street string
-	by     int64
-	sides  [2]*tradeSide
-	settle func() bool
+	id       string
+	street   string
+	by       int64
+	sides    [2]*tradeSide
+	settle   func() bool
+	settling bool // both accepted: the site's ledger is deciding
+}
+
+// settleWait is a trade waiting for the site's ledger: t is the open trade
+// (nil for one replayed from the journal after a restart).
+type settleWait struct {
+	rec   *tradeRecord
+	t     *openTrade
+	busy  bool // a call is out
+	tries int  // void calls that got no answer
 }
 
 func (t *openTrade) side(id int64) (me, them *tradeSide) {
@@ -225,16 +253,20 @@ func (r *tradeRecord) index(id int64) int {
 }
 
 type trades struct {
-	h       *Hub
-	table   tradeTable
-	boot    string
-	seq     int64
-	of      map[int64]*openTrade
-	byID    map[string]*openTrade
-	done    map[string]*tradeRecord
-	starts  map[int64]*bucket
-	edits   map[int64]*bucket
-	journal *tradeJournal
+	h        *Hub
+	table    tradeTable
+	boot     string
+	seq      int64
+	of       map[int64]*openTrade
+	byID     map[string]*openTrade
+	done     map[string]*tradeRecord
+	starts   map[int64]*bucket
+	edits    map[int64]*bucket
+	journal  *tradeJournal
+	ledger   ledgerSite             // nil: the client-trusted swap
+	noLedger bool                   // the ledger is on but not set up: trades are refused
+	settling map[string]*settleWait // by trade id
+	spawn    func(func())           // runs a ledger call off the hub lock (tests run it in place)
 }
 
 func newTrades(h *Hub) Module {
@@ -254,7 +286,11 @@ func newTrades(h *Hub) Module {
 	if path == "off" {
 		path = ""
 	}
-	return newTradesWith(h, table, path)
+	m := newTradesWith(h, table, path)
+	if !testing.Testing() {
+		m.ledger, m.noLedger = newLedgerFromFlags()
+	}
+	return m
 }
 
 func expandHome(p string) string {
@@ -272,9 +308,10 @@ func newTradesWith(h *Hub, table tradeTable, journalPath string) *trades {
 	}
 	m := &trades{h: h, table: table, boot: strconv.FormatInt(h.Now().UnixMilli(), 36),
 		of: map[int64]*openTrade{}, byID: map[string]*openTrade{}, done: map[string]*tradeRecord{},
-		starts: map[int64]*bucket{}, edits: map[int64]*bucket{}}
-	if journalPath != "" {
-		j, pending, err := openTradeJournal(journalPath)
+		starts: map[int64]*bucket{}, edits: map[int64]*bucket{}, settling: map[string]*settleWait{},
+		spawn: func(fn func()) { go fn() }}
+	if journalPath != "" && journalPath != "off" { // "off": memory only, as the flag says
+		j, pending, settles, err := openTradeJournal(journalPath)
 		if err != nil {
 			log.Printf("trade journal %s: %v (finished trades are kept in memory only)", journalPath, err)
 		} else {
@@ -282,7 +319,10 @@ func newTradesWith(h *Hub, table tradeTable, journalPath string) *trades {
 			for _, r := range pending {
 				m.done[r.Trade] = r
 			}
-			log.Printf("trade journal %s: %d finished trades waiting for an ack", journalPath, len(pending))
+			for _, r := range settles {
+				m.settling[r.Trade] = &settleWait{rec: r}
+			}
+			log.Printf("trade journal %s: %d finished trades waiting for an ack, %d waiting for the ledger", journalPath, len(pending), len(settles))
 		}
 	}
 	return m
@@ -300,7 +340,7 @@ func (m *trades) Register(r *Registry) {
 	r.OnJoin(m.joined)
 	r.OnLeave(func(cl *Client, _ string) { m.left(cl) })
 	r.OnDisconnect(func(cl *Client) {
-		if t := m.of[cl.ID()]; t != nil {
+		if t := m.of[cl.ID()]; t != nil && !t.settling {
 			m.cancel(t, cl.ID())
 		}
 	})
@@ -324,6 +364,16 @@ func sideJSON(s *tradeSide) map[string]any {
 	return map[string]any{"v": s.v, "items": items, "currants": s.goods.Currants, "accepted": s.accepted}
 }
 
+// waiting: a trade replayed from the journal this character is in, still waiting for the ledger.
+func (m *trades) waiting(id int64) *settleWait {
+	for _, st := range m.settling {
+		if st.t == nil && (st.rec.IDs[0] == id || st.rec.IDs[1] == id) {
+			return st
+		}
+	}
+	return nil
+}
+
 func goodsJSON(g tradeGoods) map[string]any {
 	items := g.Items
 	if items == nil {
@@ -343,6 +393,9 @@ func (m *trades) pushState(t *openTrade) {
 func (m *trades) stateTo(t *openTrade, id int64, rejected int64) {
 	me, them := t.side(id)
 	msg := map[string]any{"t": "trade_state", "trade": t.id, "mine": sideJSON(me), "theirs": sideJSON(them)}
+	if t.settling {
+		msg["settling"] = true
+	}
 	if rejected > 0 {
 		msg["rejected"] = rejected
 	}
@@ -360,8 +413,11 @@ func (m *trades) sendDone(r *tradeRecord, i int) {
 		"gave": goodsJSON(r.Gave[i]), "got": goodsJSON(r.Gave[o])})
 }
 
-// unsettled: a finished trade this character has not acked yet.
+// unsettled: a finished trade this character has not acked yet, or one still waiting for the ledger.
 func (m *trades) unsettled(id int64) bool {
+	if m.waiting(id) != nil {
+		return true
+	}
 	for _, r := range m.done {
 		if r.index(id) >= 0 {
 			return true
@@ -408,6 +464,10 @@ func (m *trades) start(cl *Client, frame json.RawMessage) {
 		return
 	}
 	if !m.allow(m.starts, cl, tradeStartBurst, tradeStartEvery) {
+		return
+	}
+	if m.noLedger {
+		m.refuse(cl, tradeTextNoLedger)
 		return
 	}
 	if m.of[cl.ID()] != nil {
@@ -525,6 +585,10 @@ func (m *trades) checkGoods(g *tradeGoods) string {
 		if it.R != nil && (*it.R < 0 || *it.R > tradeMaxPoints) {
 			return tradeTextCantTrade
 		}
+		if it.R != nil && cls.Pts > 0 && *it.R > cls.Pts {
+			r := cls.Pts // a tool never holds more than its capacity (tools.js capacity)
+			it.R = &r
+		}
 	}
 	if g.Currants < 0 || g.Currants > tradeMaxCurrants {
 		return tradeTextCurrants
@@ -552,6 +616,10 @@ func (m *trades) offer(cl *Client, frame json.RawMessage) {
 	t, me, them := m.mine(cl, msg.Trade)
 	if t == nil {
 		m.refuse(cl, tradeTextNotTrading)
+		return
+	}
+	if t.settling {
+		m.refuse(cl, tradeTextSettling)
 		return
 	}
 	if msg.V <= me.v || msg.V > 1<<40 {
@@ -591,6 +659,9 @@ func (m *trades) accept(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, tradeTextNotTrading)
 		return
 	}
+	if t.settling {
+		return // already accepted by both
+	}
 	if msg.Mine != me.v || msg.Seen != them.v {
 		m.refuse(cl, tradeTextSeenStale)
 		m.pushState(t)
@@ -619,6 +690,10 @@ func (m *trades) unlock(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, tradeTextNotTrading)
 		return
 	}
+	if t.settling {
+		m.refuse(cl, tradeTextSettling)
+		return
+	}
 	me.accepted = false
 	m.pushState(t)
 }
@@ -631,6 +706,10 @@ func (m *trades) cancelMsg(cl *Client, frame json.RawMessage) {
 		return
 	}
 	if t, _, _ := m.mine(cl, msg.Trade); t != nil {
+		if t.settling {
+			m.refuse(cl, tradeTextSettling)
+			return
+		}
 		m.cancel(t, cl.ID())
 		return
 	}
@@ -655,6 +734,9 @@ func (m *trades) check(cl *Client, frame json.RawMessage) {
 // answer says what became of a trade that is not open for cl: done (until
 // acked) or void.
 func (m *trades) answer(cl *Client, id string) {
+	if st := m.settling[id]; st != nil && (st.rec.IDs[0] == cl.ID() || st.rec.IDs[1] == cl.ID()) {
+		return // the ledger has not said yet: the done or the void comes when it does
+	}
 	if r := m.done[id]; r != nil {
 		if i := r.index(cl.ID()); i >= 0 {
 			m.sendDone(r, i)
@@ -729,6 +811,10 @@ func (m *trades) complete(t *openTrade) {
 	r := &tradeRecord{Trade: t.id, At: m.h.Now().UnixMilli(),
 		IDs: [2]int64{t.sides[0].id, t.sides[1].id}, Names: [2]string{t.sides[0].name, t.sides[1].name},
 		Gave: [2]tradeGoods{t.sides[0].goods, t.sides[1].goods}}
+	if m.ledger != nil {
+		m.startSettle(t, r)
+		return
+	}
 	if m.journal != nil {
 		if err := m.journal.write(tradeEntry{Done: r}); err != nil {
 			log.Printf("trade journal: %v (trade %s cancelled)", err, t.id)
@@ -745,22 +831,155 @@ func (m *trades) complete(t *openTrade) {
 	m.sendDone(r, 1)
 }
 
+// —— Settling in the site's ledger (ledger.go) ——
+
+// startSettle: both accepted. The record is journalled as settling, both
+// sides see the trade locked, and the site is asked.
+func (m *trades) startSettle(t *openTrade, r *tradeRecord) {
+	if m.journal != nil {
+		if err := m.journal.write(tradeEntry{Settle: r}); err != nil {
+			log.Printf("trade journal: %v (trade %s cancelled)", err, t.id)
+			for _, s := range t.sides {
+				m.to(s.id, map[string]any{"t": "trade_activity", "text": tradeTextNotFinished})
+			}
+			m.cancel(t, 0)
+			return
+		}
+	}
+	if t.settle != nil {
+		t.settle()
+		t.settle = nil
+	}
+	t.settling = true
+	st := &settleWait{rec: r, t: t}
+	m.settling[r.Trade] = st
+	m.pushState(t)
+	m.ask(st, false)
+}
+
+// ask makes one ledger call off the hub lock; the answer comes back under it.
+func (m *trades) ask(st *settleWait, void bool) {
+	st.busy = true
+	rec := *st.rec
+	site := m.ledger
+	m.spawn(func() {
+		var a ledgerAnswer
+		if site != nil {
+			if void {
+				a = site.void(&rec)
+			} else {
+				a = site.settle(&rec)
+			}
+		}
+		m.h.After(0, func() { m.answered(st, a, void) })
+	})
+}
+
+func (m *trades) askVoid(st *settleWait) { m.ask(st, true) }
+
+// answered: the site's word (or its silence) on a settling trade.
+func (m *trades) answered(st *settleWait, a ledgerAnswer, void bool) {
+	st.busy = false
+	if m.settling[st.rec.Trade] != st {
+		return
+	}
+	switch a.Status {
+	case "settled":
+		m.settled(st)
+	case "refused":
+		m.unsettle(st, a.Short)
+	case "void":
+		m.unsettle(st, nil)
+	default:
+		if !void {
+			log.Printf("trade ledger: no answer for %s: voiding it", st.rec.Trade)
+			m.askVoid(st)
+			return
+		}
+		st.tries++
+		wait := min(time.Minute, time.Second<<min(st.tries, 6))
+		log.Printf("trade ledger: no answer voiding %s (try %d): again in %s", st.rec.Trade, st.tries, wait)
+		m.h.After(wait, func() {
+			if m.settling[st.rec.Trade] == st && !st.busy {
+				m.askVoid(st)
+			}
+		})
+	}
+}
+
+// settled: the site moved both ledgers. From here it is today's done: journalled, sent until acked.
+func (m *trades) settled(st *settleWait) {
+	r := st.rec
+	delete(m.settling, r.Trade)
+	if m.journal != nil {
+		if err := m.journal.write(tradeEntry{Done: r}); err != nil {
+			log.Printf("trade journal: %v (settled trade %s kept in memory)", err, r.Trade)
+		}
+	}
+	if st.t != nil {
+		m.drop(st.t)
+	}
+	m.done[r.Trade] = r
+	log.Printf("trade %s settled in the ledger", r.Trade)
+	m.sendDone(r, 0)
+	m.sendDone(r, 1)
+}
+
+// unsettle: the site refused it (a giver's ledger lacks what it gives) or voided it: nothing changed hands.
+func (m *trades) unsettle(st *settleWait, short *ledgerShort) {
+	r := st.rec
+	delete(m.settling, r.Trade)
+	if m.journal != nil {
+		if err := m.journal.write(tradeEntry{Unsettle: r.Trade}); err != nil {
+			log.Printf("trade journal: %v", err)
+		}
+	}
+	log.Printf("trade %s not settled (short %+v)", r.Trade, short)
+	if st.t != nil {
+		m.cancel(st.t, 0)
+	} else {
+		for _, id := range r.IDs {
+			m.to(id, map[string]any{"t": "trade_void", "trade": r.Trade})
+		}
+	}
+	// After the window closes, so the words land in the activity log (inc_trading.js:456, 846).
+	for _, id := range r.IDs {
+		text := tradeTextNotFinished
+		if short != nil && short.ID == id {
+			text = tradeTextTooMany
+			if short.Currants {
+				text = tradeTextCurrants
+			}
+		}
+		if cl := m.h.ClientLocked(id); cl != nil {
+			m.refuse(cl, text)
+		}
+	}
+	m.compact()
+}
+
 // —— Hooks ——
 
 // connected: a new socket ends any open trade (its page starts afresh) and
 // hears every done it has not acked.
 func (m *trades) connected(cl *Client) {
-	if t := m.of[cl.ID()]; t != nil {
+	if t := m.of[cl.ID()]; t != nil && !t.settling {
 		m.cancel(t, cl.ID())
 	}
 	for _, r := range m.pendingFor(cl.ID()) {
 		m.sendDone(r, r.index(cl.ID()))
 	}
+	// A trade the journal kept from before a restart: ask the site what became of it.
+	for _, st := range m.settling {
+		if st.t == nil && !st.busy && (st.rec.IDs[0] == cl.ID() || st.rec.IDs[1] == cl.ID()) {
+			m.askVoid(st)
+		}
+	}
 }
 
 func (m *trades) joined(cl *Client) {
 	t := m.of[cl.ID()]
-	if t == nil {
+	if t == nil || t.settling {
 		return
 	}
 	if cl.Street() != t.street {
@@ -772,7 +991,7 @@ func (m *trades) joined(cl *Client) {
 // again) keeps the trade; anything else ends it (player.js:611).
 func (m *trades) left(cl *Client) {
 	t := m.of[cl.ID()]
-	if t == nil || t.settle != nil {
+	if t == nil || t.settle != nil || t.settling {
 		return
 	}
 	id := cl.ID()
@@ -794,9 +1013,11 @@ func (m *trades) left(cl *Client) {
 // —— Journal ——
 
 type tradeEntry struct {
-	Done *tradeRecord `json:"done,omitempty"`
-	Ack  string       `json:"ack,omitempty"`
-	Who  int64        `json:"who,omitempty"`
+	Done     *tradeRecord `json:"done,omitempty"`
+	Ack      string       `json:"ack,omitempty"`
+	Who      int64        `json:"who,omitempty"`
+	Settle   *tradeRecord `json:"settle,omitempty"`   // asked of the ledger, not answered yet
+	Unsettle string       `json:"unsettle,omitempty"` // the ledger refused or voided it
 }
 
 // tradeJournal is an append-only file of finished trades and acks, synced on
@@ -808,8 +1029,9 @@ type tradeJournal struct {
 	lines int
 }
 
-func openTradeJournal(path string) (*tradeJournal, []*tradeRecord, error) {
+func openTradeJournal(path string) (*tradeJournal, []*tradeRecord, []*tradeRecord, error) {
 	pending := map[string]*tradeRecord{}
+	settles := map[string]*tradeRecord{}
 	if f, err := os.Open(path); err == nil {
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 64*1024), 1<<20)
@@ -818,7 +1040,16 @@ func openTradeJournal(path string) (*tradeJournal, []*tradeRecord, error) {
 			if json.Unmarshal(sc.Bytes(), &e) != nil {
 				continue // a torn last line from a crash
 			}
+			if e.Settle != nil && tradeIDOK(e.Settle.Trade) {
+				settles[e.Settle.Trade] = e.Settle
+				continue
+			}
+			if e.Unsettle != "" {
+				delete(settles, e.Unsettle)
+				continue
+			}
 			if e.Done != nil && tradeIDOK(e.Done.Trade) {
+				delete(settles, e.Done.Trade)
 				if old := pending[e.Done.Trade]; old != nil {
 					e.Done.Acked[0] = e.Done.Acked[0] || old.Acked[0]
 					e.Done.Acked[1] = e.Done.Acked[1] || old.Acked[1]
@@ -835,10 +1066,10 @@ func openTradeJournal(path string) (*tradeJournal, []*tradeRecord, error) {
 		}
 		f.Close()
 		if err := sc.Err(); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var list []*tradeRecord
 	for id, r := range pending {
@@ -849,15 +1080,21 @@ func openTradeJournal(path string) (*tradeJournal, []*tradeRecord, error) {
 		list = append(list, r)
 	}
 	sort.Slice(list, func(a, b int) bool { return list[a].At < list[b].At })
-	j := &tradeJournal{path: path}
-	if err := j.rewrite(list); err != nil {
-		return nil, nil, err
+	var waiting []*tradeRecord
+	for _, r := range settles {
+		waiting = append(waiting, r)
 	}
-	return j, list, nil
+	sort.Slice(waiting, func(a, b int) bool { return waiting[a].At < waiting[b].At })
+	j := &tradeJournal{path: path}
+	if err := j.rewrite(list, waiting); err != nil {
+		return nil, nil, nil, err
+	}
+	return j, list, waiting, nil
 }
 
-// rewrite replaces the file with one done line per record (through a temp file and a rename).
-func (j *tradeJournal) rewrite(list []*tradeRecord) error {
+// rewrite replaces the file with one done line per record and one settle line per trade
+// still waiting for the ledger (through a temp file and a rename).
+func (j *tradeJournal) rewrite(list, waiting []*tradeRecord) error {
 	if err := os.MkdirAll(filepath.Dir(j.path), 0o700); err != nil {
 		return err
 	}
@@ -871,6 +1108,10 @@ func (j *tradeJournal) rewrite(list []*tradeRecord) error {
 		b, _ := json.Marshal(tradeEntry{Done: r})
 		w.Write(append(b, '\n'))
 	}
+	for _, r := range waiting {
+		b, _ := json.Marshal(tradeEntry{Settle: r})
+		w.Write(append(b, '\n'))
+	}
 	if err := w.Flush(); err == nil {
 		err = f.Sync()
 	}
@@ -882,7 +1123,7 @@ func (j *tradeJournal) rewrite(list []*tradeRecord) error {
 		j.f.Close()
 	}
 	j.f, err = os.OpenFile(j.path, os.O_APPEND|os.O_WRONLY, 0o600)
-	j.lines = len(list)
+	j.lines = len(list) + len(waiting)
 	return err
 }
 
@@ -906,12 +1147,16 @@ func (m *trades) compact() {
 	if m.journal == nil || m.journal.lines < tradeCompactAt {
 		return
 	}
-	var list []*tradeRecord
+	var list, waiting []*tradeRecord
 	for _, r := range m.done {
 		list = append(list, r)
 	}
+	for _, st := range m.settling {
+		waiting = append(waiting, st.rec)
+	}
 	sort.Slice(list, func(a, b int) bool { return list[a].At < list[b].At })
-	if err := m.journal.rewrite(list); err != nil {
+	sort.Slice(waiting, func(a, b int) bool { return waiting[a].At < waiting[b].At })
+	if err := m.journal.rewrite(list, waiting); err != nil {
 		log.Printf("trade journal: %v", err)
 	}
 }

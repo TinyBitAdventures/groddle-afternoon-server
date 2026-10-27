@@ -9,12 +9,16 @@ SRC=${1:-$(cd "$(dirname "$0")/.." && pwd)}
 SITE=${GRODDLE_SITE_DIR:-$HOME/Cove/Sites/groddle.localhost}
 ADDR=${GRODDLE_REALTIME_ADDR:-127.0.0.1:8793}
 LABEL=com.groddleafternoon.realtime
+# Trades settle in the site's ledger (ledger.go); Cove's site certificate comes from Caddy's local CA.
+LEDGER_URL=${GRODDLE_LEDGER_URL:-https://groddle.localhost}
+LEDGER_CA=${GRODDLE_LEDGER_CA:-$HOME/Library/Application Support/Caddy/pki/authorities/local/root.crt}
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 mkdir -p "$SITE/realtime"
 (cd "$SRC" && go build -o "$SITE/realtime/groddle-realtime.new" .)
 mv "$SITE/realtime/groddle-realtime.new" "$SITE/realtime/groddle-realtime"
 sed -e "s#__BIN__#$SITE/realtime/groddle-realtime#" -e "s#__ADDR__#$ADDR#" \
     -e "s#__SECRET__#$SITE/realtime.secret#" -e "s#__LOG__#$SITE/realtime/realtime.log#" \
+ -e "s#__LEDGER_URL__#$LEDGER_URL#" -e "s#__LEDGER_CA__#$LEDGER_CA#" \
     -e "s#__LABEL__#$LABEL#" "$(dirname "$0")/launchd.plist" > "$PLIST"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"

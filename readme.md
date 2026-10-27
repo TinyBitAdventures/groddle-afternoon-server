@@ -37,6 +37,9 @@ Options:
 | `-secret-file` | | The shared secret, at least 32 bytes. `GRODDLE_REALTIME_SECRET` works instead |
 | `-origins` | | Extra page origins allowed to connect (host patterns, comma separated). The socket's own host is always allowed |
 | `-trade-journal` | `realtime-trades.jsonl` beside the secret | Keeps finished trades until both players' games have applied them. `off` keeps them in memory only |
+| `-ledger-url` | | The Groddle site trades settle in (`POST groddle/v1/ledger/trade`, signed with the secret). Without it trades are refused |
+| `-ledger-ca` | | A PEM file of extra roots for that site's certificate (a local Caddy CA) |
+| `-trade-ledger` | `on` | `off` brings back the client-trusted swap, for development only |
 
 The secret is the same file the site reads (`realtime.secret` beside its webroot by default). Make
 one with `openssl rand -hex 32 > realtime.secret` and keep it outside any webroot.

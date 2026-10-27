@@ -13,7 +13,8 @@ Wants=network-online.target
 [Service]
 User=groddle
 Group=groddle
-ExecStart=/opt/groddle-realtime/groddle-realtime -addr 127.0.0.1:8793 -secret-file /etc/groddle/realtime.secret -trade-journal /var/lib/groddle-realtime/realtime-trades.jsonl
+# -ledger-url is the site trades settle in (ledger.go); with a public certificate no -ledger-ca is needed.
+ExecStart=/opt/groddle-realtime/groddle-realtime -addr 127.0.0.1:8793 -secret-file /etc/groddle/realtime.secret -trade-journal /var/lib/groddle-realtime/realtime-trades.jsonl -ledger-url https://groddleafternoon.com
 Restart=always
 RestartSec=2
 # SIGTERM closes the listener and lets sockets finish (main.go).

@@ -9,6 +9,8 @@
     <string>__BIN__</string>
     <string>-addr</string><string>__ADDR__</string>
     <string>-secret-file</string><string>__SECRET__</string>
+    <string>-ledger-url</string><string>__LEDGER_URL__</string>
+    <string>-ledger-ca</string><string>__LEDGER_CA__</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
