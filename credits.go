@@ -16,6 +16,7 @@ package main
 //     resource node, as item counts (objCredit).
 //   - rook.go: nothing. Every share of a Rook fight is iMG, energy, mood or
 //     favor (rook_you), none of which the ledger holds.
+//   - verbs.go: the 250 currants a Charades guess wins (main.js:1782).
 //
 // The call, signed as ledger.go signs (X-Groddle-Service over the body):
 //
@@ -95,8 +96,8 @@ var creditsFileFlag = flag.String("credits-file", "", "file that keeps the credi
 // creditsFileForTest lets a test give the module a journal; under go test the flag is ignored.
 var creditsFileForTest string
 
-// The why of each credit, and the letter its id carries.
-var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t"}
+// The why of each credit, and the letter its id carries (charades: verbs.go, a Charades guess's 250 currants).
+var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t", "charades": "c"}
 
 // creditEvent is one outcome for one player.
 type creditEvent struct {
