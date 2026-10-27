@@ -4,8 +4,8 @@ package main
 // channel, as in the original. The rules are GameServerJS groups/party.js,
 // players/inc_party.js and main.js (doPartyInvite 4581, doPartyChat 1829,
 // doPartyLeave 4591); the copy players read is theirs. Parties live in memory,
-// keyed by character id, so a replaced socket or a short drop keeps them; a
-// server restart forgets them.
+// keyed by character id, so a replaced socket or a short drop keeps them, and
+// in -party-file (party_persist.go), so a server restart keeps them too.
 //
 // Client to server:
 //
@@ -95,8 +95,9 @@ type party struct {
 
 	// Party Spaces (party_spaces.go).
 	space    *partySpace
-	starting bool           // a pack's spend is with the ledger
-	kicked   map[int64]bool // party.js kicked_players (kicked 129-135)
+	starting bool             // a pack's spend is with the ledger
+	kicked   map[int64]bool   // party.js kicked_players (kicked 129-135)
+	missed   map[int64]string // members away when the space ended: why, told when they come back
 }
 
 type bucket struct {
@@ -127,23 +128,26 @@ type parties struct {
 	invites map[int64]*bucket
 	names   map[int64]string // everyone connected, for invites by name
 
-	spaces partySpaces // party_spaces.go
+	spaces  partySpaces  // party_spaces.go
+	persist partyPersist // party_persist.go
 }
 
 func newParties(h *Hub) Module {
 	m := &parties{h: h, of: map[int64]*party{}, all: map[*party]struct{}{}, away: map[int64]func() bool{},
 		chat: map[int64]*bucket{}, invites: map[int64]*bucket{}, names: map[int64]string{}}
 	m.initSpaces()
+	m.initPersist()
 	return m
 }
 
 func (m *parties) Register(r *Registry) {
-	r.Handle("party_invite", m.invite)
-	r.Handle("party_accept", func(cl *Client, frame json.RawMessage) { m.answer(cl, frame, true) })
-	r.Handle("party_decline", func(cl *Client, frame json.RawMessage) { m.answer(cl, frame, false) })
-	r.Handle("party_leave", func(cl *Client, frame json.RawMessage) { m.leaveParty(cl.ID()) })
+	r.Handle("party_invite", m.kept(m.invite))
+	r.Handle("party_accept", m.kept(func(cl *Client, frame json.RawMessage) { m.answer(cl, frame, true) }))
+	r.Handle("party_decline", m.kept(func(cl *Client, frame json.RawMessage) { m.answer(cl, frame, false) }))
+	r.Handle("party_leave", m.kept(func(cl *Client, frame json.RawMessage) { m.leaveParty(cl.ID()) }))
 	r.Handle("party_chat", m.chatLine)
 	r.OnConnect(m.connected)
+	r.OnShutdown(func() { m.save() }) // party_persist.go
 	r.OnJoin(func(cl *Client) { m.moved(cl.ID(), false) })
 	r.OnLeave(func(cl *Client, _ string) { m.moved(cl.ID(), true) })
 	r.OnDisconnect(m.disconnected)
@@ -461,6 +465,7 @@ func (m *parties) expire(inv *partyInvite) {
 	}
 	m.to(inv.to, map[string]any{"t": "party_uninvited", "from": inv.from})
 	m.decline(p, inv, true)
+	m.saveSoon()
 }
 
 // decline is party.js decline_invite.
@@ -619,6 +624,7 @@ func (m *parties) chatLine(cl *Client, frame json.RawMessage) {
 // —— Lifecycle ——
 
 func (m *parties) connected(cl *Client) {
+	m.resume() // party_persist.go: a restart's parties, once
 	id := cl.ID()
 	m.names[id] = cl.Name()
 	if stop := m.away[id]; stop != nil {
@@ -652,6 +658,8 @@ func (m *parties) connected(cl *Client) {
 			}
 		}
 	}
+	m.sendNotices(id) // refunds of spaces that could not come back (party_persist.go)
+	m.saveSoon()
 }
 
 // moved pushes a member's street to the party. Leaving a street waits a moment,
@@ -683,15 +691,19 @@ func (m *parties) disconnected(cl *Client) {
 }
 
 // startGrace gives a dropped socket partyGrace to come back before it logs out.
-func (m *parties) startGrace(id int64) {
+func (m *parties) startGrace(id int64) { m.startGraceFor(id, partyGrace) }
+
+// startGraceFor is startGrace with its own time (a restart's members get partyRestartGrace).
+func (m *parties) startGraceFor(id int64, d time.Duration) {
 	delete(m.names, id)
 	if stop := m.away[id]; stop != nil {
 		stop()
 	}
-	m.away[id] = m.h.After(partyGrace, func() {
+	m.away[id] = m.h.After(d, func() {
 		delete(m.away, id)
 		if m.h.ClientLocked(id) == nil {
 			m.logout(id)
+			m.saveSoon()
 		}
 	})
 }

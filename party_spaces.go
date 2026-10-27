@@ -29,6 +29,7 @@ package main
 //	{"t":"party_space_extended","minutes":10,"cost":4500,"spend":"party-…","text":"Party on, Wayne."}   to the payer
 //	{"t":"party_space_refused","why":"party|space|template|pack|currants|late|ledger|slow","text":"…"}
 //	{"t":"party_space_kicked","by":{"id":7,"name":"Ada"},"text":"Ada removed you from their Party Space."}
+//	{"t":"party_space_refunded","spend":"party-…","refund":"party-…-r","goods":Goods,"text":"…"}   a spend given back (on every connect for a day)
 //
 // Space is {"id","street":"PARTY_<ID>","template","label","pack","taster",
 // "creator":{"id","name"},"left":ms,"extensions","warned"}. Members share it on
@@ -45,6 +46,21 @@ package main
 // player's save drops the pack (or the currants) once, whether the page hears
 // the answer or the site applies it on the next load. With -trade-ledger off
 // (development) the pack and the currants are taken on the client's word.
+//
+// A spend that bought nothing (the party ended or the space was gone by the
+// answer, no answer came, or the space could not come back after a restart:
+// party_persist.go) is given back through the site's ledger/spend/refund,
+// owed in the state file until the site answers. It is the site's refund, not
+// a credit through credits.go: a credit is only a receipt that lets a save
+// show a gain, so a player who never loaded again, or whose page missed the
+// message, would get nothing back, while the refund is a settled trade from
+// nobody (trade id <spend>-r) that moves the ledger at once and that the next
+// load applies to the save (Ledger::catchUp), like the spend itself. The page
+// is told too (party_space_refunded) and applies it once by its id: the pack
+// or the currants come back only if it had applied the spend, and marks both
+// applied either way, so a spend and its refund always net to nothing. The
+// site keeps one refund per spend and none after a void, so asking twice
+// gives it once.
 //
 // Rules kept from the source:
 //   - Activating needs a party and no space going ("You must be in a party to
@@ -65,8 +81,8 @@ package main
 //     there: they leave the party, join its kicked list, and only the creator
 //     may invite them back while the space lives.
 //
-// Ours: the spend through the site's ledger, and a pack refunded when the
-// party ended while the ledger was answering.
+// Ours: the spend through the site's ledger, the refunds above, and the
+// space kept across a restart of this server (party_persist.go).
 
 import (
 	"crypto/rand"
@@ -89,21 +105,22 @@ const (
 	partySpaceEvery   = 2 * time.Second
 	partySpaceDevMax  = 2 * time.Hour
 
-	ledgerRouteSpend   = "/groddle/v1/ledger/spend"
-	ledgerRouteUnspend = "/groddle/v1/ledger/spend/void"
+	ledgerRouteSpend  = "/groddle/v1/ledger/spend"
+	ledgerRouteRefund = "/groddle/v1/ledger/spend/refund"
 
-	partyTextNoParty  = "You must be in a party to activate. Didn't you read the instructions?" // party_pack.js verbs.activate
-	partyTextGoing    = "Your party already has a Party Space going."                           // party_pack.js verbs.activate
-	partyTextTemplate = "Bad template"                                                          // party_pack.js activate
-	partyTextNoPack   = "You don't have that Party Pack."                                       // ours: the source never heard of a pack you lack
-	partyTextLedger   = "That did not go through, so nothing was spent. Try again in a moment." // ours
-	partyTextWarning  = "Our Party Space will expire in 5 minutes."                             // party.js:729
-	partyTextExpired  = "Our Party Space expired."                                              // party.js:735
-	partyTextAtmOK    = "Party on, Wayne."                                                      // party_atm.js:250
-	partyTextAtmBroke = "You don't have enough currants to do that."                            // party_atm.js:253
-	partyTextAtmLate  = "Down low, too slow."                                                   // party_atm.js:235
-	partyTextCant     = "You can't do that"                                                     // main.js:3976
-	partyTextPrivate  = "That Party Space is private."                                          // ours: the source never let anyone try
+	partyTextNoParty  = "You must be in a party to activate. Didn't you read the instructions?"     // party_pack.js verbs.activate
+	partyTextGoing    = "Your party already has a Party Space going."                               // party_pack.js verbs.activate
+	partyTextTemplate = "Bad template"                                                              // party_pack.js activate
+	partyTextNoPack   = "You don't have that Party Pack."                                           // ours: the source never heard of a pack you lack
+	partyTextLedger   = "That did not go through, so nothing was spent. Try again in a moment."     // ours
+	partyTextWarning  = "Our Party Space will expire in 5 minutes."                                 // party.js:729
+	partyTextExpired  = "Our Party Space expired."                                                  // party.js:735
+	partyTextAtmOK    = "Party on, Wayne."                                                          // party_atm.js:250
+	partyTextAtmBroke = "You don't have enough currants to do that."                                // party_atm.js:253
+	partyTextAtmLate  = "Down low, too slow."                                                       // party_atm.js:235
+	partyTextCant     = "You can't do that"                                                         // main.js:3976
+	partyTextPrivate  = "That Party Space is private."                                              // ours: the source never let anyone try
+	partyTextRefunded = "That Party Space could not go on, so what you spent on it was given back." // ours
 )
 
 // partyTemplate is one config_prod.js party_spaces row (1298-1307): the
@@ -174,20 +191,23 @@ type partySpace struct {
 	extensions                 int
 	warned                     bool
 	warn, end                  func() bool
+	spends                     []partySpendRec // the pack and each extension, given back if it cannot come back (party_persist.go)
 }
 
 // spendLedger is the site's ledger as Party Spaces use it (httpLedger).
 type spendLedger interface {
 	spend(op string, id int64, gave tradeGoods, why string) ledgerAnswer
-	unspend(op string, id int64) ledgerAnswer
+	// refundSpend gives a spend back: "void" with Gave[0] what went back, "refused" when nothing
+	// was spent (it never came, it was refused or voided, it is not this player's), "" no answer.
+	refundSpend(op string, id int64) ledgerAnswer
 }
 
 func (l *httpLedger) spend(op string, id int64, gave tradeGoods, why string) ledgerAnswer {
 	return l.call(ledgerRouteSpend, map[string]any{"op": op, "id": id, "gave": goodsJSON(gave), "why": why})
 }
 
-func (l *httpLedger) unspend(op string, id int64) ledgerAnswer {
-	return l.call(ledgerRouteUnspend, map[string]any{"op": op, "id": id})
+func (l *httpLedger) refundSpend(op string, id int64) ledgerAnswer {
+	return l.call(ledgerRouteRefund, map[string]any{"op": op, "id": id})
 }
 
 // partySpaces is the parties module's Party Space state.
@@ -224,11 +244,11 @@ func (m *parties) initSpaces() {
 }
 
 func (m *parties) registerSpaces(r *Registry) {
-	r.Handle("party_space_start", m.startSpace)
-	r.Handle("party_space_extend", m.extendSpace)
-	r.Handle("party_space_kick", m.kickFromSpace)
+	r.Handle("party_space_start", m.kept(m.startSpace))
+	r.Handle("party_space_extend", m.kept(m.extendSpace))
+	r.Handle("party_space_kick", m.kept(m.kickFromSpace))
 	if m.spaces.dev {
-		r.Handle("party_space_dev", m.devSpace)
+		r.Handle("party_space_dev", m.kept(m.devSpace))
 	}
 	r.GateJoin(m.spaceGate)
 	// quoins.go: a space's instance has its template's natural quoins (party quoins between the members).
@@ -312,14 +332,61 @@ func (m *parties) ask(call func(spendLedger) ledgerAnswer, then func(ledgerAnswe
 	})
 }
 
-// refund gives a spend back (the space it paid for could not happen).
-func (m *parties) refund(op string, id int64) {
+// refund gives a spend back (what it paid for could not happen, or no answer came): owed in the
+// state file until the site answers.
+func (m *parties) refund(op string, id int64, why string) {
 	if m.spaces.ledger == nil {
 		return
 	}
-	m.ask(func(l spendLedger) ledgerAnswer { return l.unspend(op, id) }, func(a ledgerAnswer) {
-		log.Printf("party space: spend %s for %d given back: %s", op, id, a.Status)
+	m.owe(partySpendRec{Op: op, User: id, Why: why})
+	m.saveNow()
+	m.askRefund(op)
+}
+
+// askRefund asks the site for one owed refund (ledger/spend/refund), again after a backoff while no
+// answer comes. A refund goes out once resume has run (the ledger is set by then).
+func (m *parties) askRefund(op string) {
+	o := m.persist.owed[op]
+	if o == nil || o.asking || o.retry != nil || !m.persist.resumed || m.spaces.ledger == nil {
+		return
+	}
+	o.asking = true
+	rec := o.rec
+	m.ask(func(l spendLedger) ledgerAnswer { return l.refundSpend(rec.Op, rec.User) }, func(a ledgerAnswer) {
+		o.asking = false
+		if m.persist.owed[op] != o {
+			return
+		}
+		switch a.Status {
+		case "void":
+			delete(m.persist.owed, op)
+			goods := tradeGoods{}
+			if len(a.Gave) > 0 {
+				goods = a.Gave[0]
+			}
+			log.Printf("party space: spend %s (%s) for %d given back: %+v", op, rec.Why, rec.User, goods)
+			if !goods.empty() {
+				m.addNotice(partyNotice{User: rec.User, Spend: op, Refund: op + "-r", Goods: goods, At: m.h.Now().UnixMilli()})
+			}
+		case "refused", "settled":
+			delete(m.persist.owed, op)
+			log.Printf("party space: spend %s (%s) for %d: nothing was spent, nothing to give back", op, rec.Why, rec.User)
+		default:
+			o.tries++
+			d := refundBackoff(o.tries)
+			log.Printf("party space: spend %s for %d: no answer from the ledger, asking again in %s", op, rec.User, d)
+			o.retry = m.h.After(d, func() {
+				o.retry = nil
+				m.askRefund(op)
+			})
+		}
+		m.saveNow()
 	})
+}
+
+// sendRefunded is party_space_refunded: the page gives the pack or the currants back once.
+func (m *parties) sendRefunded(n partyNotice) {
+	m.to(n.User, map[string]any{"t": "party_space_refunded", "spend": n.Spend, "refund": n.Refund, "goods": goodsJSON(n.Goods), "text": partyTextRefunded})
 }
 
 func (m *parties) newSpend() string { return "party-" + m.spaces.newID() }
@@ -361,8 +428,11 @@ func (m *parties) startSpace(cl *Client, frame json.RawMessage) {
 	p.starting = true
 	op, pack, name := m.newSpend(), msg.Pack, cl.Name()
 	gave := tradeGoods{Items: []tradeItem{{C: pack, N: 1}}}
+	m.asking(op, id, "party_pack")
 	m.ask(func(l spendLedger) ledgerAnswer { return l.spend(op, id, gave, "party_pack") }, func(a ledgerAnswer) {
 		p.starting = false
+		delete(m.persist.asked, op)
+		defer m.saveNow()
 		switch a.Status {
 		case "settled":
 		case "refused":
@@ -370,12 +440,13 @@ func (m *parties) startSpace(cl *Client, frame json.RawMessage) {
 			m.refuseSpace(id, "pack", partyTextNoPack)
 			return
 		default:
+			m.refund(op, id, "party_pack") // it may have settled unheard; the refund voids it if not
 			m.refuseSpace(id, "ledger", partyTextLedger)
 			return
 		}
 		if _, live := m.all[p]; !live || p.member(id) == nil || p.space != nil {
 			// The party ended, or the creator left it, while the ledger answered.
-			m.refund(op, id)
+			m.refund(op, id, "party_pack")
 			if p.member(id) == nil {
 				m.refuseSpace(id, "party", partyTextNoParty)
 			} else {
@@ -385,6 +456,16 @@ func (m *parties) startSpace(cl *Client, frame json.RawMessage) {
 		}
 		m.createSpace(p, id, name, pack, template, taster, op)
 	})
+}
+
+// asking keeps a spend with the ledger in the state file: if the server stops before the answer,
+// the next one gives it back (party_persist.go).
+func (m *parties) asking(op string, id int64, why string) {
+	if m.spaces.ledger == nil {
+		return
+	}
+	m.persist.asked[op] = partySpendRec{Op: op, User: id, Why: why}
+	m.saveNow()
 }
 
 // createSpace is party.js create_space.
@@ -399,7 +480,11 @@ func (m *parties) createSpace(p *party, creator int64, name, pack, template stri
 	}
 	s := &partySpace{id: sid, street: partySpaceStreet + strings.ToUpper(sid), template: template, pack: pack, taster: taster,
 		creator: creator, creatorName: name, expires: m.h.Now().Add(dur)}
+	if m.spaces.ledger != nil {
+		s.spends = []partySpendRec{{Op: op, User: creator, Why: "party_pack"}}
+	}
 	p.space = s
+	p.missed = nil
 	m.spaces.byStreet[s.street] = p
 	m.schedule(p, s)
 	log.Printf("party space %s: %s (%d) opened %s with %s for %d members", s.street, name, creator, template, pack, len(p.members))
@@ -431,10 +516,12 @@ func (m *parties) schedule(p *party, s *partySpace) {
 		s.warned = true
 		m.announce(p, partyTextWarning)
 		m.pushSpace(p)
+		m.saveSoon()
 	})
 	s.end = m.h.After(max(0, left), func() {
 		if p.space == s {
 			m.deleteSpace(p, "expired")
+			m.saveNow()
 		}
 	})
 }
@@ -458,11 +545,19 @@ func (m *parties) deleteSpace(p *party, why string) {
 	}
 	for _, mem := range p.members {
 		m.sendSpace(mem.id, nil, why)
+		if m.h.ClientLocked(mem.id) == nil && (why == "expired" || why == "closed") {
+			// Away (a dropped socket, a restart): told when they come back (spaceConnected).
+			if p.missed == nil {
+				p.missed = map[int64]string{}
+			}
+			p.missed[mem.id] = why
+		}
 	}
 	for _, o := range m.h.StreetLocked(s.street) {
 		m.h.leaveLocked(o)
 	}
 	log.Printf("party space %s: closed (%s)", s.street, why)
+	m.saveSoon()
 }
 
 // spaceMemberGone: a member left the party (or was kicked): out of the space too.
@@ -486,10 +581,21 @@ func (m *parties) spaceJoined(p *party, cl *Client) {
 	m.prompt(p, cl.ID())
 }
 
-// spaceConnected is party.js player_login 430-432: the space again.
+// spaceConnected is party.js player_login 430-432: the space again, or, for a member who was
+// away when it ended, that it ended (party.js delete_space 732-753 told only those online).
 func (m *parties) spaceConnected(p *party, cl *Client) {
+	id := cl.ID()
+	why := p.missed[id]
+	delete(p.missed, id)
 	if p.space != nil {
-		m.sendSpace(cl.ID(), p.space, "")
+		m.sendSpace(id, p.space, "")
+		return
+	}
+	if why != "" {
+		if why == "expired" {
+			m.activity(id, partyTextExpired)
+		}
+		m.sendSpace(id, nil, why)
 	}
 }
 
@@ -557,25 +663,32 @@ func (m *parties) extendSpace(cl *Client, frame json.RawMessage) {
 	}
 	cost := partyTemplates[s.template].prices[msg.Minutes]
 	op, name, minutes := m.newSpend(), cl.Name(), msg.Minutes
+	m.asking(op, id, "party_atm")
 	m.ask(func(l spendLedger) ledgerAnswer {
 		return l.spend(op, id, tradeGoods{Currants: cost}, "party_atm")
 	}, func(a ledgerAnswer) {
+		delete(m.persist.asked, op)
+		defer m.saveNow()
 		switch a.Status {
 		case "settled":
 		case "refused":
 			m.refuseSpace(id, "currants", partyTextAtmBroke)
 			return
 		default:
+			m.refund(op, id, "party_atm")
 			m.refuseSpace(id, "ledger", partyTextLedger)
 			return
 		}
 		if p.space != s || !s.expires.After(m.h.Now()) {
-			m.refund(op, id)
+			m.refund(op, id, "party_atm")
 			m.refuseSpace(id, "late", partyTextAtmLate)
 			return
 		}
 		s.expires = s.expires.Add(time.Duration(minutes) * time.Minute)
 		s.extensions++
+		if m.spaces.ledger != nil {
+			s.spends = append(s.spends, partySpendRec{Op: op, User: id, Why: "party_atm"})
+		}
 		if s.expires.Sub(m.h.Now()) > partySpaceWarning {
 			s.warned = false
 		}

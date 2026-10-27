@@ -6,7 +6,7 @@ package main
 // "off" for memory only, and a ForTest path (under go test the flags are
 // ignored): trade.go (-trade-journal), projects.go (-projects-file),
 // feats.go (-feats-file), hi.go (-hi-file), credits.go (-credits-file),
-// objects.go (-objects-file), crowns.go (-crowns-file). Whole-state files are written through
+// objects.go (-objects-file), crowns.go (-crowns-file), party.go (-party-file). Whole-state files are written through
 // writeFileSynced (projects.go: a temp file, fsync, rename), journals are
 // append-only and compacted. A file that is missing starts the module empty;
 // one that does not parse is moved aside (logged) and the module starts empty

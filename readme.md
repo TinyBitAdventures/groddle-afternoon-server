@@ -93,6 +93,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 |---|---|
 | `party.go` | Parties and party chat |
 | `party_spaces.go` | Party Spaces: a Party Pack opens one space for the party (spent through the site's ledger), with the shared clock, the Party ATM, party quoins and the creator's kick |
+| `party_persist.go` | Parties and Party Spaces through a restart (`-party-file`): parties, invites, kicked lists, each space's clock and spends; members back within 2 minutes rejoin their party and space; a space that expired while the server was down closes as it would have; a space that cannot come back, or a spend with no answer, is given back once through the site's `ledger/spend/refund` |
 | `quoins.go` | Shared street quoins: first to touch one gets it, players nearby get a shard |
 | `objects.go` | Rocks, resource nodes and trees: what one player takes is gone for everyone until it comes back; Tree Poison, its antidote and a street tree's death are shared (a dead Wood Tree's Planks credited to its poisoner; a rooked tree at health 1 dies); Dirt Pile dig crews |
 | `objects_pigs.go` | Street Piggies (`pig:<i>`): one mood, hunger and twice-daily tick for everyone; pet, nibble, feed and eating a tree's fruit decided by the server |
@@ -147,7 +148,7 @@ One test compares tree fruit caps with the game's data, reading `../groddle-afte
 messages that start an attack or a wing beat on demand, for testing only, and `GRODDLE_PARTY_DEV=1`
 turns on `party_space_dev`, which brings a Party Space's end near. `GRODDLE_FEATS_DEV=1` turns on `feat_dev`, which ends today's Feat soon or opens another now. `GRODDLE_TREES_DEV=1` lets `obj_act` carry `ms` for a poison's clock and turns on `obj_dev`, which sets a Piggy's hunger or mood or runs its tick.
 
-State that outlives a restart: each system keeps a file beside `-secret-file` unless its flag names one, and `off` means memory only: `-trade-journal`, `-projects-file`, `-feats-file`, `-hi-file`, `-credits-file` (credits the ledger hasn't taken), `-objects-file` (dead and poisoned trees, street Piggies, rocks, nodes and trees), `-rook-file` (rooked until revived, streets resting), `-quoins-file` (gone quoins, today's grabs) and `-crowns-file` (Game of Crowns rewards and wins the ledger hasn't answered). A bad file is moved aside and the system starts empty. Lane and dev servers must pass `off` (or their own paths) for every state flag, or they write over the live server's files.
+State that outlives a restart: each system keeps a file beside `-secret-file` unless its flag names one, and `off` means memory only: `-trade-journal`, `-projects-file`, `-feats-file`, `-hi-file`, `-credits-file` (credits the ledger hasn't taken), `-objects-file` (dead and poisoned trees, street Piggies, rocks, nodes and trees), `-rook-file` (rooked until revived, streets resting), `-quoins-file` (gone quoins, today's grabs) `-crowns-file` (Game of Crowns rewards and wins the ledger hasn't answered) and `-party-file` (parties and Party Spaces). A bad file is moved aside and the system starts empty. Lane and dev servers must pass `off` (or their own paths) for every state flag, or they write over the live server's files.
 
 ## Licence
 

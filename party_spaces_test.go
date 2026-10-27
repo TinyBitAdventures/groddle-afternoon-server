@@ -12,13 +12,28 @@ type fakeSpends struct {
 	packs    map[int64]map[string]int
 	currants map[int64]int64
 	spent    []string // "op:id:what"
-	unspent  []string
+	unspent  []string // "op:id" for every refund given
+	asks     int      // refunds asked, given or not
 	silent   bool
+	ops      map[string]fakeSpend // as LedgerSpend.php keeps them
+}
+
+type fakeSpend struct {
+	id       int64
+	gave     tradeGoods
+	status   string // settled | void
+	refunded bool
 }
 
 func (f *fakeSpends) spend(op string, id int64, gave tradeGoods, why string) ledgerAnswer {
 	if f.silent {
 		return ledgerAnswer{}
+	}
+	if f.ops == nil {
+		f.ops = map[string]fakeSpend{}
+	}
+	if was, ok := f.ops[op]; ok {
+		return ledgerAnswer{Status: was.status}
 	}
 	for _, it := range gave.Items {
 		if f.packs[id][it.C] < it.N {
@@ -36,12 +51,37 @@ func (f *fakeSpends) spend(op string, id int64, gave tradeGoods, why string) led
 		f.currants[id] -= gave.Currants
 		f.spent = append(f.spent, fmt.Sprintf("%s:%d:%dc", op, id, gave.Currants))
 	}
+	f.ops[op] = fakeSpend{id: id, gave: gave, status: "settled"}
 	return ledgerAnswer{Status: "settled"}
 }
 
-func (f *fakeSpends) unspend(op string, id int64) ledgerAnswer {
-	f.unspent = append(f.unspent, fmt.Sprintf("%s:%d", op, id))
-	return ledgerAnswer{Status: "void"}
+// refundSpend is LedgerSpend.php refund: once per spend; a spend that never came is voided.
+func (f *fakeSpends) refundSpend(op string, id int64) ledgerAnswer {
+	f.asks++
+	if f.silent {
+		return ledgerAnswer{}
+	}
+	if f.ops == nil {
+		f.ops = map[string]fakeSpend{}
+	}
+	sp, ok := f.ops[op]
+	if !ok {
+		f.ops[op] = fakeSpend{id: id, status: "void"}
+		return ledgerAnswer{Status: "refused"}
+	}
+	if sp.status != "settled" || sp.id != id {
+		return ledgerAnswer{Status: "refused"}
+	}
+	if !sp.refunded {
+		for _, it := range sp.gave.Items {
+			f.packs[id][it.C] += it.N
+		}
+		f.currants[id] += sp.gave.Currants
+		sp.refunded = true
+		f.ops[op] = sp
+		f.unspent = append(f.unspent, fmt.Sprintf("%s:%d", op, id))
+	}
+	return ledgerAnswer{Status: "void", Gave: []tradeGoods{sp.gave}}
 }
 
 type spaceRig struct {
