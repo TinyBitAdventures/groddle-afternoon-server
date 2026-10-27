@@ -99,6 +99,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `trade.go` | Trading items and currants |
 | `projects.go` | Street projects everyone on a street builds together: contributions through the site's ledger, the source's reward shares, the road opening for everyone |
 | `feats.go` | One Feat a day for everyone playing: contributions at the source's pace, the minimum, bonus and supermegabonus goals, ranks, rewards by place with their currants through the site's ledger |
+| `homes.go` | Visiting real players' homes: `HOME_<id>` and `HOUSE_<id>` gated by a pass the site signs, knocking and answering, house keys given and revoked live; a revoked key-holder, and anyone without a key when the owner goes offline, is walked out |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
