@@ -74,6 +74,10 @@ package main
 //
 // Departures: Hire a hand is solo only; projects in homes (restorations) stay
 // per player; an exempt or grandfathered road is the player's own (the save's).
+//
+// Group halls (G331, kind "hall"): a group claims one before anyone may put
+// anything in, the claimed phase has a clock, and the hall is the group's at
+// the end; group_halls.go has their rules, messages and the site's part.
 
 import (
 	_ "embed"
@@ -185,6 +189,8 @@ type projJob struct {
 	Connecting []string       `json:"connecting"`
 	Options    []string       `json:"options"`
 	Divisor    int            `json:"divisor"`
+	Claim      int64          `json:"claim,omitempty"`   // a group hall's claim currants (group_halls.go)
+	Minutes    int64          `json:"minutes,omitempty"` // and the minutes its claimed phase has
 }
 
 type projDropRow struct {
@@ -249,6 +255,7 @@ type projRow struct {
 	Ready   int64            `json:"ready,omitempty"`   // ms: the current phase opens
 	Done    int64            `json:"done,omitempty"`    // ms
 	Option  string           `json:"option,omitempty"`
+	Hall    *projHall        `json:"hall,omitempty"` // a group hall's claim (group_halls.go)
 	held    map[string]int64 // asked of the ledger, not answered (from gives)
 }
 
@@ -265,6 +272,7 @@ type projGive struct {
 	Currants bool   `json:"currants,omitempty"`
 	Cost     int64  `json:"cost"`
 	Option   string `json:"option,omitempty"`
+	Claim    string `json:"claim,omitempty"` // a group hall's claim it was given under: it counts only while that claim stands
 	busy     bool
 	tries    int
 }
@@ -297,11 +305,12 @@ type projState struct {
 	Gives   map[string]*projGive   `json:"gives"`
 	Credits map[string]*projCredit `json:"credits"`
 	Owed    map[int64][]projOwed   `json:"owed"`
+	Halls   map[string]*hallAsk    `json:"halls,omitempty"` // group hall calls waiting for the site (group_halls.go)
 	Seq     int64                  `json:"seq"`
 }
 
 func newProjState() *projState {
-	return &projState{Jobs: map[string]*projRow{}, Rest: map[string]int64{}, Gives: map[string]*projGive{}, Credits: map[string]*projCredit{}, Owed: map[int64][]projOwed{}}
+	return &projState{Jobs: map[string]*projRow{}, Rest: map[string]int64{}, Gives: map[string]*projGive{}, Credits: map[string]*projCredit{}, Owed: map[int64][]projOwed{}, Halls: map[string]*hallAsk{}}
 }
 
 // projectLedger is the site's ledger for projects: take gave out, put got in, once per id.
@@ -321,6 +330,7 @@ type projects struct {
 	path    string // "" memory only
 	boot    string
 	ledger  projectLedger // nil: no ledger (see trusted)
+	halls   hallSite      // the site's group halls (group_halls.go); nil with the ledger
 	trusted bool          // -trade-ledger off: item and currant gives count as sent (development only)
 	spawn   func(func())
 	rng     func() float64
@@ -350,6 +360,7 @@ func newProjects(h *Hub) Module {
 		site, missing := newLedgerFromFlags()
 		if hl, ok := site.(*httpLedger); ok && hl != nil {
 			m.ledger = hl
+			m.halls = hl
 		}
 		m.trusted = site == nil && !missing
 	}
@@ -395,7 +406,10 @@ func (m *projects) Register(r *Registry) {
 	r.Handle("project_work", m.work)
 	r.Handle("project_ack", m.ack)
 	r.Handle("project_sync", m.sync)
+	r.Handle("project_claim", m.claim)
 	r.OnConnect(m.connected)
+	r.OnConnect(m.hallsConnected)
+	m.armHalls() // after the ledger is set: a claim that ran out while the server was down is told to the site
 	r.OnDisconnect(func(cl *Client) {
 		delete(m.workAt, cl.ID())
 		delete(m.giveAt, cl.ID())
@@ -445,6 +459,14 @@ func (m *projects) load() error {
 	}
 	if st.Gives == nil {
 		st.Gives = map[string]*projGive{}
+	}
+	if st.Halls == nil {
+		st.Halls = map[string]*hallAsk{}
+	}
+	for id, a := range st.Halls {
+		if a == nil || !projIDOK(a.ID) {
+			delete(st.Halls, id)
+		}
 	}
 	m.st = st
 	return nil
@@ -538,10 +560,15 @@ func (m *projects) gate(cl *Client, jobID string) (projJob, string) {
 	if !at {
 		return job, projectTextNotHere
 	}
+	m.expireHalls()
 	r := m.st.Jobs[jobID]
 	now := m.ms()
 	if r != nil && r.Done > 0 {
 		return job, projectTextDone
+	}
+	// quest.js 1054-1086, JobDialog.as:383-385: a group hall takes nothing until it is claimed.
+	if job.Kind == "hall" && (r == nil || r.Hall == nil) {
+		return job, projectTextClaimFirst
 	}
 	if r != nil && r.Ready > now {
 		return job, projectTextDelayed
@@ -742,6 +769,9 @@ func (m *projects) give(cl *Client, frame json.RawMessage) {
 	m.st.Seq++
 	g := &projGive{ID: fmt.Sprintf("job-g-%s-%s", m.boot, strconv.FormatInt(m.st.Seq, 36)), Job: msg.Job, Phase: r.Phase, Req: req.ID, Player: cl.ID(), Name: cl.Name(),
 		Item: req.C, N: n, Currants: currants, Cost: n * req.Cost, Option: m.option(job, msg.Option)}
+	if r.Hall != nil {
+		g.Claim = r.Hall.Claim
+	}
 	if m.ledger == nil { // -trade-ledger off: the client's word (development only)
 		m.counted(g)
 		return
@@ -817,7 +847,7 @@ func (m *projects) release(g *projGive) {
 func (m *projects) counted(g *projGive) {
 	r := m.row(g.Job)
 	job := m.t.Jobs[g.Job]
-	if r.Phase == g.Phase && r.Done == 0 {
+	if r.Phase == g.Phase && r.Done == 0 && (g.Claim == "" || (r.Hall != nil && r.Hall.Claim == g.Claim)) {
 		r.Got[g.Req] += g.N
 		m.contribute(r, g.Player, g.Name, g.Cost, g.Option)
 	}
@@ -1076,7 +1106,11 @@ func (m *projects) settleIfComplete(jobID string) {
 		log.Printf("project %s phase %d: %s put in %d of %d (%.1f%%): %d iMG, %d currants%s", jobID, phase+1, c.Name, c.Cost, total, share*100, rewards["xp"], goods.Currants, map[bool]string{true: ", a winner"}[winners[c.ID]])
 	}
 	// Advance the project (locations/inc_jobs.js): the next phase after its delay, or done.
-	if final {
+	if final && job.Kind == "hall" {
+		// quest.js doJobEffects 1831-1863: the group gets its hall (or, owning one by now, the job resets).
+		r.Done = now
+		m.hallBuilt(jobID, r)
+	} else if final {
 		r.Done = now
 		r.Option = option
 		rest := map[string]int64{}
@@ -1095,6 +1129,9 @@ func (m *projects) settleIfComplete(jobID string) {
 		r.Phase = phase + 1
 		r.Got = map[string]int64{}
 		r.Ready = next
+		if r.Hall != nil {
+			r.Hall.Until = 0 // quest.js onJobTimeout 1359: only the claimed phase has the clock
+		}
 	}
 	for _, cr := range credits {
 		cr.c.Msg, _ = json.Marshal(cr.msg)
@@ -1169,6 +1206,9 @@ func (m *projects) toAll(msg any) {
 func (m *projects) rowJSON(jobID string, r *projRow, reader int64) map[string]any {
 	job := m.t.Jobs[jobID]
 	out := map[string]any{"phase": 0, "got": map[string]int64{}, "held": map[string]int64{}, "mine": map[string]int64{}, "started": int64(0), "ready": int64(0), "done": int64(0), "option": "", "votes": map[string]int64{}, "top": []projContrib{}, "count": 0}
+	if job.Kind == "hall" {
+		out["hall"] = m.hallJSON(jobID, job, r)
+	}
 	if r == nil {
 		return out
 	}
@@ -1238,9 +1278,10 @@ func (m *projects) broadcast(jobID string) {
 
 // sync answers project_sync: the finished projects, this street's board and every message owed.
 func (m *projects) sync(cl *Client, _ json.RawMessage) {
+	m.expireHalls()
 	built := map[string]any{}
 	for id, r := range m.st.Jobs {
-		if r.Done > 0 {
+		if r.Done > 0 && (r.Hall == nil || r.Hall.Owned) {
 			built[id] = map[string]any{"at": r.Done, "option": r.Option}
 		}
 	}

@@ -503,7 +503,17 @@ func TestProjectCooldownAfterAStreetIsBuilt(t *testing.T) {
 	r.m.st.Rest[street] = r.m.ms()
 	a := r.player(1, "Ada", street)
 	drain(a)
-	q := r.m.reqs(r.m.t.Jobs[second], nil)[0]
+	// An item or currants requirement that is open now (a work one would answer "Nothing here needs that").
+	var q reqView
+	for _, v := range r.m.reqs(r.m.t.Jobs[second], nil) {
+		if v.open && (v.Type == "item" || v.Type == "currants") {
+			q = v
+			break
+		}
+	}
+	if q.ID == "" {
+		t.Skip("no open item or currants requirement")
+	}
 	r.do(a, map[string]any{"t": "project_give", "job": second, "req": q.ID, "n": 1, "currants": 1})
 	if got := errorsOf(drain(a)); len(got) != 1 || got[0] != projectTextCooldown {
 		t.Fatalf("locations/inc_jobs.js: 30 minutes: %v", got)
