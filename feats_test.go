@@ -274,7 +274,7 @@ func TestFeatGoalsRanksAndRewardsThroughTheLedger(t *testing.T) {
 	led := newFakeFeatLedger()
 	path := filepath.Join(t.TempDir(), "feats.json")
 	r := newFeatRig(t, path, led, start.Add(2*time.Hour), nil)
-	// 31 players: places 1-5 Large, 6-26 Medium and feats:top_26, 27-30 The Cigar, 31 only the Small rock.
+	// 31 players: places 1-13 Large, 14-26 Medium and feats:top_26, 27-30 The Cigar, 31 only the Small rock.
 	var cls []*Client
 	for i := int64(1); i <= 31; i++ {
 		cls = append(cls, r.player(i, fmt.Sprintf("P%d", i)))
@@ -336,8 +336,12 @@ func TestFeatGoalsRanksAndRewardsThroughTheLedger(t *testing.T) {
 	if num(rw["xp"]) != 635 || num(rw["energy"]) != 238 || num(rw["currants"]) != 397 || fmt.Sprint(rw["favor"]) != "[map[giant:all points:79]]" {
 		t.Fatalf("doBreakIt's reward times 70/30: %v", rw)
 	}
-	if p := rewardOf(cls[5]); num(p["place"]) != 6 || fmt.Sprint(p["items"]) != "[map[c:petrified_rock_small n:1] map[c:petrified_rock_medium n:1]]" {
-		t.Fatalf("place 6: %v", p)
+	// petrified_rock_large.js:8: the Large rock goes to "the 13 who contributed the most awe".
+	if p := rewardOf(cls[12]); num(p["place"]) != 13 || fmt.Sprint(p["items"]) != "[map[c:petrified_rock_small n:1] map[c:petrified_rock_large n:1]]" {
+		t.Fatalf("place 13: %v", p)
+	}
+	if p := rewardOf(cls[13]); num(p["place"]) != 14 || fmt.Sprint(p["items"]) != "[map[c:petrified_rock_small n:1] map[c:petrified_rock_medium n:1]]" {
+		t.Fatalf("place 14: %v", p)
 	}
 	if p := rewardOf(cls[27]); num(p["place"]) != 28 || fmt.Sprint(p["grants"]) != "[the_cigar]" || fmt.Sprint(p["counters"]) != "[map[counter:feats:contributed_to n:1]]" {
 		t.Fatalf("place 28 gets The Cigar (inc_feats.js 142-143): %v", p)

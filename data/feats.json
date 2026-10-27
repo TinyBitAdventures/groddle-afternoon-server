@@ -7,7 +7,7 @@
 "order":["meditation_of_groddlocritus","qurazy_quoin_collecting","donate_sparkly","reminscequests","hi_signs_1","pet_only","streaking","tottlys_toys","animal_love","makeup_feat_redux"],
 "epics":{"2":6,"4":3},
 "unwired":["mihceal_conch","graves_celebrating_mourning","inviting_friends","makeup_feat_1","visiting_stones"],
-"reward":{"xp":272,"currants":170,"mood":0,"energy":102,"favor":[{"giant":"all","points":34}],"small":"petrified_rock_small","medium":"petrified_rock_medium","large":"petrified_rock_large","largePlaces":5,"topPlaces":26,"cigarPlaces":30},
+"reward":{"xp":272,"currants":170,"mood":0,"energy":102,"favor":[{"giant":"all","points":34}],"small":"petrified_rock_small","medium":"petrified_rock_medium","large":"petrified_rock_large","largePlaces":13,"topPlaces":26,"cigarPlaces":30},
 "feats":{
 "meditation_of_groddlocritus":{"title":"The Meditation of Groddlocritus","epic":0,"goal":33,"bonus":66,"super":99,"pace":{"n":1,"everyMs":60000,"burst":2}},
 "qurazy_quoin_collecting":{"title":"Hispikulus's Amazing Ramble","epic":2,"goal":9,"bonus":18,"super":27,"pace":{"n":5,"everyMs":14400000,"burst":5},"acts":{"quoin":{"n":1,"dedupe":"street"}}},

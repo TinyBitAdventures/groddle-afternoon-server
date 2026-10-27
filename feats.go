@@ -58,8 +58,9 @@ package main
 //
 // Rewards (the Feat met its minimum goal): every contributor gets the
 // doBreakIt reward times the pool's scale, min(total, supermegabonus) over the
-// minimum goal, Math.round, and a Small Petrified Rock; places 1 to 5 also a
-// Large one, 6 to 26 a Medium one. Places rank by amount, then by who reached
+// minimum goal, Math.round, and a Small Petrified Rock; places 1 to 13 also a
+// Large one (petrified_rock_large.js:8 "drawn to the 13 who contributed the
+// most awe"), 14 to 26 a Medium one. Places rank by amount, then by who reached
 // it first. The currants go into the site's ledger through a signed call
 // (POST groddle/v1/ledger/feat, idempotent per id); the rest (iMG, mood,
 // energy, favor, the rocks, which are not tradeable, and the badges) is the
