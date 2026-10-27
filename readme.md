@@ -41,6 +41,7 @@ Options:
 | `-ledger-ca` | | A PEM file of extra roots for that site's certificate (a local Caddy CA) |
 | `-trade-ledger` | `on` | `off` brings back the client-trusted swap, for development only |
 | `-projects-file` | `realtime-projects.json` beside the secret | Keeps street projects (who put in how much, the contributions waiting for the ledger, the rewards not yet applied) across restarts. `off` keeps them in memory only |
+| `-feats-file` | `realtime-feats.json` beside the secret | Keeps the shared Feat (who put in how much, who contributed to and was rewarded for each Feat, the rewards waiting for the ledger or an ack) across restarts. `off` keeps it in memory only |
 
 The secret is the same file the site reads (`realtime.secret` beside its webroot by default). Make
 one with `openssl rand -hex 32 > realtime.secret` and keep it outside any webroot.
@@ -97,6 +98,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `races.go` | Grab 'Em Good and the finish-line races between real players |
 | `trade.go` | Trading items and currants |
 | `projects.go` | Street projects everyone on a street builds together: contributions through the site's ledger, the source's reward shares, the road opening for everyone |
+| `feats.go` | One Feat a day for everyone playing: contributions at the source's pace, the minimum, bonus and supermegabonus goals, ranks, rewards by place with their currants through the site's ledger |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
@@ -116,6 +118,7 @@ repo, so the server and the game agree. With the game checked out beside this re
     node tools/build-realtime-rook.mjs
     node tools/build-realtime-races.mjs
     node tools/build-realtime-projects.mjs
+    node tools/build-realtime-feats.mjs
     node tools/build-realtime-trade.mjs
 
 The game's tests fail when this data is out of date.
@@ -128,7 +131,7 @@ The game's tests fail when this data is out of date.
 One test compares tree fruit caps with the game's data, reading `../groddle-afternoon` (or
 `GRODDLE_GAME_DIR`), and skips when the game isn't there. `GRODDLE_ROOK_DEV=1` turns on `rook_dev`
 messages that start an attack or a wing beat on demand, for testing only, and `GRODDLE_PARTY_DEV=1`
-turns on `party_space_dev`, which brings a Party Space's end near.
+turns on `party_space_dev`, which brings a Party Space's end near. `GRODDLE_FEATS_DEV=1` turns on `feat_dev`, which ends today's Feat soon or opens another now.
 
 ## Licence
 
