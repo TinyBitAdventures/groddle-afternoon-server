@@ -365,6 +365,7 @@ type liveObj struct {
 	croak        bool
 	tickAt       time.Time
 	petters      map[int64]int64
+	eatingFood   string // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
 
 	// rock: who is mining it now, in the order they started, and each miner's helpers with how
 	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122). A Dirt Pile keeps its
@@ -425,6 +426,7 @@ func (o *objects) Register(r *Registry) {
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
+	r.Provide("objects.pigFood", o.pigFood)
 }
 
 // treeClass is the class of the tree an id names on a street ("" when it names no tree there, or a

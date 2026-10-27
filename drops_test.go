@@ -12,6 +12,7 @@ import (
 type fakeDropSite struct {
 	drops  []dropCall
 	takes  []string
+	eats   []string
 	ground []dropRow
 	err    error
 	answer dropAnswer      // for drops
@@ -40,6 +41,18 @@ func (f *fakeDropSite) dropTake(op string, id int64, why string) dropAnswer {
 }
 
 func (f *fakeDropSite) dropsOnGround() ([]dropRow, error) { return f.ground, f.err }
+
+func (f *fakeDropSite) dropEat(op string, from int) dropAnswer {
+	f.eats = append(f.eats, fmt.Sprintf("%s:%d", op, from))
+	if f.silent {
+		return dropAnswer{}
+	}
+	if f.took[op] {
+		return dropAnswer{Status: "refused", Why: "gone"}
+	}
+	n := from - 1
+	return dropAnswer{Status: "settled", N: &n}
+}
 
 type dropRig struct {
 	t       *testing.T

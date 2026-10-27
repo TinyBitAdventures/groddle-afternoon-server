@@ -19,6 +19,11 @@ package main
 //     location stack needs the player within config.verb_radius, 800 px
 //     (config_prod.js:37), or "Oops. The <name> got too far away for you to
 //     pick up. Get closer and then try again." (main.js 2970-2979).
+//   - A street Piggy eats dropped food (GameServerJS items/npc_piggy.js onContainerItemAdded
+//     1393-1411, onTwiceDaily 1879-1990, onFoodPathing 1482-1500: apiConsume(1) of an is_food
+//     stack, include/food.js:1): objects_pigs.go decides which Piggy and when; here one of the
+//     stack goes, through the site (POST groddle/v1/ledger/drop/eat: the stack is in nobody's
+//     ledger, so only its count changes), and everyone on the street hears it.
 //   - Nothing in the source ever clears a street of dropped stacks:
 //     location.js deleteTakeables (4619-4626) is called from nowhere, and
 //     dropped_on is only ever cleared by a pickup (takeable.js 41-42, 83).
@@ -50,6 +55,7 @@ package main
 //	{"t":"ground_taken","op":"drop-…-t","id":"drop-…","status":"settled"|"refused","why":"…","text":"…","item":{…}|null}
 //	{"t":"ground_gone","id":"drop-…","by":{"id":9,"name":"Bo"}|null,"why":"picked"|"returned"}
 //	{"t":"ground_back","op":"drop-…-t","id":"drop-…","item":{…}}       to a dropper whose stack came home
+//	{"t":"ground_eaten","street":"LA5…","id":"drop-…","n":2,"pig":"pig:1","x":1200,"y":-120}   a Piggy ate one (n: left; 0 is followed by ground_gone why "eaten")
 //
 //	Stack: {"id":"drop-…","c":"apple","n":3,"r":40?,"x":1200,"y":-120,"by":{"id":7,"name":"Ada"},"at":1730000000000}
 //
@@ -81,6 +87,7 @@ const (
 	ledgerRouteDrop     = "/groddle/v1/ledger/drop"
 	ledgerRouteDropTake = "/groddle/v1/ledger/drop/take"
 	ledgerRouteDrops    = "/groddle/v1/ledger/drops"
+	ledgerRouteDropEat  = "/groddle/v1/ledger/drop/eat"
 
 	dropLockRadius = 100.0 // takeable.js:38 distanceFromPlayer(dropper) < 100, measured across (dropLockHeight)
 	dropLockHeight = 200.0 // ours: the game draws a stack 74 px above the feet (game.js dropPackItem), the source 20
@@ -127,6 +134,7 @@ type groundStack struct {
 
 	unlocked bool  // the dropper walked away once (takeable.js 41-42)
 	picking  int64 // a pickup the site is weighing
+	eating   bool  // a Piggy's bite the site is weighing
 }
 
 func (s *groundStack) view() map[string]any {
@@ -171,6 +179,7 @@ type dropAnswer struct {
 	Op     string     `json:"op,omitempty"`   // a take: its own op
 	By     int64      `json:"by,omitempty"`   // a take refused as gone: who has it
 	Item   *tradeItem `json:"item,omitempty"` // a take: what it gave
+	N      *int       `json:"n,omitempty"`    // a bite: how many are left
 }
 
 // dropSite is the site's ledger (httpLedger). Calls block; the module makes them off the hub lock.
@@ -178,6 +187,7 @@ type dropSite interface {
 	drop(c dropCall) dropAnswer
 	dropTake(op string, id int64, why string) dropAnswer
 	dropsOnGround() ([]dropRow, error)
+	dropEat(op string, from int) dropAnswer
 }
 
 func (l *httpLedger) dropPost(route string, body []byte, out any) error {
@@ -227,6 +237,11 @@ func (l *httpLedger) drop(c dropCall) dropAnswer {
 func (l *httpLedger) dropTake(op string, id int64, why string) dropAnswer {
 	body, _ := json.Marshal(map[string]any{"op": op, "id": id, "why": why})
 	return l.dropAsk(ledgerRouteDropTake, body)
+}
+
+func (l *httpLedger) dropEat(op string, from int) dropAnswer {
+	body, _ := json.Marshal(map[string]any{"op": op, "from": from})
+	return l.dropAsk(ledgerRouteDropEat, body)
 }
 
 func (l *httpLedger) dropsOnGround() ([]dropRow, error) {
@@ -285,6 +300,75 @@ func (m *drops) Register(r *Registry) {
 	r.OnDisconnect(func(cl *Client) { delete(m.rates, cl.ID()) })
 	// How many shared stacks lie on a street (for other modules and tests).
 	r.Provide("drops.count", func(street string) int { return len(m.byStreet[street]) })
+	// A street Piggy's food (objects_pigs.go goForFood) and its bite.
+	r.Provide("drops.food", m.food)
+	r.Provide("drops.eat", m.eat)
+}
+
+// food is the stack id names on street if it is food a Piggy at (x, y) can reach and nobody is
+// taking, or with id "" the nearest such stack across; "" when there is none. It answers its x too.
+func (m *drops) food(street, id string, x, y, reachX, reachY float64) (string, float64) {
+	ok := func(s *groundStack) bool {
+		return s != nil && s.Street == street && s.picking == 0 && !s.eating && m.table.Items[s.C].Food &&
+			math.Abs(s.X-x) <= reachX && math.Abs(s.Y-y) <= reachY
+	}
+	if id != "" {
+		if s := m.stacks[id]; ok(s) {
+			return s.ID, s.X
+		}
+		return "", 0
+	}
+	var best *groundStack
+	for _, s := range m.byStreet[street] {
+		if !ok(s) {
+			continue
+		}
+		if best == nil || math.Abs(s.X-x) < math.Abs(best.X-x) || (math.Abs(s.X-x) == math.Abs(best.X-x) && s.ID < best.ID) {
+			best = s
+		}
+	}
+	if best == nil {
+		return "", 0
+	}
+	return best.ID, best.X
+}
+
+// eat is onFoodPathing's apiConsume(1) on a shared stack, for the Piggy pig: done(true) once one is gone.
+func (m *drops) eat(id, pig string, done func(bool)) {
+	s := m.stacks[id]
+	if s == nil || m.site == nil || s.picking != 0 || s.eating || !m.table.Items[s.C].Food {
+		done(false)
+		return
+	}
+	s.eating = true
+	from := s.N
+	site := m.site
+	m.spawn(func() {
+		a := site.dropEat(id, from)
+		m.h.After(0, func() {
+			s.eating = false
+			if a.Status != "settled" {
+				done(false)
+				return
+			}
+			left := from - 1
+			if a.N != nil {
+				left = *a.N
+			}
+			if m.stacks[id] == s {
+				s.N = left
+				if left <= 0 {
+					m.remove(s)
+				}
+			}
+			log.Printf("drops: %s on %s ate one %s from %s (%d left)", pig, s.Street, s.C, s.ID, max(0, left))
+			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_eaten", "street": s.Street, "id": s.ID, "n": max(0, left), "pig": pig, "x": s.X, "y": s.Y}, 0)
+			if left <= 0 {
+				m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_gone", "id": s.ID, "by": nil, "why": "eaten"}, 0)
+			}
+			done(true)
+		})
+	})
 }
 
 // dropShared: a public street, where drops are everyone's (follow.go's rule for a private place).
@@ -487,6 +571,12 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 			log.Printf("drops: %d dropped %d %s on %s (%s)", from, s.N, s.C, s.Street, s.ID)
 			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_added", "stack": s.view()}, 0)
 			m.sweepSoon()
+			// onContainerItemAdded: a hungry street Piggy goes for dropped food.
+			if m.table.Items[s.C].Food {
+				if fn, ok := m.h.ProvidedLocked("objects.pigFood").(func(string, string, float64, float64)); ok {
+					fn(s.Street, s.ID, s.X, s.Y)
+				}
+			}
 		})
 	})
 }

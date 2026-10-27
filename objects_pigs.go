@@ -17,9 +17,16 @@ package main
 //     goes to 1 ("Other animals make me happy!"); hunger +1 each half below 2, then +1 on the daily
 //     half up to 10; at 10 it croaks. A street Piggy never starves (PIGGY_STARVATION_DEATH, Austin's
 //     call G63: only owned piggies die, and those are each player's own). A hungry Piggy goes for
-//     food: the server sees no dropped stacks (each player's own), so it eats one fruit from the
-//     nearest tree on its level with fruit (onFoodPathing 1482-1533) at once, as the remake's replay
-//     of a tick while nobody watched does, and the street hears "ate" so it can walk there.
+//     food, dropped food first (onTwiceDaily 1879-1913 and 1975-1990: food_nearby before
+//     trants_nearby): a stack dropped for everyone on the street (drops.go) it walks to and eats one
+//     of (pigFood below); else one fruit from the nearest tree on its level with fruit
+//     (onFoodPathing 1482-1533) at once, as the remake's replay of a tick while nobody watched does,
+//     and the street hears "ate" so it can walk there.
+//   - Food dropped for everyone (onContainerItemAdded 1393-1411): a hungry Piggy that is not sad goes
+//     for it at once if it lies in reach (its move_limits; here pigReachX across, pigEatDY up or
+//     down), and on arrival eats one of the stack (onFoodPathing 1489-1500: apiConsume(1), hunger 0,
+//     "Yum!"). The walk takes the source's walk speed over the distance (npc_walk_speed 30-55,
+//     onCreate 1442; pigWalkPx), and the stack may be picked up meanwhile, as in the source.
 //     Petters from an earlier game day are forgotten (1857-1867).
 //   - A sad Piggy (a depressing street, include/animal_sadness.js) skips its tick and refuses.
 //   - pet (onPetComplete 1709-1735): the ak_piggy_pet success roll by rank; on success mood +1
@@ -29,7 +36,8 @@ package main
 //     now."; not petted today: "Give that Piggy some love first!"; else the ak_piggy_nibble roll.
 //   - feed (feed handler 560-750): food of base cost 5 or more sates a hungry Piggy (the client
 //     says so with the "sate" perk: the food and its cost are its own); eat: one of the player's own
-//     dropped stacks, or a tree's fruit ("on"), eaten where only that player sees the food.
+//     dropped stacks (a private place's, or a class the ledger does not carry), or a tree's fruit
+//     ("on"), eaten where only that player sees the food.
 // Chickens and Butterflies have no mood or hunger in the source (npc_chicken.js, npc_butterfly.js);
 // what they remember is per player (massagers[pc.tsid], the squeeze and milk limits), so it stays in
 // each player's save, as in solo.
@@ -54,6 +62,9 @@ const (
 	pigReachX     = 1600
 	pigReachY     = 1000
 	pigEatDY      = 100 // EAT_RADIUS: food much higher or lower is out of reach (apiFindPath)
+	pigWalkPx     = 42  // npc_piggy.js onCreate 1442: npc_walk_speed randInt(30,55) px/s, the middle
+	pigWalkMin    = time.Second
+	pigWalkMax    = 20 * time.Second
 )
 
 // Copy from npc_piggy.js.
@@ -239,7 +250,8 @@ func (o *objects) pigTwiceDaily(street string, ob *liveObj, pigs []*liveObj) []m
 		ob.croak = true
 		out = append(out, ev("croak"))
 	}
-	if scanned && ob.hunger > 0 {
+	// Dropped food first (goForFood: the Piggy walks to it), else a tree's fruit.
+	if scanned && ob.hunger > 0 && ob.eatingFood == "" && !o.goForFood(street, ob, "") {
 		if tree := o.fruitNear(street, ob.spot); tree != nil {
 			tree.fruit--
 			ob.hunger, ob.croak = 0, false
@@ -249,6 +261,63 @@ func (o *objects) pigTwiceDaily(street string, ob *liveObj, pigs []*liveObj) []m
 		}
 	}
 	return out
+}
+
+// pigFood is onContainerItemAdded for a stack dropped for everyone (drops.go calls it once the
+// site has it): the nearest hungry Piggy on the street that is not sad and has it in reach goes for it.
+func (o *objects) pigFood(street, id string, x, y float64) {
+	if o.w.sad[street] {
+		return
+	}
+	var best *liveObj
+	bestD := math.Inf(1)
+	for _, spot := range o.w.streets[street] {
+		if spot.kind != "pig" {
+			continue
+		}
+		ob := o.streets[street][spot.id]
+		if ob == nil || ob.hunger <= 0 || ob.eatingFood != "" || math.Abs(spot.y-y) > pigEatDY || math.Abs(spot.x-x) > pigReachX {
+			continue
+		}
+		if d := math.Abs(spot.x - x); d < bestD || (d == bestD && spot.id < best.spot.id) {
+			best, bestD = ob, d
+		}
+	}
+	if best != nil {
+		o.goForFood(street, best, id)
+	}
+}
+
+// goForFood sends a Piggy for a stack on the ground (id, or the nearest food in reach when ""): it
+// walks there, then eats one if the stack is still there (onFoodPathing). False when there is none.
+func (o *objects) goForFood(street string, ob *liveObj, id string) bool {
+	food, _ := o.h.ProvidedLocked("drops.food").(func(string, string, float64, float64, float64, float64) (string, float64))
+	eat, _ := o.h.ProvidedLocked("drops.eat").(func(string, string, func(bool)))
+	if food == nil || eat == nil {
+		return false
+	}
+	id, at := food(street, id, ob.spot.x, ob.spot.y, pigReachX, pigEatDY)
+	if id == "" {
+		return false
+	}
+	walk := time.Duration(math.Abs(at-ob.spot.x) / pigWalkPx * float64(time.Second))
+	walk = min(pigWalkMax, max(pigWalkMin, walk))
+	ob.eatingFood = id
+	o.h.After(walk, func() {
+		if ob.eatingFood != id {
+			return
+		}
+		eat(id, ob.spot.id, func(ok bool) {
+			ob.eatingFood = ""
+			if !ok || ob.hunger <= 0 {
+				return
+			}
+			ob.hunger, ob.croak = 0, false
+			o.broadcast(street, 0, ob)
+			o.saveSoon()
+		})
+	})
+	return true
 }
 
 // fruitNear is the nearest living, unrooked tree on the Piggy's level with fruit (onTwiceDaily's
