@@ -72,8 +72,14 @@ package main
 // written to -projects-file after every change (a temp file, fsync, rename):
 // a restart neither loses nor doubles a contribution or a reward.
 //
-// Departures: Hire a hand is solo only; projects in homes (restorations) stay
-// per player; an exempt or grandfathered road is the player's own (the save's).
+// Departures: Hire a hand is solo only; an exempt or grandfathered road is the
+// player's own (the save's).
+//
+// Restorations (kind "restore", lane HOMES3): a worn-out cultivation's
+// project on a home street or in a back yard is shared by everyone the owner
+// lets stand there (players/inc_jobs.js 420-470, quest.js type 5);
+// home_projects.go makes each one from the site's signed word on the owner's
+// save and has its rules.
 //
 // Group halls (G331, kind "hall"): a group claims one before anyone may put
 // anything in, the claimed phase has a clock, and the hall is the group's at
@@ -191,6 +197,10 @@ type projJob struct {
 	Divisor    int            `json:"divisor"`
 	Claim      int64          `json:"claim,omitempty"`   // a group hall's claim currants (group_halls.go)
 	Minutes    int64          `json:"minutes,omitempty"` // and the minutes its claimed phase has
+	Owner      int64          `json:"owner,omitempty"`   // a restoration's home owner (home_projects.go)
+	Proto      string         `json:"proto,omitempty"`   // and its worn-out cultivation
+	Yard       string         `json:"yard,omitempty"`    // street | back
+	Mult       float64        `json:"mult,omitempty"`    // the rewards' lifespan multiplier (quest.js:1762-1767)
 }
 
 type projDropRow struct {
@@ -223,6 +233,8 @@ type projTable struct {
 	Jobs       map[string]projJob    `json:"jobs"`
 	Classes    map[string]projClass  `json:"classes"`
 	Drops      map[string][]projDrop `json:"drops"`
+	// Restorations: proto class -> its project's phases, classes at divisor 1 (home_projects.go).
+	Restorations map[string]projRestoration `json:"restorations"`
 }
 
 func (t *projTable) class(job projJob, phase int) (projClass, bool) {
@@ -306,11 +318,12 @@ type projState struct {
 	Credits map[string]*projCredit `json:"credits"`
 	Owed    map[int64][]projOwed   `json:"owed"`
 	Halls   map[string]*hallAsk    `json:"halls,omitempty"` // group hall calls waiting for the site (group_halls.go)
+	Homes   map[string]*projJob    `json:"homes,omitempty"` // restorations on home streets, made from the site's word (home_projects.go)
 	Seq     int64                  `json:"seq"`
 }
 
 func newProjState() *projState {
-	return &projState{Jobs: map[string]*projRow{}, Rest: map[string]int64{}, Gives: map[string]*projGive{}, Credits: map[string]*projCredit{}, Owed: map[int64][]projOwed{}, Halls: map[string]*hallAsk{}}
+	return &projState{Jobs: map[string]*projRow{}, Rest: map[string]int64{}, Gives: map[string]*projGive{}, Credits: map[string]*projCredit{}, Owed: map[int64][]projOwed{}, Halls: map[string]*hallAsk{}, Homes: map[string]*projJob{}}
 }
 
 // projectLedger is the site's ledger for projects: take gave out, put got in, once per id.
@@ -336,6 +349,7 @@ type projects struct {
 	rng     func() float64
 	workAt  map[int64]time.Time
 	giveAt  map[int64]time.Time
+	secret  []byte // the site's signing secret, for restorations' tokens (home_projects.go)
 }
 
 func newProjects(h *Hub) Module {
@@ -363,6 +377,9 @@ func newProjects(h *Hub) Module {
 			m.halls = hl
 		}
 		m.trusted = site == nil && !missing
+		if f := flag.Lookup("secret-file"); f != nil {
+			m.secret, _ = readSecret(expandHome(f.Value.String()))
+		}
 	}
 	return m
 }
@@ -379,7 +396,7 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 	}
 	m := &projects{h: h, t: t, offer: map[string][]string{}, st: newProjState(), path: path,
 		boot: strconv.FormatInt(h.Now().UnixMilli(), 36), spawn: func(fn func()) { go fn() }, rng: rand.Float64,
-		workAt: map[int64]time.Time{}, giveAt: map[int64]time.Time{}}
+		workAt: map[int64]time.Time{}, giveAt: map[int64]time.Time{}, secret: homesSecretForTest}
 	ids := make([]string, 0, len(t.Jobs))
 	for id := range t.Jobs {
 		ids = append(ids, id)
@@ -407,6 +424,8 @@ func (m *projects) Register(r *Registry) {
 	r.Handle("project_ack", m.ack)
 	r.Handle("project_sync", m.sync)
 	r.Handle("project_claim", m.claim)
+	r.Handle("project_home", m.homeJob)
+	r.Handle("project_home_drop", m.homeDrop)
 	r.OnConnect(m.connected)
 	r.OnConnect(m.hallsConnected)
 	m.armHalls() // after the ledger is set: a claim that ran out while the server was down is told to the site
@@ -430,8 +449,17 @@ func (m *projects) load() error {
 	if err := json.Unmarshal(b, st); err != nil {
 		return err
 	}
+	if st.Homes == nil {
+		st.Homes = map[string]*projJob{}
+	}
+	for id, j := range st.Homes {
+		if j == nil || !m.homeJobOK(id, *j) {
+			delete(st.Homes, id)
+		}
+	}
 	for id, row := range st.Jobs {
-		if _, ok := m.t.Jobs[id]; !ok || row == nil {
+		_, home := st.Homes[id]
+		if _, ok := m.t.Jobs[id]; (!ok && !home) || row == nil {
 			delete(st.Jobs, id)
 			continue
 		}
@@ -546,7 +574,7 @@ func (m *projects) row(id string) *projRow {
 
 // gate: may this player put anything into job now? ("" when yes)
 func (m *projects) gate(cl *Client, jobID string) (projJob, string) {
-	job, ok := m.t.Jobs[jobID]
+	job, ok := m.job(jobID)
 	if !ok {
 		return job, projectTextNoJob
 	}
@@ -846,7 +874,7 @@ func (m *projects) release(g *projGive) {
 // counted: the ledger took it (or the client's word, ledger off). It goes in, the giver hears, the street sees.
 func (m *projects) counted(g *projGive) {
 	r := m.row(g.Job)
-	job := m.t.Jobs[g.Job]
+	job, _ := m.job(g.Job)
 	if r.Phase == g.Phase && r.Done == 0 && (g.Claim == "" || (r.Hall != nil && r.Hall.Claim == g.Claim)) {
 		r.Got[g.Req] += g.N
 		m.contribute(r, g.Player, g.Name, g.Cost, g.Option)
@@ -994,7 +1022,7 @@ func winningOption(job projJob, votes map[string]int64) string {
 }
 
 func (m *projects) settleIfComplete(jobID string) {
-	job := m.t.Jobs[jobID]
+	job, _ := m.job(jobID)
 	r := m.st.Jobs[jobID]
 	if r == nil || r.Done > 0 {
 		return
@@ -1060,6 +1088,9 @@ func (m *projects) settleIfComplete(jobID string) {
 			share = math.Min(1, float64(c.Cost)/float64(total))
 		}
 		mult := share / divisor
+		if job.Kind == "restore" && job.Mult > 0 {
+			mult *= job.Mult // quest.js:1762-1767, players/inc_jobs.js:437-438
+		}
 		rw := cls.Rewards
 		favor := []map[string]any{}
 		for _, f := range rw.Favor {
@@ -1102,6 +1133,9 @@ func (m *projects) settleIfComplete(jobID string) {
 		msg := map[string]any{"t": "project_reward", "id": id, "job": jobID, "phase": phase, "cls": job.Phases[phase].C, "final": final,
 			"share": share, "participation": jsRound(share * 100), "rewards": rewards, "performance": perf, "winner": winners[c.ID], "top5": top[c.ID],
 			"phases": phases, "option": option, "readyAt": next, "count": len(rec.Mine), "cost": c.Cost, "total": total}
+		if job.Kind == "restore" {
+			m.homeReward(msg, job, c.ID, share)
+		}
 		credits = append(credits, credit{c: &projCredit{ID: id, Player: c.ID, Goods: goods}, msg: msg})
 		log.Printf("project %s phase %d: %s put in %d of %d (%.1f%%): %d iMG, %d currants%s", jobID, phase+1, c.Name, c.Cost, total, share*100, rewards["xp"], goods.Currants, map[bool]string{true: ", a winner"}[winners[c.ID]])
 	}
@@ -1110,6 +1144,9 @@ func (m *projects) settleIfComplete(jobID string) {
 		// quest.js doJobEffects 1831-1863: the group gets its hall (or, owning one by now, the job resets).
 		r.Done = now
 		m.hallBuilt(jobID, r)
+	} else if final && job.Kind == "restore" {
+		r.Done = now
+		m.homeRestored(jobID, job)
 	} else if final {
 		r.Done = now
 		r.Option = option
@@ -1204,7 +1241,7 @@ func (m *projects) toAll(msg any) {
 // —— What players see ——
 
 func (m *projects) rowJSON(jobID string, r *projRow, reader int64) map[string]any {
-	job := m.t.Jobs[jobID]
+	job, _ := m.job(jobID)
 	out := map[string]any{"phase": 0, "got": map[string]int64{}, "held": map[string]int64{}, "mine": map[string]int64{}, "started": int64(0), "ready": int64(0), "done": int64(0), "option": "", "votes": map[string]int64{}, "top": []projContrib{}, "count": 0}
 	if job.Kind == "hall" {
 		out["hall"] = m.hallJSON(jobID, job, r)
@@ -1256,7 +1293,7 @@ func (m *projects) rowJSON(jobID string, r *projRow, reader int64) map[string]an
 
 // broadcast sends a project's row to everyone at its board, each with their own share.
 func (m *projects) broadcast(jobID string) {
-	job, ok := m.t.Jobs[jobID]
+	job, ok := m.job(jobID)
 	if !ok {
 		return
 	}
@@ -1281,6 +1318,9 @@ func (m *projects) sync(cl *Client, _ json.RawMessage) {
 	m.expireHalls()
 	built := map[string]any{}
 	for id, r := range m.st.Jobs {
+		if _, home := m.st.Homes[id]; home {
+			continue // a restoration is its home's, not the world's
+		}
 		if r.Done > 0 && (r.Hall == nil || r.Hall.Owned) {
 			built[id] = map[string]any{"at": r.Done, "option": r.Option}
 		}
@@ -1289,6 +1329,9 @@ func (m *projects) sync(cl *Client, _ json.RawMessage) {
 	if cl.Street() != "" {
 		jobs := map[string]any{}
 		for _, id := range m.offer[gStreet(cl.Street())] {
+			jobs[id] = m.rowJSON(id, m.st.Jobs[id], cl.ID())
+		}
+		for _, id := range m.homeOffer(cl.Street()) {
 			jobs[id] = m.rowJSON(id, m.st.Jobs[id], cl.ID())
 		}
 		m.h.SendLocked(cl, map[string]any{"t": "project_street", "street": cl.Street(), "now": m.ms(), "jobs": jobs})
