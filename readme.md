@@ -68,6 +68,19 @@ The game connects to `/ws` on the site's own host. With Caddy:
         # ... the Minn site
     }
 
+### On a host of its own
+
+When the site's web server cannot pass `/ws` on (managed WordPress hosting), run this server on a
+host of its own and tell the site where it is: `define( 'GRODDLE_REALTIME_URL',
+'wss://play.groddleafternoon.com/ws' );` in the site's `wp-config.php`. Each ticket then names that
+address and the game connects there. Allow the site's pages with `-origins groddleafternoon.com`,
+keep `-ledger-url https://groddleafternoon.com`, and give both sides the same secret (the site's
+`GRODDLE_REALTIME_SECRET` constant, this server's `-secret-file`). With Caddy on that host:
+
+    play.groddleafternoon.com {
+        reverse_proxy /ws 127.0.0.1:8793
+    }
+
 ## Trust model
 
 The server decides everything players could fight over, from data it owns: who got a quoin, how
