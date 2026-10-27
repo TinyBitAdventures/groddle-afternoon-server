@@ -32,26 +32,39 @@ package main
 // The outbox holds at most creditQueueMax events; past that the oldest are
 // dropped (logged).
 //
-// Across a restart of this server the outbox is lost: memory only, like the
-// quoin, object and race state it comes from. A credit lost so never reaches
-// the site, and the player's save shows the outcome anyway, so the site pays
-// for it from the earning budget as before slice 3: nothing is minted twice
-// and nothing leaves the player's pack, it only costs budget it would not
-// have. (A journal like -feats-file would close that; it was not needed for
-// the budget's sake.)
+// Across a restart of this server the outbox is kept: every event is
+// written to a journal (-credits-file, default realtime-credits.jsonl beside
+// -secret-file; off: memory only) as it is queued, one {"add":event} line,
+// and each answer the site gives is a {"done":[ids]} line. A restart replays
+// the journal and sends what the site has not named done, with the same ids,
+// so nothing is lost and nothing is credited twice. Adds are written without
+// an fsync (they happen under the hub lock, and what a process writes
+// survives the process: a deploy's restart or a crash); the done lines,
+// written off the hub lock, are synced. The journal is rewritten down to
+// what still waits once it is creditCompactAt lines long, and when it is
+// opened. A torn last line (a crash mid-write) is skipped. Past
+// creditQueueMax the oldest events are dropped (logged): a credit lost so
+// never reaches the site, and the player's save shows the outcome anyway, so
+// the site pays for it from the earning budget as before slice 3: nothing is
+// minted twice and nothing leaves the player's pack.
 //
 // Without the site's ledger (-trade-ledger off, no -ledger-url, tests) the
 // module offers its hook but sends nothing.
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
@@ -65,6 +78,7 @@ const (
 	creditBackoffMin   = time.Second
 	creditBackoffMax   = time.Minute
 	creditQueueMax     = 20_000
+	creditCompactAt    = 2000 // journal lines before it is rewritten to what still waits
 
 	// quoinCreditDaily: the most quoins a player can collect in a game day,
 	// 100 + 5 * 10 with daily_quoin_limit_5 (js/quoins.js quoinDailyLimitFor;
@@ -75,6 +89,11 @@ const (
 	// raceWinCurrants: players/inc_games.js:1374 and :1574 stats_add_currants(100).
 	raceWinCurrants = 100
 )
+
+var creditsFileFlag = flag.String("credits-file", "", "file that keeps the credits the site's ledger has not taken yet, so a restart sends them (default: realtime-credits.jsonl beside -secret-file; off: memory only)")
+
+// creditsFileForTest lets a test give the module a journal; under go test the flag is ignored.
+var creditsFileForTest string
 
 // The why of each credit, and the letter its id carries.
 var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t"}
@@ -128,6 +147,7 @@ type creditOutbox struct {
 	queue   []creditEvent
 	dropped int
 	wake    chan struct{}
+	journal *creditJournal // nil: memory only
 }
 
 func newCreditOutbox(site creditSite) *creditOutbox {
@@ -145,6 +165,11 @@ func (o *creditOutbox) add(ev creditEvent) {
 		}
 	}
 	o.queue = append(o.queue, ev)
+	if o.journal != nil {
+		if err := o.journal.write(creditLine{Add: &ev}, false); err != nil {
+			log.Printf("credits journal: %v (credit %s kept in memory only)", err, ev.ID)
+		}
+	}
 	o.mu.Unlock()
 	select {
 	case o.wake <- struct{}{}:
@@ -186,6 +211,16 @@ func (o *creditOutbox) flushOnce() (int, error) {
 		}
 	}
 	o.queue = kept
+	if o.journal != nil && len(done) > 0 {
+		if err := o.journal.write(creditLine{Done: done}, true); err != nil {
+			log.Printf("credits journal: %v", err)
+		}
+		if o.journal.lines >= creditCompactAt {
+			if err := o.journal.rewrite(o.queue); err != nil {
+				log.Printf("credits journal: %v", err)
+			}
+		}
+	}
 	if len(gone) == 0 {
 		// An answer that took none of them: keep them, but say so (a site that
 		// refuses the shape would otherwise be retried in silence).
@@ -217,6 +252,159 @@ func (o *creditOutbox) run() {
 	}
 }
 
+// —— The journal ——
+
+// creditLine is one line of the journal: an event queued, or the ids the site named done.
+type creditLine struct {
+	Add  *creditEvent `json:"add,omitempty"`
+	Done []string     `json:"done,omitempty"`
+}
+
+type creditJournal struct {
+	path  string
+	f     *os.File
+	lines int
+}
+
+// openCreditJournal replays a journal (a missing file is an empty one) and
+// rewrites it down to the events still waiting, oldest first, at most
+// creditQueueMax (the newest kept).
+func openCreditJournal(path string) (*creditJournal, []creditEvent, error) {
+	var queue []creditEvent
+	at := map[string]int{} // id -> index in queue, -1 once done
+	f, err := os.Open(path)
+	if err == nil {
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64*1024), 1<<20)
+		bad := 0
+		for sc.Scan() {
+			var l creditLine
+			if json.Unmarshal(sc.Bytes(), &l) != nil {
+				bad++ // a torn last line from a crash
+				continue
+			}
+			if ev := l.Add; ev != nil && ev.ID != "" && ev.User > 0 {
+				if _, seen := at[ev.ID]; !seen {
+					if ev.Got.Items == nil {
+						ev.Got.Items = []tradeItem{}
+					}
+					at[ev.ID] = len(queue)
+					queue = append(queue, *ev)
+				}
+			}
+			for _, id := range l.Done {
+				if i, ok := at[id]; ok && i >= 0 {
+					queue[i].ID = ""
+				}
+				at[id] = -1
+			}
+		}
+		f.Close()
+		if err := sc.Err(); err != nil {
+			return nil, nil, err
+		}
+		if bad > 0 {
+			log.Printf("credits journal %s: %d lines did not read (skipped)", path, bad)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, err
+	}
+	kept := queue[:0]
+	for _, ev := range queue {
+		if ev.ID != "" {
+			kept = append(kept, ev)
+		}
+	}
+	if len(kept) > creditQueueMax {
+		log.Printf("credits journal %s: %d waiting, the oldest %d dropped (their outcomes go through the budget)", path, len(kept), len(kept)-creditQueueMax)
+		kept = kept[len(kept)-creditQueueMax:]
+	}
+	j := &creditJournal{path: path}
+	if err := j.rewrite(kept); err != nil {
+		return nil, nil, err
+	}
+	return j, kept, nil
+}
+
+// rewrite replaces the file with one add line per event still waiting (a temp file and a rename).
+func (j *creditJournal) rewrite(queue []creditEvent) error {
+	if err := os.MkdirAll(filepath.Dir(j.path), 0o700); err != nil {
+		return err
+	}
+	tmp := j.path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	for i := range queue {
+		b, _ := json.Marshal(creditLine{Add: &queue[i]})
+		w.Write(append(b, '\n'))
+	}
+	err = w.Flush()
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, j.path); err != nil {
+		return err
+	}
+	if j.f != nil {
+		j.f.Close()
+	}
+	j.f, err = os.OpenFile(j.path, os.O_APPEND|os.O_WRONLY, 0o600)
+	j.lines = len(queue)
+	return err
+}
+
+func (j *creditJournal) write(l creditLine, sync bool) error {
+	if j.f == nil {
+		return errors.New("journal closed")
+	}
+	b, err := json.Marshal(l)
+	if err != nil {
+		return err
+	}
+	if _, err := j.f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	j.lines++
+	if sync {
+		return j.f.Sync()
+	}
+	return nil
+}
+
+// journalled gives the outbox a journal at path ("" leaves it in memory only)
+// and queues what the journal kept; the run loop is woken for them.
+func (o *creditOutbox) journalled(path string) error {
+	if path == "" {
+		return nil
+	}
+	j, kept, err := openCreditJournal(path)
+	if err != nil {
+		return err
+	}
+	o.mu.Lock()
+	o.journal = j
+	o.queue = append(kept, o.queue...)
+	n := len(o.queue)
+	o.mu.Unlock()
+	if n > 0 {
+		log.Printf("credits journal %s: %d credits from before the restart to send", path, n)
+		select {
+		case o.wake <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
 // —— The module ——
 
 type credits struct {
@@ -236,6 +424,10 @@ func newCredits(h *Hub) Module {
 		if site, _ := newLedgerFromFlags(); site != nil {
 			if hl, ok := site.(*httpLedger); ok {
 				m.out = newCreditOutbox(hl)
+				path := statePath(creditsFileForTest, creditsFileFlag, "realtime-credits.jsonl")
+				if err := m.out.journalled(path); err != nil {
+					log.Printf("credits journal %s: %v (credits are kept in memory only)", path, err)
+				}
 				go m.out.run()
 			}
 		}

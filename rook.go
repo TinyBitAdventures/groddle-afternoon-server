@@ -75,7 +75,8 @@ package main
 //   - An offering too small to hurt the Rook is refused and kept (shrines.js launchAttack 1036-1038
 //     would take it for nothing).
 //
-// The server forgets everything when it restarts (accepted for now).
+// What the Rook rooked (until it is revived) and a street's hour of rest outlive a restart of the
+// server (rook_persist.go, -rook-file); a fight under way does not.
 
 import (
 	_ "embed"
@@ -322,6 +323,7 @@ type rook struct {
 	streets map[string]*rookStreet
 	hubs    map[string]*rookHub
 	limits  map[int64]*objBucket
+	path    string // the state file (rook_persist.go); "": memory only
 }
 
 func newRook(h *Hub) Module {
@@ -329,6 +331,12 @@ func newRook(h *Hub) Module {
 		streets: map[string]*rookStreet{}, hubs: map[string]*rookHub{}, limits: map[int64]*objBucket{}}
 	if m.dev {
 		log.Printf("rook: GRODDLE_ROOK_DEV=1, rook_dev messages are on (QA only)")
+	}
+	if m.path = statePath(rookFileForTest, rookFileFlag, "realtime-rook.json"); m.path != "" {
+		if err := m.load(); err != nil {
+			log.Printf("rook %s: %v (rooked things are kept in memory only)", m.path, err)
+			m.path = ""
+		}
 	}
 	return m
 }
@@ -701,6 +709,9 @@ func (m *rook) wingBeat(a *rookAttack) {
 			}
 		}
 	}
+	if len(hit) > 0 {
+		m.save()
+	}
 	a.stun, a.phase, a.angry, a.failures = 0, "build_up", "", 0
 	m.cancel(a, "angry")
 	a.wingBeats++
@@ -775,6 +786,7 @@ func (m *rook) clear(a *rookAttack) {
 	}
 	s.attack = nil
 	s.restUntil = m.h.Now().Add(rookStreetRest)
+	m.save()
 	m.broadcast(a.street, map[string]any{"type": "clear", "defeated": defeated})
 	if hub := m.w.streets[a.street].hub; m.hubs[hub] != nil {
 		m.armHub(hub)
@@ -1195,6 +1207,7 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 		favor = rookReviveFavor
 		doses = rookHealers
 	}
+	m.save()
 	m.you(cl, "revive", map[string]any{"xp": xp, "energy": -rookReviveEnergy, "mood": -rookReviveMood, "favor": favor, "key": msg.Key, "doses": doses, "done": done, "balm": msg.Balm, "class": r.class})
 	m.broadcast(cl.Street(), map[string]any{"type": "revive", "key": msg.Key, "by": cl.ID(), "name": cl.Name(), "doses": doses, "done": done, "balm": msg.Balm, "class": r.class})
 	m.tidy(cl.Street())

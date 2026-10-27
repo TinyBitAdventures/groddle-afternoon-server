@@ -47,6 +47,7 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"log"
 	"math"
 	"math/rand/v2"
 	"sort"
@@ -151,6 +152,12 @@ type quoinsModule struct {
 	grabs map[int64]quoinDay
 	// randInt is the source's randInt (common.js 691: lo..hi, both included).
 	randInt func(lo, hi int) int
+
+	// The state file (quoins_persist.go): when each gone quoin comes back, and the day's grabs.
+	path    string
+	due     map[string]map[int]time.Time
+	saveAt  bool
+	resumed bool
 }
 
 func init() { modules = append(modules, newQuoins) }
@@ -164,20 +171,29 @@ func newQuoins(h *Hub) Module {
 }
 
 func newQuoinsWith(h *Hub, d *quoinData) *quoinsModule {
-	return &quoinsModule{
+	m := &quoinsModule{
 		h:       h,
 		data:    d,
 		gone:    map[string]map[int]func() bool{},
 		status:  map[int64]*quoinStatus{},
 		grabs:   map[int64]quoinDay{},
 		randInt: func(lo, hi int) int { return lo + rand.IntN(hi-lo+1) },
+		due:     map[string]map[int]time.Time{},
+		resumed: true,
 	}
+	if m.path = statePath(quoinsFileForTest, quoinsFileFlag, "realtime-quoins.json"); m.path != "" {
+		if err := m.load(); err != nil {
+			log.Printf("quoins %s: %v (quoins are kept in memory only)", m.path, err)
+			m.path = ""
+		}
+	}
+	return m
 }
 
 func (m *quoinsModule) Register(r *Registry) {
 	r.Handle("quoin_claim", m.claim)
 	r.Handle("quoin_status", m.setStatus)
-	r.OnConnect(func(cl *Client) { m.status[cl.ID()] = &quoinStatus{mult: 1} })
+	r.OnConnect(func(cl *Client) { m.resume(); m.status[cl.ID()] = &quoinStatus{mult: 1} })
 	r.OnDisconnect(func(cl *Client) { delete(m.status, cl.ID()) })
 	r.Handle("quoin_sync", m.syncReq)
 }
@@ -330,10 +346,12 @@ func (m *quoinsModule) claim(cl *Client, frame json.RawMessage) {
 	}
 	respawn := time.Duration(m.respawnSec(spot)) * time.Second
 	m.gone[street][i] = m.h.After(respawn, func() { m.respawn(street, i) })
+	m.markDue(street, i, m.h.Now().Add(respawn))
 
 	m.h.SendLocked(cl, map[string]any{"t": "quoin_got", "street": street, "i": i, "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards})
 	m.h.BroadcastStreetLocked(street, map[string]any{"t": "quoin_taken", "street": street, "i": i, "id": cl.ID(), "name": cl.Name(), "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards}, cl.ID())
 	m.credit(cl, spot.Type, amount, st.mult, shards)
+	m.saveSoon()
 }
 
 // quoinDay counts one player's grabs in one game day (objects.go's day).
@@ -373,6 +391,8 @@ func (m *quoinsModule) respawn(street string, i int) {
 	if len(m.gone[street]) == 0 {
 		delete(m.gone, street)
 	}
+	m.markDue(street, i, time.Time{})
+	m.saveSoon()
 	m.h.BroadcastStreetLocked(street, map[string]any{"t": "quoin_back", "street": street, "i": i}, 0)
 }
 

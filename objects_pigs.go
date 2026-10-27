@@ -33,7 +33,9 @@ package main
 // Chickens and Butterflies have no mood or hunger in the source (npc_chicken.js, npc_butterfly.js);
 // what they remember is per player (massagers[pc.tsid], the squeeze and milk limits), so it stays in
 // each player's save, as in solo.
-// The server forgets its Piggies when it restarts (accepted, as for every street object).
+// A street Piggy outlives a restart of the server (objects_persist.go, -objects-file): its mood,
+// hunger, petters and clock are kept, and the ticks it missed while the server was down run when
+// it is back.
 
 import (
 	"encoding/json"
@@ -131,6 +133,7 @@ func (o *objects) armPigs() {
 		o.pigStop, o.pigDue = nil, time.Time{}
 		o.tickPigs()
 		o.armPigs()
+		o.saveSoon()
 	})
 }
 

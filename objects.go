@@ -89,13 +89,15 @@ package main
 // Tree's planks, and a resource node's yield with no skill bonus (bonuses,
 // super harvests and drops are the client's and go through the budget).
 //
-// The server forgets an object once it is fresh again, and everything when it
-// restarts (accepted for now).
+// The server forgets an object once it is fresh again. What it has not forgotten
+// outlives a restart: dead and poisoned trees, street Piggies, what was taken
+// and when it comes back are kept in -objects-file (objects_persist.go).
 
 import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -392,20 +394,33 @@ type objects struct {
 	pigDue  time.Time
 	// dev (GRODDLE_TREES_DEV=1): a poison pour may name its own die time ("ms"), for QA.
 	dev bool
+
+	// The state file (objects_persist.go): "" keeps everything in memory only.
+	path    string
+	saveAt  bool // a save is due
+	resumed bool // the file's timers are armed
 }
 
 func newObjects(h *Hub) Module {
-	return &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{},
-		dev: os.Getenv("GRODDLE_TREES_DEV") == "1"}
+	o := &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{},
+		dev: os.Getenv("GRODDLE_TREES_DEV") == "1", resumed: true}
+	if o.path = statePath(objectsFileForTest, objectsFileFlag, "realtime-objects.json"); o.path != "" {
+		if err := o.load(); err != nil {
+			log.Printf("objects %s: %v (street objects are kept in memory only)", o.path, err)
+			o.path = ""
+		}
+	}
+	return o
 }
 
 func (o *objects) Register(r *Registry) {
-	r.Handle("obj_sync", o.handleSync)
-	r.Handle("obj_act", o.handleAct)
+	r.Handle("obj_sync", o.kept(o.handleSync))
+	r.Handle("obj_act", o.kept(o.handleAct))
+	r.OnConnect(func(*Client) { o.resume() })
 	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()) })
-	r.Handle("obj_mine", o.handleMine)
-	r.Handle("obj_dig", o.handleDig)
-	r.Handle("obj_dev", o.pigDev)
+	r.Handle("obj_mine", o.kept(o.handleMine))
+	r.Handle("obj_dig", o.kept(o.handleDig))
+	r.Handle("obj_dev", o.kept(o.pigDev))
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
@@ -414,6 +429,7 @@ func (o *objects) Register(r *Registry) {
 // treeClass is the class of the tree an id names on a street ("" when it names no tree there, or a
 // tree that died), so the Rook can check the tree a client pairs with one of its keys (rook_sync "objs").
 func (o *objects) treeClass(street, id string) string {
+	o.resume()
 	spot := o.w.streets[street][id]
 	if spot == nil || (spot.kind != "tree" && spot.kind != "wood") {
 		return ""
@@ -429,6 +445,8 @@ func (o *objects) treeClass(street, id string) string {
 // already at health 1 dies, as in the source (1151; solo keeps it at 1). Everyone on the street is
 // told. False when the id names no living tree there.
 func (o *objects) rookTree(street, id string) bool {
+	o.resume()
+	defer o.saveSoon()
 	spot := o.w.streets[street][id]
 	if spot == nil || spot.kind != "tree" {
 		return false
@@ -1022,6 +1040,7 @@ func (o *objects) schedule(street string, ob *liveObj, d time.Duration, fn func(
 		fn(street, ob)
 		o.broadcast(street, 0, ob)
 		o.forget(street, ob)
+		o.saveSoon()
 	})
 	ob.stop = stop
 }
@@ -1190,24 +1209,29 @@ func (o *objects) tendPaper(street string, ob *liveObj, verb string, perks map[s
 		}
 		if ob.watered && ob.petted && rule.Tend != nil {
 			ob.units = min(rule.Max, ob.units+rule.Tend.Refill)
-			d := time.Duration(rule.Tend.ResetMs) * time.Millisecond
-			ob.resetAt = o.h.Now().Add(d)
-			if ob.resetStop != nil {
-				ob.resetStop()
-			}
-			ob.resetStop = o.h.After(d, func() {
-				if o.streets[street][ob.spot.id] != ob || ob.resetStop == nil {
-					return
-				}
-				ob.resetStop, ob.resetAt = nil, time.Time{}
-				ob.petted, ob.watered = false, false
-				o.broadcast(street, 0, ob)
-				o.forget(street, ob)
-			})
+			o.armReset(street, ob, time.Duration(rule.Tend.ResetMs)*time.Millisecond)
 		}
 		return verdict{ok: true}
 	}
 	return refuse("bad_verb", "You can't do that here.")
+}
+
+// armReset clears a Paper Tree's tending flags d from now.
+func (o *objects) armReset(street string, ob *liveObj, d time.Duration) {
+	ob.resetAt = o.h.Now().Add(d)
+	if ob.resetStop != nil {
+		ob.resetStop()
+	}
+	ob.resetStop = o.h.After(d, func() {
+		if o.streets[street][ob.spot.id] != ob || ob.resetStop == nil {
+			return
+		}
+		ob.resetStop, ob.resetAt = nil, time.Time{}
+		ob.petted, ob.watered = false, false
+		o.broadcast(street, 0, ob)
+		o.forget(street, ob)
+		o.saveSoon()
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,6 +1306,7 @@ func (o *objects) pour(street string, ob *liveObj, verb string, by int64, ms int
 			ob.poisonStop()
 		}
 		ob.poisonEnd, ob.poisonBy, ob.poisonStop = time.Time{}, 0, nil
+		o.saveNow()
 		return verdict{ok: true}
 	}
 	if !ob.poisonEnd.IsZero() {
@@ -1291,16 +1316,24 @@ func (o *objects) pour(street string, ob *liveObj, verb string, by int64, ms int
 	if o.dev && ms >= 1000 && ms < treePoison.Milliseconds() {
 		d = time.Duration(ms) * time.Millisecond
 	}
-	ob.poisonEnd, ob.poisonBy = o.h.Now().Add(d), by
-	var stop func() bool
-	stop = o.h.After(d, func() {
+	ob.poisonBy = by
+	o.armPoison(street, ob, d)
+	o.saveNow()
+	return verdict{ok: true, extra: map[string]any{"poison": d.Milliseconds()}}
+}
+
+// armPoison starts (or, after a restart, goes on with) a tree's die timer: d from now it dies.
+func (o *objects) armPoison(street string, ob *liveObj, d time.Duration) {
+	if ob.poisonStop != nil {
+		ob.poisonStop()
+	}
+	ob.poisonEnd = o.h.Now().Add(d)
+	ob.poisonStop = o.h.After(d, func() {
 		if o.streets[street][ob.spot.id] != ob || ob.poisonStop == nil || ob.dead {
 			return
 		}
 		o.killTree(street, ob, ob.poisonBy)
 	})
-	ob.poisonStop = stop
-	return verdict{ok: true, extra: map[string]any{"poison": d.Milliseconds()}}
 }
 
 // killTree is include/trants.js die 734-773 (and wood_tree.js onDie) on the shared tree: it is dead
@@ -1313,6 +1346,9 @@ func (o *objects) killTree(street string, ob *liveObj, by int64) {
 	ob.poisonEnd, ob.poisonBy, ob.poisonStop = time.Time{}, 0, nil
 	ob.dead, ob.deadBy = true, by
 	ob.fruit, ob.petted, ob.watered = 0, false, false
+	// On disk before the planks are credited: a restart must not find the clock still running and
+	// kill (and credit) it again.
+	o.saveNow()
 	if ob.spot.kind == "wood" && by > 0 {
 		creditLocked(o.h, by, "take", creditItem("plank", deadWoodPlanks))
 	}
@@ -1363,6 +1399,7 @@ func (o *objects) armDay() {
 				o.forget(street, ob)
 			}
 		}
+		o.saveSoon()
 		if trees {
 			o.armDay()
 		}

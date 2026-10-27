@@ -146,6 +146,8 @@ One test compares tree fruit caps with the game's data, reading `../groddle-afte
 messages that start an attack or a wing beat on demand, for testing only, and `GRODDLE_PARTY_DEV=1`
 turns on `party_space_dev`, which brings a Party Space's end near. `GRODDLE_FEATS_DEV=1` turns on `feat_dev`, which ends today's Feat soon or opens another now. `GRODDLE_TREES_DEV=1` lets `obj_act` carry `ms` for a poison's clock and turns on `obj_dev`, which sets a Piggy's hunger or mood or runs its tick.
 
+State that outlives a restart: each system keeps a file beside `-secret-file` unless its flag names one, and `off` means memory only: `-trade-journal`, `-projects-file`, `-feats-file`, `-hi-file`, `-credits-file` (credits the ledger hasn't taken), `-objects-file` (dead and poisoned trees, street Piggies, rocks, nodes and trees), `-rook-file` (rooked until revived, streets resting) and `-quoins-file` (gone quoins, today's grabs). A bad file is moved aside and the system starts empty. Lane and dev servers must pass `off` (or their own paths) for every state flag, or they write over the live server's files.
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE). Groddle Afternoon is a fan project, not affiliated with or endorsed
