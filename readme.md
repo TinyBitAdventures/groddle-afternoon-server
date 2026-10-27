@@ -81,6 +81,9 @@ keep `-ledger-url https://groddleafternoon.com`, and give both sides the same se
         reverse_proxy /ws 127.0.0.1:8793
     }
 
+`deploy/install-remote.sh root@<host> [<clean checkout>]` builds the committed server for Linux and
+installs it there (it refuses while players are online unless `FORCE=1`).
+
 ## Trust model
 
 The server decides everything players could fight over, from data it owns: who got a quoin, how
