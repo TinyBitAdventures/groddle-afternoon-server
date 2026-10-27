@@ -97,6 +97,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `objects.go` | Rocks, resource nodes and trees: what one player takes is gone for everyone until it comes back |
 | `rook.go` | Rook attacks fought by everyone on the street |
 | `races.go` | Grab 'Em Good and the finish-line races between real players |
+| `hoghaul.go` | The Great Hog Haul between real players on races.go's challenge: sacks, hogties, the pen and three wins decided from `data/hoghaul.json`; the winner credited through credits.go |
 | `trade.go` | Trading items and currants |
 | `projects.go` | Street projects everyone on a street builds together: contributions through the site's ledger, the source's reward shares, the road opening for everyone |
 | `feats.go` | One Feat a day for everyone playing: contributions at the source's pace, the minimum, bonus and supermegabonus goals, ranks, rewards by place with their currants through the site's ledger |
@@ -130,6 +131,7 @@ repo, so the server and the game agree. With the game checked out beside this re
     node tools/build-realtime-feats.mjs
     node tools/build-realtime-trade.mjs
     node tools/build-realtime-crowns.mjs
+    node tools/build-realtime-hoghaul.mjs
 
 The game's tests fail when this data is out of date.
 

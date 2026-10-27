@@ -145,8 +145,9 @@ type raceGame struct {
 }
 
 var raceGames = map[string]raceGame{
-	"quoin_grab": {min: 2, max: 2, name: "Grab 'Em Good"},
-	"race":       {min: 2, max: 2, name: "Race"},
+	"quoin_grab":   {min: 2, max: 2, name: "Grab 'Em Good"},
+	"race":         {min: 2, max: 2, name: "Race"},
+	"hogtie_piggy": {min: 2, max: 2, name: "The Great Hog Haul"}, // config_prod.js:1286
 }
 
 var (
@@ -161,6 +162,12 @@ type raceCourse struct {
 	Spawns [][2]float64 `json:"spawns"`
 	Quoins [][2]float64 `json:"quoins"`
 	Finish *[2]float64  `json:"finish"`
+	// The Great Hog Haul (kind "pigs", hoghaul.go): the street the clients draw, the pen, the sacks and the Piggies.
+	Home  string       `json:"street,omitempty"`
+	Goal  int          `json:"goal,omitempty"`
+	Pen   *[2]float64  `json:"pen,omitempty"`
+	Baits [][2]float64 `json:"baits,omitempty"`
+	Pigs  [][3]float64 `json:"pigs,omitempty"`
 }
 
 func parseRaceData(b []byte) (map[string]*raceCourse, error) {
@@ -220,6 +227,20 @@ type raceMatch struct {
 	scores               map[int64]int
 	timers               []func() bool
 	life                 func() bool
+	// The Great Hog Haul: what each racer carries ("bait", "pig"), and the sacks and Piggies gone.
+	carry      map[int64]string
+	baitsTaken map[int]bool
+	pigsTaken  map[int]bool
+}
+
+// raceFate is what became of a player's own challenge, kept for a page that
+// went away before it heard (G349): refund when it never became a game
+// (inc_games.js games_invite_timeout 2448-2450), not when a match was made
+// (race_ticket.js:150 spent the ticket at activation).
+type raceFate struct {
+	course string
+	refund bool
+	at     time.Time
 }
 
 type raceAsk struct {
@@ -237,6 +258,7 @@ type races struct {
 	matches map[string]*raceMatch
 	matchOf map[int64]*raceMatch
 	asks    map[int64]*raceAsk
+	fates   map[int64]raceFate
 	newID   func() string
 }
 
@@ -246,6 +268,11 @@ func newRaces(h *Hub) Module {
 	c, err := parseRaceData(racesJSON)
 	if err != nil {
 		panic("realtime: data/races.json: " + err.Error())
+	}
+	if hog, err := parseHogHaul(hogHaulJSON); err != nil {
+		panic("realtime: data/hoghaul.json: " + err.Error())
+	} else if hog != nil {
+		c[hogHaulCourse] = hog
 	}
 	return newRacesWith(h, c)
 }
@@ -259,6 +286,7 @@ func newRacesWith(h *Hub, courses map[string]*raceCourse) *races {
 		matches: map[string]*raceMatch{},
 		matchOf: map[int64]*raceMatch{},
 		asks:    map[int64]*raceAsk{},
+		fates:   map[int64]raceFate{},
 		newID: func() string {
 			b := make([]byte, 8)
 			rand.Read(b)
@@ -274,6 +302,10 @@ func (m *races) Register(r *Registry) {
 	r.Handle("race_grab", m.grab)
 	r.Handle("race_finish", m.finish)
 	r.Handle("race_leave", m.leave)
+	r.Handle("race_pending", m.pending)
+	r.Handle("race_bait", m.hogBait)
+	r.Handle("race_pig", m.hogPig)
+	r.Handle("race_pen", m.hogPen)
 	r.OnJoin(m.onJoin)
 	r.OnLeave(m.onLeave)
 	r.OnDisconnect(m.onDisconnect)
@@ -378,6 +410,7 @@ func (m *races) challenge(cl *Client, frame json.RawMessage) {
 	}
 	inv := &raceInvite{from: refOf(cl), course: msg.Course, street: street, at: m.h.Now()}
 	m.invites[cl.ID()] = inv
+	delete(m.fates, cl.ID()) // a new ticket: the last challenge's fate is told
 	from := cl.ID()
 	inv.stop = m.h.After(raceInviteTimeout, func() { m.expire(from, inv) })
 	game := raceGames[m.courses[msg.Course].Game]
@@ -404,6 +437,7 @@ func (m *races) withdraw(from int64, text string) {
 	if inv.stop != nil {
 		inv.stop()
 	}
+	m.setFate(from, inv.course, true)
 	for _, o := range inv.opponents {
 		delete(m.joined, o.ID)
 		if oc := m.h.ClientLocked(o.ID); oc != nil {
@@ -512,6 +546,7 @@ func (m *races) start(from int64, inv *raceInvite) {
 		}
 	}
 	if len(here) < game.min {
+		m.setFate(from, inv.course, true)
 		for _, p := range here {
 			if oc := m.h.ClientLocked(p.ID); oc != nil {
 				m.h.SendLocked(oc, map[string]any{"t": "race_failed", "course": inv.course,
@@ -525,8 +560,10 @@ func (m *races) start(from int64, inv *raceInvite) {
 		id = m.newID()
 	}
 	mt := &raceMatch{id: id, street: raceStreet(id), courseID: inv.course, course: c, game: game, status: "waiting",
-		taken: map[int]bool{}, scores: map[int64]int{}}
+		taken: map[int]bool{}, scores: map[int64]int{}, carry: map[int64]string{}, baitsTaken: map[int]bool{}, pigsTaken: map[int]bool{}}
 	m.matches[id] = mt
+	// The ticket is spent: the challenge became a game (race_ticket.js:150).
+	m.setFate(from, inv.course, false)
 	for i, p := range here {
 		mem := &raceMember{raceRef: p, slot: i}
 		mt.members = append(mt.members, mem)
@@ -552,10 +589,13 @@ func (m *races) start(from int64, inv *raceInvite) {
 		msg := map[string]any{"t": "race_match", "match": id, "street": mt.street, "course": mt.courseID, "title": c.Title,
 			"game": c.Game, "kind": c.Kind, "slot": mem.slot, "spawn": c.Spawns[mem.slot%len(c.Spawns)], "players": players,
 			"autoLeave": int(raceAutoLeave.Seconds())}
-		if c.Kind == "quoins" {
+		switch c.Kind {
+		case "quoins":
 			msg["total"] = len(c.Quoins)
 			msg["quoins"] = c.Quoins
-		} else {
+		case "pigs":
+			hogMatchFields(c, msg)
+		default:
 			msg["finish"] = c.Finish
 		}
 		m.h.SendLocked(oc, msg)
@@ -840,7 +880,7 @@ func (m *races) end(mt *raceMatch, winner *raceRef, why string, left *raceRef) {
 			mem.autoLeave = nil
 		}
 	}
-	msg := map[string]any{"t": "race_end", "match": mt.id, "winner": nil, "why": why, "scores": m.scoreRows(mt)}
+	msg := map[string]any{"t": "race_end", "match": mt.id, "course": mt.courseID, "title": mt.course.Title, "winner": nil, "why": why, "scores": m.scoreRows(mt)}
 	if winner != nil {
 		msg["winner"] = *winner
 	}
@@ -999,6 +1039,64 @@ func (m *races) startGrace(mt *raceMatch, id int64) {
 		mem.grace = nil
 		m.drop(mt, id, "left")
 	})
+}
+
+const (
+	raceFateKeep = raceMaxLife + raceLinger // ours: how long a challenge's fate waits for its page
+	raceRefunded = "Your race never started, so your ticket was returned."
+)
+
+// setFate remembers what became of a challenge, forgetting fates no page came back for.
+func (m *races) setFate(id int64, course string, refund bool) {
+	now := m.h.Now()
+	for k, f := range m.fates {
+		if now.Sub(f.at) > raceFateKeep {
+			delete(m.fates, k)
+		}
+	}
+	m.fates[id] = raceFate{course: course, refund: refund, at: now}
+}
+
+// pending answers a page that holds a spent ticket for a challenge it never
+// saw end (G349: a reload, a dropped socket, a croak mid-start). The source
+// spends the ticket at activation (race_ticket.js:150) and gives it back only
+// when the challenge fails (inc_games.js games_invite_timeout 2448-2450), so:
+// an open challenge is called off and refunded (the page that made it is
+// gone; onDisconnect does the same); a match made means spent, and a racer
+// still in one leaves it (G334: instance.js player_logout 380-394 ->
+// global_game.js playerLeft 814-815 calls a race off for everyone); else the
+// fate the server kept, and a challenge it never knew never became a game.
+//
+//	{"t":"race_pending","course":"canyon_run"}
+//	{"t":"race_ticket","course":"canyon_run","refund":true,"text":"…"}
+func (m *races) pending(cl *Client, frame json.RawMessage) {
+	var msg struct {
+		Course string `json:"course"`
+	}
+	if json.Unmarshal(frame, &msg) != nil || !courseRe.MatchString(msg.Course) || !m.allow(cl) {
+		return
+	}
+	id := cl.ID()
+	if _, ok := m.invites[id]; ok {
+		m.withdraw(id, raceRefunded) // race_failed {refund: true} is the answer
+		delete(m.fates, id)
+		return
+	}
+	refund := true
+	if mt := m.matchOf[id]; mt != nil {
+		refund = false
+		if mt.status != "done" {
+			m.drop(mt, id, "left")
+		}
+	} else if f, ok := m.fates[id]; ok {
+		refund = f.refund
+	}
+	delete(m.fates, id)
+	out := map[string]any{"t": "race_ticket", "course": msg.Course, "refund": refund}
+	if refund {
+		out["text"] = raceRefunded
+	}
+	m.h.SendLocked(cl, out)
 }
 
 func (m *races) onDisconnect(cl *Client) {
