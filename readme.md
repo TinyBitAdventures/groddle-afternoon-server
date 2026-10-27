@@ -40,6 +40,7 @@ Options:
 | `-ledger-url` | | The Groddle site trades settle in (`POST groddle/v1/ledger/trade`, signed with the secret). Without it trades are refused |
 | `-ledger-ca` | | A PEM file of extra roots for that site's certificate (a local Caddy CA) |
 | `-trade-ledger` | `on` | `off` brings back the client-trusted swap, for development only |
+| `-projects-file` | `realtime-projects.json` beside the secret | Keeps street projects (who put in how much, the contributions waiting for the ledger, the rewards not yet applied) across restarts. `off` keeps them in memory only |
 
 The secret is the same file the site reads (`realtime.secret` beside its webroot by default). Make
 one with `openssl rand -hex 32 > realtime.secret` and keep it outside any webroot.
@@ -95,6 +96,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `rook.go` | Rook attacks fought by everyone on the street |
 | `races.go` | Grab 'Em Good and the finish-line races between real players |
 | `trade.go` | Trading items and currants |
+| `projects.go` | Street projects everyone on a street builds together: contributions through the site's ledger, the source's reward shares, the road opening for everyone |
 | `buddies.go` | Who on your buddy list is online and where, "added you", and the ignore hook party and trade ask |
 
 [`modules.go`](modules.go) is how a module registers its kinds and its connect, join, leave and
@@ -113,6 +115,7 @@ repo, so the server and the game agree. With the game checked out beside this re
     node tools/build-realtime-objects.mjs
     node tools/build-realtime-rook.mjs
     node tools/build-realtime-races.mjs
+    node tools/build-realtime-projects.mjs
     node tools/build-realtime-trade.mjs
 
 The game's tests fail when this data is out of date.
