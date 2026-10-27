@@ -60,17 +60,40 @@ package main
 // the iMG and the badges are the client's to apply from crown_reward and
 // crown_end, as every other reward in this phase.
 //
+// A reload or logout (G334): instance.js player_logout 380-394 calls
+// playerLeft (for it_game, global_game.js 803-813: the holder's crown goes to
+// someone at random and everyone else plays on) and games_auto_leave (the
+// leaver is out of the instance). So a page that comes back somewhere else is
+// out of the game (onJoin), and one that still holds a spent ticket asks what
+// became of it (crown_pending, as races.go race_pending): the ticket comes
+// back only when the challenge never became a game (inc_games.js
+// games_invite_timeout 2448-2450); there is no way back into the arena.
+//
+// A dead player (G334, as races.go): race_ticket_it_game.js conditions
+// 118-119 ("You are too dead to be racing around."), and one who croaks while
+// the challenge fills is sent back to Hell from the arena (location.js
+// onPlayerEnter 85-89) and out of the game (instance.js
+// player_exited_location 343-363). The server reads a member on a Naraka
+// street (races.go inNaraka) as dead and leaves them out at the start; the
+// others play if three are left (min_retry_players).
+//
 // Ours: an open challenge belongs to its street; a member who drops has
 // crownsGrace to come back (a holder who drops passes the crown at once, as
 // playerLeft does on logout); a game that falls under three before GO is
 // called off (nobody else can join a ticket instance); Play Again counts as
 // clicking start for the next round (the source showed the start button
 // again), and members who have not chosen when the next countdown begins
-// are taken out of the game; a match ends by itself after crownsMaxLife; a
-// reward not acked is kept in memory only (a restart loses its iMG, while
-// the site's ledger still pays its currants on the winner's next load,
-// Ledger::catchUp). Each tag and lock reach has crownsSlack more across,
-// because positions arrive every 100 ms.
+// are taken out of the game; a match ends by itself after crownsMaxLife.
+// Each tag and lock reach has crownsSlack more across, because positions
+// arrive every 100 ms.
+//
+// Persistence: a won round is the server's decision, so what it owes the
+// winner (crown_reward until acked: the 200 iMG and the 50 currants, and a
+// win whose currants the site's ledger has not answered for yet) is written
+// to -crowns-file (a temp file, fsync, rename, as -feats-file) at once, and
+// a restart sends it again: the iMG survives as the currants do (the site
+// holds those, Ledger::catchUp). A ledger call left unanswered by a restart
+// is asked again when the winner connects (idempotent per id).
 //
 // Client to server:
 //
@@ -80,6 +103,7 @@ package main
 //	{"t":"crown_again","match":"…"}          Play Again (after an end)
 //	{"t":"crown_leave","match":"…"}          Leave the Game
 //	{"t":"crown_ack","id":"crowns-…"}        applied a crown_reward and saved
+//	{"t":"crown_pending"}                    this page holds a spent ticket it never saw become a game or fail
 //
 // Server to client:
 //
@@ -87,7 +111,8 @@ package main
 //	{"t":"crown_unchallenged","from":7,"text":"…"}
 //	{"t":"crown_waiting","from":7,"text":"Waiting for other players...","timeout":60,"have":1,"need":3}
 //	{"t":"crown_failed","text":"…","refund":true|false}
-//	{"t":"crown_refused","why":"alone|busy|full|gone|street|slow","text":"…"}
+//	{"t":"crown_refused","why":"alone|busy|full|gone|street|slow|dead","text":"…"}
+//	{"t":"crown_ticket","refund":true,"text":"…"}                    the answer to crown_pending
 //	{"t":"crown_starting","text":"Starting … in 5 seconds!","in":5000,"players":[{"id","name"}]}
 //	{"t":"crown_match","match":"…","street":"CROWNS_…","slot":0,"spawn":[x,y],"players":[{"id","name","slot"}],
 //	    "playLine":610,"locks":[[x,y]…],"winMs":60000,"autoLeave":120}
@@ -111,6 +136,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -142,7 +168,15 @@ const (
 
 	crownsAsksBurst = 6
 	crownsAsksEvery = time.Second
+
+	crownsFateKeep = crownsMaxLife + crownsLinger // ours: how long a challenge's fate waits for its page
+	crownsRefunded = "Your game never started, so your ticket was returned."
 )
+
+var crownsFileFlag = flag.String("crowns-file", "", "file that keeps Game of Crowns rewards not yet applied and winners' currants not yet in the site's ledger (default: realtime-crowns.json beside -secret-file; off: memory only)")
+
+// crownsFileForTest lets a test give the module a state file; under go test the flag is ignored.
+var crownsFileForTest string
 
 var (
 	crownsMatchRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
@@ -250,8 +284,29 @@ type crownsAsk struct {
 }
 
 type crownOwed struct {
-	id  string
-	msg []byte
+	ID  string          `json:"id"`
+	Msg json.RawMessage `json:"msg"`
+}
+
+// crownCredit is a win whose currants the site's ledger has not answered for yet.
+type crownCredit struct {
+	ID     string          `json:"id"`
+	Player int64           `json:"player"`
+	Msg    json.RawMessage `json:"msg"` // the crown_reward to owe once it answers
+	tries  int
+	busy   bool
+}
+
+// crownsSaved is what -crowns-file holds.
+type crownsSaved struct {
+	Owed    map[int64][]crownOwed   `json:"owed"`
+	Credits map[string]*crownCredit `json:"credits"`
+}
+
+// crownFate is what became of a player's own challenge, for a page that went away before it heard.
+type crownFate struct {
+	refund bool
+	at     time.Time
 }
 
 type crowns struct {
@@ -263,6 +318,9 @@ type crowns struct {
 	matchOf map[int64]*crownMatch
 	asks    map[int64]*crownsAsk
 	owed    map[int64][]crownOwed
+	credits map[string]*crownCredit
+	fates   map[int64]crownFate
+	path    string       // -crowns-file; "" keeps it in memory
 	ledger  crownsLedger // nil: no ledger (see trusted)
 	trusted bool         // -trade-ledger off: the winner's currants are the client's (development only)
 	spawn   func(func())
@@ -278,6 +336,7 @@ func newCrowns(h *Hub) Module {
 		panic("realtime: data/crowns.json: " + err.Error())
 	}
 	m := newCrownsWith(h, a)
+	m.useFile(statePath(crownsFileForTest, crownsFileFlag, "realtime-crowns.json")) // persist.go
 	if !testing.Testing() {
 		site, missing := newLedgerFromFlags()
 		if hl, ok := site.(*httpLedger); ok && hl != nil {
@@ -294,6 +353,7 @@ func newCrownsWith(h *Hub, a *crownsArena) *crowns {
 		invites: map[int64]*crownInvite{}, joined: map[int64]int64{},
 		matches: map[string]*crownMatch{}, matchOf: map[int64]*crownMatch{},
 		asks: map[int64]*crownsAsk{}, owed: map[int64][]crownOwed{},
+		credits: map[string]*crownCredit{}, fates: map[int64]crownFate{},
 		spawn: func(fn func()) { go fn() },
 		newID: func() string {
 			b := make([]byte, 8)
@@ -311,6 +371,7 @@ func (m *crowns) Register(r *Registry) {
 	r.Handle("crown_again", m.again)
 	r.Handle("crown_leave", m.leave)
 	r.Handle("crown_ack", m.ack)
+	r.Handle("crown_pending", m.pending)
 	r.OnConnect(m.onConnect)
 	r.OnJoin(m.onJoin)
 	r.OnLeave(m.onLeave)
@@ -397,6 +458,10 @@ func (m *crowns) challenge(cl *Client, _ json.RawMessage) {
 		return
 	}
 	street := cl.Street()
+	if inNaraka(street) {
+		m.refuse(cl, "dead", raceTooDead) // race_ticket_it_game.js:119
+		return
+	}
 	if street == "" || crownsPrivate(street) {
 		m.refuse(cl, "street", "You cannot start a race from here.")
 		return
@@ -409,6 +474,7 @@ func (m *crowns) challenge(cl *Client, _ json.RawMessage) {
 	inv := &crownInvite{from: crownRef{cl.ID(), cl.Name()}, street: street, at: m.h.Now()}
 	m.invites[cl.ID()] = inv
 	from := cl.ID()
+	delete(m.fates, from) // a new ticket: the last challenge's fate is told
 	inv.stop = m.h.After(crownsInviteTimeout, func() { m.expire(from, inv) })
 	m.h.SendLocked(cl, map[string]any{"t": "crown_waiting", "from": from, "title": m.a.Title,
 		"text": "Waiting for other players...", "timeout": m.secondsLeft(inv), "have": 0, "need": m.need()})
@@ -434,6 +500,7 @@ func (m *crowns) withdraw(from int64, text string) {
 	if inv.stop != nil {
 		inv.stop()
 	}
+	m.setFate(from, true)
 	was := inv.from.Name + " was looking for a challenger for " + m.a.Title + "."
 	for _, o := range inv.opponents {
 		delete(m.joined, o.ID)
@@ -540,14 +607,30 @@ func (m *crowns) start(from int64, inv *crownInvite) {
 	for _, o := range inv.opponents {
 		delete(m.joined, o.ID)
 	}
-	var here []crownRef
+	var here, dead []crownRef
 	for _, p := range append([]crownRef{inv.from}, inv.opponents...) {
-		if m.h.ClientLocked(p.ID) != nil && m.matchOf[p.ID] == nil && len(here) < m.a.Players.Max {
+		oc := m.h.ClientLocked(p.ID)
+		if oc == nil || m.matchOf[p.ID] != nil {
+			continue
+		}
+		// Croaked while the start ran: back to Hell and out of the game (see the header).
+		if inNaraka(oc.Street()) {
+			dead = append(dead, p)
+			continue
+		}
+		if len(here) < m.a.Players.Max {
 			here = append(here, p)
 		}
 	}
 	// The arena needs min_retry_players to start at all (instance.js 588).
-	if len(here) < m.a.Players.Retry {
+	made := len(here) >= m.a.Players.Retry
+	m.setFate(from, !made)
+	for _, p := range dead {
+		if oc := m.h.ClientLocked(p.ID); oc != nil {
+			m.h.SendLocked(oc, map[string]any{"t": "crown_failed", "text": raceTooDead, "refund": p.ID == from && !made})
+		}
+	}
+	if !made {
 		for _, p := range here {
 			if oc := m.h.ClientLocked(p.ID); oc != nil {
 				m.h.SendLocked(oc, map[string]any{"t": "crown_failed", "text": "Not enough players accepted your challenge. Try again later?", "refund": p.ID == from})
@@ -1043,59 +1126,185 @@ func (m *crowns) reward(mt *crownMatch, w crownRef) {
 		m.owe(w.ID, id, msg)
 		return
 	}
+	b, _ := json.Marshal(msg)
+	c := &crownCredit{ID: id, Player: w.ID, Msg: b}
+	m.credits[id] = c
+	m.save()
+	m.askCredit(c)
+}
+
+func (m *crowns) askCredit(c *crownCredit) {
+	c.busy = true
 	site := m.ledger
+	id, player := c.ID, c.Player
 	got := tradeGoods{Items: []tradeItem{}, Currants: m.a.Reward.Currants}
 	m.spawn(func() {
-		a := site.crowns(id, w.ID, got)
-		m.h.After(0, func() { m.credited(w.ID, id, msg, a, 0) })
+		a := site.crowns(id, player, got)
+		m.h.After(0, func() { m.credited(c, a) })
 	})
 }
 
-func (m *crowns) credited(player int64, id string, msg map[string]any, a ledgerAnswer, tries int) {
+func (m *crowns) credited(c *crownCredit, a ledgerAnswer) {
+	c.busy = false
+	if m.credits[c.ID] != c {
+		return
+	}
+	var msg map[string]any
+	json.Unmarshal(c.Msg, &msg)
 	switch a.Status {
 	case "settled":
-		m.owe(player, id, msg)
 	case "refused", "void":
-		log.Printf("crowns reward %s: the ledger said %s; sent without currants", id, a.Status)
+		log.Printf("crowns reward %s: the ledger said %s; sent without currants", c.ID, a.Status)
 		msg["currants"] = int64(0)
-		m.owe(player, id, msg)
 	default:
-		tries++
-		if tries > 6 {
-			log.Printf("crowns reward %s: no ledger answer after %d tries; sent without currants", id, tries)
-			msg["currants"] = int64(0)
-			m.owe(player, id, msg)
+		c.tries++
+		if c.tries <= 6 {
+			wait := min(time.Minute, time.Second<<c.tries)
+			log.Printf("crowns reward %s: no ledger answer (try %d): again in %s", c.ID, c.tries, wait)
+			m.h.After(wait, func() {
+				if m.credits[c.ID] == c && !c.busy {
+					m.askCredit(c)
+				}
+			})
 			return
 		}
-		wait := min(time.Minute, time.Second<<tries)
-		log.Printf("crowns reward %s: no ledger answer (try %d): again in %s", id, tries, wait)
-		site := m.ledger
-		got := tradeGoods{Items: []tradeItem{}, Currants: m.a.Reward.Currants}
-		m.h.After(wait, func() {
-			m.spawn(func() {
-				a := site.crowns(id, player, got)
-				m.h.After(0, func() { m.credited(player, id, msg, a, tries) })
-			})
-		})
+		log.Printf("crowns reward %s: no ledger answer after %d tries; sent without currants", c.ID, c.tries)
+		msg["currants"] = int64(0)
 	}
+	delete(m.credits, c.ID)
+	m.owe(c.Player, c.ID, msg) // saves
 }
 
-// owe keeps a reward for a player until they ack it, and sends it now when they are online.
+// owe keeps a reward for a player until they ack it (in -crowns-file), and sends it now when they are online.
 func (m *crowns) owe(player int64, id string, msg map[string]any) {
 	for _, o := range m.owed[player] {
-		if o.id == id {
+		if o.ID == id {
 			return
 		}
 	}
 	b, _ := json.Marshal(msg)
-	list := append(m.owed[player], crownOwed{id: id, msg: b})
+	list := append(m.owed[player], crownOwed{ID: id, Msg: b})
 	if len(list) > crownsMaxOwed {
 		list = list[len(list)-crownsMaxOwed:]
 	}
 	m.owed[player] = list
+	m.save()
 	if cl := m.h.ClientLocked(player); cl != nil {
 		m.h.pushLocked(cl, b)
 	}
+}
+
+// —— Persistence (-crowns-file) ——
+
+// useFile loads the state file at path ("" keeps everything in memory, as does a file that cannot be
+// read at all). One that does not parse is moved aside and the module starts empty and goes on saving
+// (persist.go readStateFile, the rule of every state file).
+func (m *crowns) useFile(path string) {
+	m.path = path
+	if path == "" {
+		return
+	}
+	var st crownsSaved
+	ok, err := readStateFile("crowns", path, &st)
+	if err != nil {
+		log.Printf("crowns %s: %v (rewards are kept in memory only)", path, err)
+		m.path = ""
+		return
+	}
+	if ok {
+		m.keep(st)
+	}
+	n := 0
+	for _, l := range m.owed {
+		n += len(l)
+	}
+	if n > 0 || len(m.credits) > 0 {
+		log.Printf("crowns %s: %d rewards owed, %d wins to credit", path, n, len(m.credits))
+	}
+}
+
+// keep takes what a state file held, dropping anything that is not a reward this module makes.
+func (m *crowns) keep(st crownsSaved) {
+	for player, list := range st.Owed {
+		kept := []crownOwed{}
+		for _, o := range list {
+			if player > 0 && crownsIDRe.MatchString(o.ID) && json.Valid(o.Msg) {
+				kept = append(kept, o)
+			}
+		}
+		if len(kept) > 0 {
+			m.owed[player] = kept
+		}
+	}
+	for id, c := range st.Credits {
+		if c != nil && c.ID == id && c.Player > 0 && crownsIDRe.MatchString(id) && json.Valid(c.Msg) {
+			m.credits[id] = c
+		}
+	}
+}
+
+// save writes the whole state now; false when it could not (it stays in memory).
+func (m *crowns) save() bool {
+	if m.path == "" {
+		return true
+	}
+	b, err := json.Marshal(crownsSaved{Owed: m.owed, Credits: m.credits})
+	if err == nil {
+		err = writeFileSynced(m.path, b)
+	}
+	if err != nil {
+		log.Printf("crowns %s: %v", m.path, err)
+		return false
+	}
+	return true
+}
+
+// —— A spent ticket's fate (G349, as races.go) ——
+
+// setFate remembers what became of a challenge, forgetting fates no page came back for.
+func (m *crowns) setFate(id int64, refund bool) {
+	now := m.h.Now()
+	for k, f := range m.fates {
+		if now.Sub(f.at) > crownsFateKeep {
+			delete(m.fates, k)
+		}
+	}
+	m.fates[id] = crownFate{refund: refund, at: now}
+}
+
+// pending answers a page holding a spent Game of Crowns Ticket for a challenge it never saw end (a
+// reload, a dropped socket, a croak mid-start): an open challenge is called off and refunded
+// (crown_failed is the answer; onDisconnect does the same), a filled one is left to its start
+// (crown_match or crown_failed answers); a game made means spent, and a member
+// still in it is out (instance.js player_logout 380-394 -> playerLeft; the others play on); else the
+// fate kept, and a challenge the server never knew never became a game.
+func (m *crowns) pending(cl *Client, _ json.RawMessage) {
+	if !m.allow(cl) {
+		return
+	}
+	id := cl.ID()
+	if inv, ok := m.invites[id]; ok {
+		// A filled challenge starts in a moment with whoever is online then (this page too): its
+		// crown_match or crown_failed is the answer.
+		if !inv.full {
+			m.withdraw(id, crownsRefunded)
+			delete(m.fates, id)
+		}
+		return
+	}
+	refund := true
+	if mt := m.matchOf[id]; mt != nil {
+		refund = false
+		m.drop(mt, id)
+	} else if f, ok := m.fates[id]; ok {
+		refund = f.refund
+	}
+	delete(m.fates, id)
+	out := map[string]any{"t": "crown_ticket", "refund": refund}
+	if refund {
+		out["text"] = crownsRefunded
+	}
+	m.h.SendLocked(cl, out)
 }
 
 func (m *crowns) ack(cl *Client, frame json.RawMessage) {
@@ -1107,13 +1316,14 @@ func (m *crowns) ack(cl *Client, frame json.RawMessage) {
 	}
 	list := m.owed[cl.ID()]
 	for i, o := range list {
-		if o.id == msg.ID {
+		if o.ID == msg.ID {
 			list = append(list[:i:i], list[i+1:]...)
 			if len(list) == 0 {
 				delete(m.owed, cl.ID())
 			} else {
 				m.owed[cl.ID()] = list
 			}
+			m.save()
 			return
 		}
 	}
@@ -1241,7 +1451,15 @@ func (m *crowns) leave(cl *Client, frame json.RawMessage) {
 
 func (m *crowns) onConnect(cl *Client) {
 	for _, o := range m.owed[cl.ID()] {
-		m.h.SendLocked(cl, json.RawMessage(o.msg))
+		m.h.SendLocked(cl, o.Msg)
+	}
+	// A win a restart left unanswered by the ledger: ask again (idempotent per id).
+	if m.ledger != nil {
+		for _, c := range m.credits {
+			if c.Player == cl.ID() && !c.busy {
+				m.askCredit(c)
+			}
+		}
 	}
 }
 

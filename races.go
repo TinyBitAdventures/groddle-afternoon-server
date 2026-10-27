@@ -51,6 +51,19 @@ package main
 //     else nothing (achievements lost). Each client applies its own (the
 //     save is the client's in this phase); the server says who won, and
 //     credits the winner's 100 currants to the site's ledger (credits.go).
+//   - A dead player (G334): items/race_ticket.js conditions 118-119 disable
+//     the ticket (119: "You are too dead to be racing around."), and nobody
+//     dead plays: games_invite_start's playerJoinInstance
+//     (shared_instance_manager.js 565-577, inc_instances.js instances_enter
+//     71-111) teleports them in, location.js onPlayerEnter 85-89 sends a
+//     dead player straight back to Hell, and instance.js
+//     player_exited_location 343-363 takes them out of the game
+//     (playerLeavingInstance, playerLeft). The server reads a player on a
+//     Naraka street (inNaraka) as dead: refused a challenge, and left out of
+//     a game that fills while they croak. The source then left the live
+//     racer alone in the instance until games_auto_leave; ours calls a game
+//     left under min_players off at once, as for a racer gone offline, and
+//     the ticket comes back to a challenger whose game never began.
 //
 // Ours: an open challenge belongs to the street it was made on (leaving that
 // street or going offline withdraws it, and the ticket comes back);
@@ -77,7 +90,7 @@ package main
 //	{"t":"race_unchallenged","from":7,"text":"…"}   that challenge is gone (filled, expired, withdrawn)
 //	{"t":"race_waiting","from":7,"course":"…","title":"…","text":"Waiting for other players...","timeout":60,"have":0,"need":1}
 //	{"t":"race_failed","course":"…","text":"…","refund":true}   your challenge expired or was withdrawn
-//	{"t":"race_refused","why":"alone|busy|full|gone|street|course|slow","text":"…"}
+//	{"t":"race_refused","why":"alone|busy|full|gone|street|course|slow|dead","text":"…"}
 //	{"t":"race_starting","course":"…","title":"…","text":"Starting … in 5 seconds!","in":5000,"players":[…]}
 //	{"t":"race_match","match":"…","street":"RACE_…","course":"…","title":"…","game":"quoin_grab","kind":"quoins",
 //	    "slot":0,"spawn":[x,y],"players":[{"id","name","slot"}],"total":71,"quoins":[[x,y]…] | "finish":[x,y],"autoLeave":120}
@@ -399,6 +412,10 @@ func (m *races) challenge(cl *Client, frame json.RawMessage) {
 		return
 	}
 	street := cl.Street()
+	if inNaraka(street) {
+		m.refuse(cl, "dead", raceTooDead)
+		return
+	}
 	if street == "" || strings.HasPrefix(street, "RACE_") {
 		m.refuse(cl, "street", "You cannot start a race from here.")
 		return
@@ -539,13 +556,28 @@ func (m *races) start(from int64, inv *raceInvite) {
 	}
 	c := m.courses[inv.course]
 	game := raceGames[c.Game]
-	var here []raceRef
+	var here, dead []raceRef
 	for _, p := range append([]raceRef{inv.from}, inv.opponents...) {
-		if m.h.ClientLocked(p.ID) != nil && m.matchOf[p.ID] == nil && len(here) < game.max {
+		oc := m.h.ClientLocked(p.ID)
+		if oc == nil || m.matchOf[p.ID] != nil {
+			continue
+		}
+		// Croaked while the start ran: the teleport into the instance fails (see the header).
+		if inNaraka(oc.Street()) {
+			dead = append(dead, p)
+			continue
+		}
+		if len(here) < game.max {
 			here = append(here, p)
 		}
 	}
-	if len(here) < game.min {
+	made := len(here) >= game.min
+	for _, p := range dead {
+		if oc := m.h.ClientLocked(p.ID); oc != nil {
+			m.h.SendLocked(oc, map[string]any{"t": "race_failed", "course": inv.course, "text": raceTooDead, "refund": p.ID == from && !made})
+		}
+	}
+	if !made {
 		m.setFate(from, inv.course, true)
 		for _, p := range here {
 			if oc := m.h.ClientLocked(p.ID); oc != nil {
@@ -1044,7 +1076,25 @@ func (m *races) startGrace(mt *raceMatch, id int64) {
 const (
 	raceFateKeep = raceMaxLife + raceLinger // ours: how long a challenge's fate waits for its page
 	raceRefunded = "Your race never started, so your ticket was returned."
+	raceTooDead  = "You are too dead to be racing around." // items/race_ticket.js:119
 )
+
+// narakaStreets are hub 40, Naraka (the game's js/hub-maps-data.js HUB_MAP_STREETS["40"]; js/hell.js
+// HELL_LOCATION hubId '40' is Hell One, config_prod.js:24 hell). location.js isInHell 4234-4245 is Hell
+// One or the purgatory hub; a player there is one the source counts as dead (player.js:1249, 1331).
+var narakaStreets = map[string]bool{
+	"GA524M0OMOE2OGT": true, "GA5FPUNAI7P2NVF": true, "GA5PPFP86NF2FOS": true, "GA5PV4T79OE2AOA": true,
+	"GA5Q57C99OE2GNU": true, "GA5REO5I9OE2KLS": true, "GA5RPAFK9OE28GN": true, "GA5S44RM9OE2416": true,
+	"GIF137TMNMUV5": true, "GM4106R9OLLF7": true, "GM4107R9OLUTA": true,
+}
+
+// inNaraka: a street of the dead (the hub's own ids, or the source's L-prefixed ones).
+func inNaraka(street string) bool {
+	if strings.HasPrefix(street, "L") {
+		street = "G" + street[1:]
+	}
+	return narakaStreets[street]
+}
 
 // setFate remembers what became of a challenge, forgetting fates no page came back for.
 func (m *races) setFate(id int64, course string, refund bool) {
