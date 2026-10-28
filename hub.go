@@ -33,6 +33,7 @@ import (
 //	{"t":"emoted","id":7,"e":"wave"}
 //	{"t":"error","code":"…","message":"…"}
 //	{"t":"pong"}
+//	{"t":"teleport","street":"GA5…","x":0,"y":0,"by":"admin"}  an administrator moved you (teleport.go; the site's call, never a client's)
 //
 // One live session per character: a second socket for the same player closes the
 // first with closeReplaced.

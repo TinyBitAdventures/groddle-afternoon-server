@@ -97,20 +97,25 @@ func splitList(s string) []string {
 	return out
 }
 
-// Server answers /ws (the socket) and /healthz (counts, for a quick look).
+// Server answers /ws (the socket, and the site's signed POST calls) and /healthz (counts, for a quick look).
 type Server struct {
 	tickets *Tickets
 	hub     *Hub
 	origins []string
+	calls   *serviceCalls // the site's signed calls (teleport.go), with the tickets' secret
 }
 
 func NewServer(t *Tickets, h *Hub, origins []string) *Server {
-	return &Server{tickets: t, hub: h, origins: origins}
+	return &Server{tickets: t, hub: h, origins: origins, calls: newServiceCalls(t.secret, t.now)}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/ws":
+		if r.Method == http.MethodPost {
+			s.service(w, r) // the site's signed calls (teleport.go), never a socket
+			return
+		}
 		s.socket(w, r)
 	case "/healthz", "/ws/healthz":
 		players, streets := s.hub.Stats()
