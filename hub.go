@@ -34,9 +34,11 @@ import (
 //	{"t":"error","code":"…","message":"…"}
 //	{"t":"pong"}
 //	{"t":"teleport","street":"GA5…","x":0,"y":0,"by":"admin"}  an administrator moved you (teleport.go; the site's call, never a client's)
+//	{"t":"admin_message"|"booted"|"admin_give"|"admin_refill",…}  the administrators' console (admin.go; the site's calls, never a client's)
 //
 // One live session per character: a second socket for the same player closes the
-// first with closeReplaced.
+// first with closeReplaced. An administrator's boot closes with closeBooted (4010),
+// a ban with closeBanned (4011), which also refuses a banned account at auth.
 //
 // Shared systems (quoins, street objects, parties, …) are modules (modules.go),
 // each in a file of its own with its message kinds listed in its header.

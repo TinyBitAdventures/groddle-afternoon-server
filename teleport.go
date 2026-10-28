@@ -37,9 +37,11 @@ import (
 )
 
 const (
-	serviceRouteTeleport = "/realtime/v1/teleport"
+	serviceRoutePrefix   = "/realtime/v1/"
+	serviceRouteTeleport = serviceRoutePrefix + "teleport"
 	serviceMaxBody       = 4096
-	serviceWindow        = 60 // seconds either side, as src/ServiceCall.php
+	serviceMaxBans       = 65536 // the whole ban list (admin.go "bans")
+	serviceWindow        = 60    // seconds either side, as src/ServiceCall.php
 )
 
 var serviceHeaderRe = regexp.MustCompile(`^(\d{1,12})\.([0-9a-f]{16})\.([A-Za-z0-9_-]{43})$`)
@@ -97,36 +99,53 @@ type teleportCall struct {
 	Y      *float64 `json:"y"`
 }
 
-// service answers the site's signed calls (POST /ws).
+// service answers the site's signed calls (POST /ws?call=<name>): teleport
+// here, the console's calls in admin.go. Each is signed over its own route,
+// /realtime/v1/<name>, so a signature for one call is never good for another.
 func (s *Server) service(w http.ResponseWriter, r *http.Request) {
-	answer := func(code int, status string) {
+	answer := func(code int, out any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(code)
-		json.NewEncoder(w).Encode(map[string]string{"status": status})
+		json.NewEncoder(w).Encode(out)
 	}
-	if r.URL.Query().Get("call") != "teleport" {
-		answer(http.StatusNotFound, "bad")
+	status := func(v string) map[string]string { return map[string]string{"status": v} }
+	call := r.URL.Query().Get("call")
+	handle, known := serviceHandlers[call]
+	if !known {
+		answer(http.StatusNotFound, status("bad"))
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, serviceMaxBody+1))
-	if err != nil || len(body) > serviceMaxBody {
-		answer(http.StatusBadRequest, "bad")
+	limit := serviceMaxBody
+	if call == "bans" {
+		limit = serviceMaxBans
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
+	if err != nil || len(body) > limit {
+		answer(http.StatusBadRequest, status("bad"))
 		return
 	}
-	if s.calls == nil || !s.calls.check(r.Header.Get("X-Groddle-Service"), http.MethodPost, serviceRouteTeleport, body) {
-		answer(http.StatusUnauthorized, "refused")
+	if s.calls == nil || !s.calls.check(r.Header.Get("X-Groddle-Service"), http.MethodPost, serviceRoutePrefix+call, body) {
+		answer(http.StatusUnauthorized, status("refused"))
 		return
 	}
+	code, out := handle(s.hub, body)
+	answer(code, out)
+}
+
+// serviceHandlers are the signed calls by name; each answers a status code and a JSON body.
+var serviceHandlers = map[string]func(h *Hub, body []byte) (int, any){
+	"teleport": teleportService,
+}
+
+func teleportService(h *Hub, body []byte) (int, any) {
 	var c teleportCall
 	if json.Unmarshal(body, &c) != nil || c.Player <= 0 || !streetRe.MatchString(c.Street) || !finite(c.X) || !finite(c.Y) {
-		answer(http.StatusBadRequest, "bad")
-		return
+		return http.StatusBadRequest, map[string]string{"status": "bad"}
 	}
-	if s.hub.Teleport(c.Player, c.Street, c.X, c.Y) {
-		answer(http.StatusOK, "sent")
-		return
+	if h.Teleport(c.Player, c.Street, c.X, c.Y) {
+		return http.StatusOK, map[string]string{"status": "sent"}
 	}
-	answer(http.StatusOK, "offline")
+	return http.StatusOK, map[string]string{"status": "offline"}
 }
 
 func finite(v *float64) bool {

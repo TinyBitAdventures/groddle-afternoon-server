@@ -22,7 +22,8 @@ ExecStart=/opt/groddle-realtime/groddle-realtime -addr 127.0.0.1:8793 -secret-fi
   -feats-file /var/lib/groddle-realtime/realtime-feats.json -hi-file /var/lib/groddle-realtime/realtime-hi.json \
   -credits-file /var/lib/groddle-realtime/realtime-credits.jsonl -objects-file /var/lib/groddle-realtime/realtime-objects.json \
   -rook-file /var/lib/groddle-realtime/realtime-rook.json -quoins-file /var/lib/groddle-realtime/realtime-quoins.json \
-  -crowns-file /var/lib/groddle-realtime/realtime-crowns.json -party-file /var/lib/groddle-realtime/realtime-party.json
+  -crowns-file /var/lib/groddle-realtime/realtime-crowns.json -party-file /var/lib/groddle-realtime/realtime-party.json \
+  -bans-file /var/lib/groddle-realtime/realtime-bans.json
 Restart=always
 RestartSec=2
 # SIGTERM closes the listener and lets sockets finish (main.go).

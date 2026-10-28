@@ -138,6 +138,11 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A suspended account never connects, whatever ticket it holds (admin.go).
+	if s.hub.Banned(claims.Sub) {
+		conn.Close(closeBanned, "this account is suspended")
+		return
+	}
 	cl := s.hub.Connect(claims)
 	defer s.hub.Disconnect(cl)
 
@@ -218,6 +223,10 @@ func (s *Server) write(ctx context.Context, conn *websocket.Conn, cl *Client) {
 				conn.Close(closeReplaced, "this character connected somewhere else")
 			case closeSlow:
 				conn.Close(closeSlow, "too far behind")
+			case closeBooted:
+				conn.Close(closeBooted, "an administrator signed you out")
+			case closeBanned:
+				conn.Close(closeBanned, "this account is suspended")
 			default:
 				conn.CloseNow()
 			}
