@@ -17,6 +17,19 @@ package main
 //   - rook.go: nothing. Every share of a Rook fight is iMG, energy, mood or
 //     favor (rook_you), none of which the ledger holds.
 //   - verbs.go: the 250 currants a Charades guess wins (main.js:1782).
+//   - connected time (G335 slice 4, Austin 2026-10-28): each character's
+//     minutes connected to this server, as "online" events with no goods
+//     and the interval they cover, {"from":unix,"to":unix}. The site's
+//     earning budget refills from these minutes at its rate
+//     (src/LedgerCredits.php, Ledger::addOnline), not on the wall clock, so
+//     an account nobody plays earns nothing. A connected character's time
+//     is reported every onlineEvery and when it goes offline (a socket
+//     replaced by a new one is the same session), and on shutdown, so a
+//     deploy's restart loses none of it; the events go through the outbox
+//     and its journal like every credit (at least once, the same ids), and
+//     the site credits each second once (it keeps the end of the last
+//     interval it took per character and counts only what lies after it).
+//     A crash (no shutdown hook) loses at most the last onlineEvery.
 //
 // The call, signed as ledger.go signs (X-Groddle-Service over the body):
 //
@@ -96,8 +109,16 @@ var creditsFileFlag = flag.String("credits-file", "", "file that keeps the credi
 // creditsFileForTest lets a test give the module a journal; under go test the flag is ignored.
 var creditsFileForTest string
 
-// The why of each credit, and the letter its id carries (charades: verbs.go, a Charades guess's 250 currants).
-var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t", "charades": "c"}
+// The why of each credit, and the letter its id carries (charades: verbs.go, a Charades guess's 250 currants;
+// online: connected time, which carries no goods, sent by the module itself, never through add).
+var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t", "charades": "c", "online": "o"}
+
+const (
+	// onlineEvery: how often a connected character's time goes to the site.
+	onlineEvery = time.Minute
+	// onlineMin: shorter than this is not sent (a socket that came and went).
+	onlineMin = time.Second
+)
 
 // creditEvent is one outcome for one player.
 type creditEvent struct {
@@ -106,6 +127,9 @@ type creditEvent struct {
 	Why  string     `json:"why"`
 	Got  tradeGoods `json:"got"`
 	At   int64      `json:"at"`
+	// online: the connected interval, unix seconds.
+	From int64 `json:"from,omitempty"`
+	To   int64 `json:"to,omitempty"`
 }
 
 // creditSite is the site's ledger as credits use it: one call, no retries of its own.
@@ -413,6 +437,9 @@ type credits struct {
 	out  *creditOutbox // nil: no site ledger, nothing is sent
 	boot string
 	seq  uint64
+
+	online   map[int64]time.Time // a connected character: the start of its time not yet sent
+	tickStop func() bool
 }
 
 func init() { modules = append(modules, newCredits) }
@@ -420,7 +447,7 @@ func init() { modules = append(modules, newCredits) }
 func newCredits(h *Hub) Module {
 	var b [4]byte
 	rand.Read(b[:])
-	m := &credits{h: h, boot: hex.EncodeToString(b[:])}
+	m := &credits{h: h, boot: hex.EncodeToString(b[:]), online: map[int64]time.Time{}}
 	if !testing.Testing() {
 		if site, _ := newLedgerFromFlags(); site != nil {
 			if hl, ok := site.(*httpLedger); ok {
@@ -438,6 +465,72 @@ func newCredits(h *Hub) Module {
 
 func (m *credits) Register(r *Registry) {
 	r.Provide("credits.add", m.add)
+	r.OnConnect(m.connected)
+	r.OnDisconnect(m.disconnected)
+	r.OnShutdown(m.flushOnline)
+}
+
+// —— Connected time ——
+
+// connected starts a character's time (a replaced socket goes on with the same start).
+func (m *credits) connected(cl *Client) {
+	if m.out == nil {
+		return
+	}
+	if _, on := m.online[cl.ID()]; !on {
+		m.online[cl.ID()] = m.h.Now()
+	}
+	if m.tickStop == nil {
+		m.tickStop = m.h.After(onlineEvery, m.tick)
+	}
+}
+
+// disconnected sends what is left of the character's time.
+func (m *credits) disconnected(cl *Client) {
+	from, on := m.online[cl.ID()]
+	if !on {
+		return
+	}
+	delete(m.online, cl.ID())
+	m.addOnline(cl.ID(), from, m.h.Now())
+}
+
+// tick sends every connected character's time since the last tick.
+func (m *credits) tick() {
+	m.tickStop = nil
+	now := m.h.Now()
+	for id, from := range m.online {
+		if m.addOnline(id, from, now) {
+			m.online[id] = now
+		}
+	}
+	if len(m.online) > 0 {
+		m.tickStop = m.h.After(onlineEvery, m.tick)
+	}
+}
+
+// flushOnline (shutdown) sends everyone's time up to now; a restart starts each again on connect.
+func (m *credits) flushOnline() {
+	now := m.h.Now()
+	for id, from := range m.online {
+		m.addOnline(id, from, now)
+	}
+	m.online = map[int64]time.Time{}
+	if m.tickStop != nil {
+		m.tickStop()
+		m.tickStop = nil
+	}
+}
+
+// addOnline queues one interval of connected time; false when it was too short to send (it keeps its start).
+func (m *credits) addOnline(user int64, from, to time.Time) bool {
+	if m.out == nil || user <= 0 || to.Sub(from) < onlineMin {
+		return false
+	}
+	m.seq++
+	ev := creditEvent{ID: "cr-o-" + m.boot + "-" + strconv.FormatUint(m.seq, 36), User: user, Why: "online", Got: tradeGoods{Items: []tradeItem{}}, At: to.Unix(), From: from.Unix(), To: to.Unix()}
+	m.out.add(ev)
+	return true
 }
 
 // add records one outcome: its id is cr-<why letter>-<this process>-<n>,
@@ -445,7 +538,7 @@ func (m *credits) Register(r *Registry) {
 // when nothing is sent (no ledger, nothing of value).
 func (m *credits) add(user int64, why string, got tradeGoods) string {
 	letter, ok := creditWhy[why]
-	if m.out == nil || !ok || user <= 0 || got.Currants < 0 || got.empty() {
+	if m.out == nil || !ok || why == "online" || user <= 0 || got.Currants < 0 || got.empty() {
 		return ""
 	}
 	m.seq++

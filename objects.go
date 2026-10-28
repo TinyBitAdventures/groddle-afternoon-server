@@ -14,8 +14,8 @@ package main
 //	{"t":"obj_mine","id":"rock:2","do":"start"}         a mining swing begins (or "stop": cancelled)
 //	{"t":"obj_dig","id":"node:dirt_pile:0","do":"start"} a dig at a Dirt Pile begins (or "stop")
 //	{"t":"obj_act","req":8,"id":"tree:1","verb":"poison"}  a Tree Poison pour landed ("antidote" too)
-//	{"t":"obj_dust","req":10}                            Fertilidust landed: every living tree on the street
-//	{"t":"obj_dust","req":11,"id":"tree:2"}              Fertilidust Lite landed on that tree (near you)
+//	{"t":"obj_dust","req":10}                            Fertilidust used: every living tree on the street
+//	{"t":"obj_dust","req":11,"id":"tree:2"}              Fertilidust Lite used on that tree (near you)
 //	{"t":"obj_day_dev"}                                  QA only, GRODDLE_TREES_DEV=1: the game day turns now
 //	{"t":"obj_dev","id":"pig:0","hunger":5,"tick":true}  QA only, GRODDLE_TREES_DEV=1 (objects_pigs.go pigDev)
 //	{"t":"obj_act","req":9,"id":"pig:0","verb":"pet","skill":"animalkinship_2"}  a Piggy (objects_pigs.go):
@@ -33,6 +33,9 @@ package main
 //	                                                       (a tree's pet or water: "roll", "success", and
 //	                                                       "grew": the fruit the health rise brought back)
 //	{"t":"obj_no","req":7,"id":"rock:2","verb":"mine","code":"empty","message":"…","obj":State}
+//	{"t":"obj_dust_used","req":10,"c":"fertilidust","use":{…}}  the ledger used the jar's charge
+//	                                                       (objects_uses.go; no "use" without a ledger):
+//	                                                       the dust lands 3 s on
 //	{"t":"obj_dusted","req":10,"ids":["tree:0","tree:3"]}  the trees the dust grew (all hear "objs")
 //	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
 //	{"t":"obj_dig","id":"node:dirt_pile:0","helping":true}    your dig joined someone else's
@@ -99,7 +102,8 @@ package main
 // with Fertilidust (onFertilidust 1236-1244: a maturity step below 10, health
 // 9 then plusHealth). The amounts are the server's own tables (rules.prod, the
 // game's trants.json fruitProdMap); a client says only that a pet, water or
-// dust landed. Fertilidust's jar is the player's own, as Tree Poison's is.
+// dust landed. Fertilidust's jar and Tree Poison's and its Antidote's bottles are confirmed and
+// used through the site's ledger before the trees change (objects_uses.go, G335 slice 4).
 //
 // What a player takes is theirs to apply, and the site's ledger is told what
 // the take was (credits.go, objCredit), so the save can show it outside the
@@ -434,6 +438,8 @@ type objects struct {
 	pigDue  time.Time
 	// dev (GRODDLE_TREES_DEV=1): a poison pour may name its own die time ("ms"), for QA.
 	dev bool
+	// Fertilidust, Tree Poison and Antidote through the site's ledger (objects_uses.go).
+	uses objUses
 
 	// The state file (objects_persist.go): "" keeps everything in memory only.
 	path    string
@@ -444,6 +450,7 @@ type objects struct {
 func newObjects(h *Hub) Module {
 	o := &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{},
 		dev: os.Getenv("GRODDLE_TREES_DEV") == "1", resumed: true}
+	o.initUses()
 	if o.path = statePath(objectsFileForTest, objectsFileFlag, "realtime-objects.json"); o.path != "" {
 		if err := o.load(); err != nil {
 			log.Printf("objects %s: %v (street objects are kept in memory only)", o.path, err)
@@ -829,6 +836,11 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 			perks[p] = true
 		}
 	}
+	if (spot.kind == "tree" || spot.kind == "wood") && (m.Verb == "poison" || m.Verb == "antidote") && o.uses.ledger != nil {
+		// G335: the bottle is the ledger's to confirm and use first (objects_uses.go).
+		o.askPour(cl, m, street, spot)
+		return
+	}
 	ob := o.get(street, spot)
 	before := o.state(ob)
 	var v verdict
@@ -850,6 +862,13 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	default:
 		v = o.tendTree(ob, m.Verb, m.Skill)
 	}
+	o.finishAct(cl, m, street, ob, before, v)
+}
+
+// finishAct answers one verb on a shared object (obj_ok or obj_no), credits what it took and tells
+// the street. Also the end of a pour the ledger answered later (objects_uses.go askPour).
+func (o *objects) finishAct(cl *Client, m objAct, street string, ob *liveObj, before map[string]any, v verdict) {
+	spot := ob.spot
 	if !v.ok && (spot.kind == "rock" || spot.kind == "node") && ob.mining(cl.ID()) {
 		// A refused swing or dig is over (cancelMining, removeDigger): off the rock or pile, its helps taken back.
 		ob.removeMiner(cl.ID(), true)
@@ -857,7 +876,9 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	}
 	after := o.state(ob)
 	if !v.ok {
-		no(v.code, v.message, after)
+		if cl.Online() {
+			o.h.SendLocked(cl, map[string]any{"t": "obj_no", "req": m.Req, "id": m.ID, "verb": m.Verb, "code": v.code, "message": v.message, "obj": after})
+		}
 		o.forget(street, ob)
 		return
 	}
@@ -865,7 +886,9 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	for k, val := range v.extra {
 		msg[k] = val
 	}
-	o.h.SendLocked(cl, msg)
+	if cl.Online() {
+		o.h.SendLocked(cl, msg)
+	}
 	if !v.got.empty() {
 		creditLocked(o.h, cl.ID(), "take", v.got)
 	}
@@ -1572,24 +1595,28 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 		}
 		sort.Slice(targets, func(i, j int) bool { return targets[i].id < targets[j].id })
 	}
-	ids := []string{}
-	var touched, changed []*liveObj
-	for _, spot := range targets {
-		ob := o.get(street, spot)
-		touched = append(touched, ob)
-		if o.fertilize(street, ob) {
-			ids = append(ids, spot.id)
-			changed = append(changed, ob)
+	// G335: the jar's charge is the ledger's to confirm and use (objects_uses.go); the dust lands
+	// dustLand later, as the source's onFertilidust event does.
+	class := useFertilidust
+	if m.ID != "" {
+		class = useFertilidustLite
+	}
+	o.askUse(cl, class, func(use map[string]any, code, message string) {
+		if code != "" {
+			if cl.Online() {
+				no(code, message)
+			}
+			return
 		}
-	}
-	log.Printf("objects: Fertilidust on %s by %d grew %d of %d trees", street, cl.ID(), len(ids), len(targets))
-	o.h.SendLocked(cl, map[string]any{"t": "obj_dusted", "req": m.Req, "ids": ids})
-	if len(changed) > 0 {
-		o.broadcast(street, 0, changed...)
-	}
-	for _, ob := range touched {
-		o.forget(street, ob)
-	}
+		ans := map[string]any{"t": "obj_dust_used", "req": m.Req, "c": class}
+		if use != nil {
+			ans["use"] = use
+		}
+		if cl.Online() {
+			o.h.SendLocked(cl, ans)
+		}
+		o.h.After(dustLand, func() { o.dustTrees(cl, m.Req, street, targets) })
+	})
 }
 
 // fertilize is one tree's onFertilidust: a trant (include/trants.js 1236-1244) grows one maturity

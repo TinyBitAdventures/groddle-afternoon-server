@@ -73,6 +73,9 @@ type ledgerAnswer struct {
 	Short  *ledgerShort `json:"short,omitempty"`
 	IDs    []int64      `json:"ids,omitempty"`
 	Gave   []tradeGoods `json:"gave,omitempty"`
+	// ledger/use (objects_uses.go): the charges left in the open jar or bottle, and whether this use emptied it.
+	Left  *int `json:"left,omitempty"`
+	Spent bool `json:"spent,omitempty"`
 }
 
 // ledgerSite is the site's ledger. Calls block; trade.go makes them off the hub lock.

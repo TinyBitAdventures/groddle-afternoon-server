@@ -409,6 +409,14 @@ func TestFertilidustGrowsTheStreetsTreesForEveryone(t *testing.T) {
 	r.drain(b)
 
 	r.send(a, map[string]any{"t": "obj_dust", "req": 1})
+	// The jar first (no ledger here: no "use"), then the dust lands dustLand later (fertilidust.js:296).
+	if used := r.only(a, "obj_dust_used"); num(used["req"]) != 1 || used["c"] != "fertilidust" || used["use"] != nil {
+		t.Fatalf("the jar answered %v", used)
+	}
+	if len(r.drain(b)) != 0 {
+		t.Fatal("nothing grows before the dust lands")
+	}
+	r.advance(dustLand)
 	done := r.only(a, "obj_dusted")
 	ids, _ := done["ids"].([]any)
 	if num(done["req"]) != 1 || len(ids) != 7 { // every tree but the dead one
@@ -442,6 +450,10 @@ func TestFertilidustGrowsTheStreetsTreesForEveryone(t *testing.T) {
 		t.Fatalf("a Lite dust from across the street answered %v", no)
 	}
 	r.send(a, map[string]any{"t": "obj_dust", "req": 3, "id": "tree:3"})
+	if used := r.only(a, "obj_dust_used"); used["c"] != "fertilidust_lite" {
+		t.Fatalf("the Lite jar answered %v", used)
+	}
+	r.advance(dustLand)
 	if done := r.only(a, "obj_dusted"); len(done["ids"].([]any)) != 1 {
 		t.Fatalf("the Lite dust answered %v", done)
 	}
