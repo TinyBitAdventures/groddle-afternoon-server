@@ -24,6 +24,15 @@ package main
 // Personal quoins (Qurazy, quest and demo quoins, private instances) never
 // come here.
 //
+// Mystery quoins are reimagined (Austin 2026-10-29; js/quoins.js
+// MYSTERY_QUOIN_KINDS): quoin.js 156-260 adds no stat for type 'mystery', so
+// the server rolls one of the four basic kinds per grab, each as likely
+// (data mystery.kinds), and pays that kind's class of the spot's tier
+// (data mystery.classes: small random xp pays as small random mood, ...).
+// quoin_got and quoin_taken keep "type":"mystery" and add "resolved"; a
+// mystery grab still never shards (quoin.js 84 goes by the quoin's type), and
+// a rolled currants grab is credited to the ledger like any currants grab.
+//
 // Client to server:
 //
 //	{"t":"quoin_sync","street":"GA5…"}                after the street answer to a join: the quoins there
@@ -35,7 +44,8 @@ package main
 //	{"t":"quoins","street":"GA5…","shared":true,"quoins":[{"i":0,"x":0,"y":0,"type":"xp","class":"small random xp"}],"gone":[3]}
 //	    the answer to quoin_sync; shared:false (no quoins key) for a street the server has no quoins for
 //	{"t":"quoin_got","street":"GA5…","i":3,"type":"xp","amount":4,"x":0,"y":0,"crowd":2,"shards":[Shard…]}
-//	    to the claimer: amount is the benefit before the claimer's multiplier (quoin.js 161-174)
+//	    to the claimer: amount is the benefit before the claimer's multiplier (quoin.js 161-174);
+//	    a mystery quoin's adds "resolved":"mood" (the kind it paid as), on quoin_taken too
 //	{"t":"quoin_taken","street":"GA5…","i":3,"id":7,"name":"Ada","type":"xp","amount":4,"x":0,"y":0,"crowd":2,"shards":[Shard…]}
 //	    to everyone else on the street (quoin.js 239-247 quoin_got announcement)
 //	{"t":"quoin_refused","street":"GA5…","i":3,"why":"gone|far|street|unknown|slow"}
@@ -96,7 +106,16 @@ type quoinClass struct {
 type quoinData struct {
 	Types   map[string]int        `json:"types"`
 	Classes map[string]quoinClass `json:"classes"`
+	Mystery quoinMystery          `json:"mystery"`
 	streets map[string][]quoinSpot
+}
+
+// quoinMystery is what a mystery quoin can turn into (js/quoins.js
+// MYSTERY_QUOIN_KINDS) and, per spot class, the class each kind pays by
+// (mysteryClassFor); a class not listed pays the kind's base amount.
+type quoinMystery struct {
+	Kinds   []string                     `json:"kinds"`
+	Classes map[string]map[string]string `json:"classes"`
 }
 
 func parseQuoinData(b []byte) (*quoinData, error) {
@@ -152,6 +171,8 @@ type quoinsModule struct {
 	grabs map[int64]quoinDay
 	// randInt is the source's randInt (common.js 691: lo..hi, both included).
 	randInt func(lo, hi int) int
+	// pick is 0..n-1, each as likely: a mystery quoin's kind.
+	pick func(n int) int
 
 	// The state file (quoins_persist.go): when each gone quoin comes back, and the day's grabs.
 	path    string
@@ -178,6 +199,7 @@ func newQuoinsWith(h *Hub, d *quoinData) *quoinsModule {
 		status:  map[int64]*quoinStatus{},
 		grabs:   map[int64]quoinDay{},
 		randInt: func(lo, hi int) int { return lo + rand.IntN(hi-lo+1) },
+		pick:    rand.IntN,
 		due:     map[string]map[int]time.Time{},
 		resumed: true,
 	}
@@ -338,7 +360,8 @@ func (m *quoinsModule) claim(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, street, i, "far")
 		return
 	}
-	amount := m.benefit(spot)
+	paid := m.resolve(spot)
+	amount := m.benefit(paid)
 	shards, crowd := m.shards(cl, street, spot.Type, amount)
 
 	// quoin.js 236-237 and 305: unspawn for everyone, respawn after respawn_time.
@@ -349,9 +372,14 @@ func (m *quoinsModule) claim(cl *Client, frame json.RawMessage) {
 	m.gone[street][i] = m.h.After(respawn, func() { m.respawn(street, i) })
 	m.markDue(street, i, m.h.Now().Add(respawn))
 
-	m.h.SendLocked(cl, map[string]any{"t": "quoin_got", "street": street, "i": i, "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards})
-	m.h.BroadcastStreetLocked(street, map[string]any{"t": "quoin_taken", "street": street, "i": i, "id": cl.ID(), "name": cl.Name(), "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards}, cl.ID())
-	m.credit(cl, spot.Type, amount, st.mult, shards)
+	got := map[string]any{"t": "quoin_got", "street": street, "i": i, "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards}
+	taken := map[string]any{"t": "quoin_taken", "street": street, "i": i, "id": cl.ID(), "name": cl.Name(), "type": spot.Type, "amount": amount, "x": spot.X, "y": spot.Y, "crowd": crowd, "shards": shards}
+	if paid.Type != spot.Type {
+		got["resolved"], taken["resolved"] = paid.Type, paid.Type
+	}
+	m.h.SendLocked(cl, got)
+	m.h.BroadcastStreetLocked(street, taken, cl.ID())
+	m.credit(cl, paid.Type, amount, st.mult, shards)
 	m.saveSoon()
 }
 
@@ -405,10 +433,23 @@ func (m *quoinsModule) respawnSec(s quoinSpot) int {
 	return 3600
 }
 
+// resolve is the spot a grab pays as: the spot itself, or for a mystery
+// quoin one of mystery.kinds picked uniformly, with the class that kind
+// pays by at this spot's tier (none when the data names none: the kind's base
+// amount). The respawn timer stays the spot's own class's.
+func (m *quoinsModule) resolve(s quoinSpot) quoinSpot {
+	kinds := m.data.Mystery.Kinds
+	if s.Type != "mystery" || len(kinds) == 0 {
+		return s
+	}
+	kind := kinds[m.pick(len(kinds))]
+	return quoinSpot{X: s.X, Y: s.Y, Type: kind, Class: m.data.Mystery.Classes[s.Class][kind]}
+}
+
 // benefit is what one grab gives before the claimer's multiplier (quoin.js
 // 161-166): the class's benefit, or randInt(floor, ceil) for a random class;
-// a class of another type (mystery spots carry the iMG pair) gives the
-// quoin type's own base amount (js/quoins.js quoinClassAmount, collectQuoin).
+// no class, or a class of another type, gives the quoin type's own base
+// amount (js/quoins.js quoinClassAmount, collectQuoin).
 func (m *quoinsModule) benefit(s quoinSpot) int {
 	c, ok := m.data.Classes[s.Class]
 	if !ok || (c.Type != "" && c.Type != s.Type) {

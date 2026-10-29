@@ -29,6 +29,7 @@ func quoinHub(t *testing.T, d *quoinData) (*Hub, *quoinsModule, *[]*fakeTimer) {
 		return func() bool { ft.stopped = true; return true }
 	}
 	mod.randInt = func(lo, hi int) int { return hi }
+	mod.pick = func(n int) int { return 0 }
 	return hub, mod, timers
 }
 
@@ -44,6 +45,14 @@ func testQuoinData() *quoinData {
 			"small random currants":  {Type: "currants", Respawn: 180, Floor: 2, Ceil: 6},
 			"fast tiny currants":     {Type: "currants", Respawn: 40, Benefit: intp(1)},
 			"slow medium-large mood": {Type: "mood", Respawn: 1800, Benefit: intp(25)},
+			"small random mood":      {Type: "mood", Respawn: 420, Floor: 2, Ceil: 6},
+			"small random energy":    {Type: "energy", Respawn: 420, Floor: 2, Ceil: 6},
+		},
+		Mystery: quoinMystery{
+			Kinds: []string{"xp", "mood", "energy", "currants"},
+			Classes: map[string]map[string]string{
+				"small random xp": {"xp": "small random xp", "mood": "small random mood", "energy": "small random energy", "currants": "small random currants"},
+			},
 		},
 		streets: map[string][]quoinSpot{
 			"GQTEST": {
@@ -318,15 +327,17 @@ func TestBenefitsAndNonSharingTypes(t *testing.T) {
 	bo := joinAt(hub, 2, "Bo", "GQTEST", 2010, touchY)
 	frames(ada)
 	frames(bo)
-	// Mystery spots carry the iMG pair but pay their own type's 0 (quoin.js has no mystery branch).
+	// Mystery spots carry the iMG pair; the grab rolls a kind (pick 0: xp) and pays its class
+	// (small random xp, 2 to 6), and still never shards (quoin.js 84 goes by the quoin's type).
 	send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 1})
 	got := lastOf(t, ada, "quoin_got")
-	if got["amount"] != 0.0 || got["type"] != "mystery" || len(got["shards"].([]any)) != 0 || got["crowd"] != 0.0 {
+	if got["amount"] != 3.0 || got["type"] != "mystery" || got["resolved"] != "xp" || len(got["shards"].([]any)) != 0 || got["crowd"] != 0.0 {
 		t.Fatalf("mystery %v", got)
 	}
-	if len(asked) != 0 {
+	if len(asked) != 1 || asked[0] != [2]int{2, 6} {
 		t.Fatalf("mystery rolled %v", asked)
 	}
+	asked = nil
 	// Favor: rolled from its class, and favor never shards (quoin.js 84).
 	send(hub, ada, map[string]any{"t": "move", "x": 3000, "y": touchY})
 	send(hub, bo, map[string]any{"t": "move", "x": 3005, "y": touchY})
@@ -339,9 +350,73 @@ func TestBenefitsAndNonSharingTypes(t *testing.T) {
 	if len(asked) != 1 || asked[0] != [2]int{1, 3} {
 		t.Fatalf("favor roll %v", asked)
 	}
+	if _, ok := got["resolved"]; ok {
+		t.Fatalf("only a mystery quoin is resolved: %v", got)
+	}
 	// The mystery spot's timer is its class's (small random xp: 5 minutes).
 	if (*timers)[0].d != 5*time.Minute {
 		t.Fatalf("mystery respawn %v", (*timers)[0].d)
+	}
+}
+
+// Reimagined mystery quoins (js/quoins.js MYSTERY_QUOIN_KINDS): each of the
+// four kinds comes up, pays that kind's class of the spot's tier, is told to
+// the claimer and the street, and a rolled currants grab goes to the ledger.
+func TestAMysteryQuoinRollsEachKind(t *testing.T) {
+	hub, mod, _ := quoinHub(t, testQuoinData())
+	got := caughtCredits(hub)
+	var picks []int
+	ada := joinAt(hub, 1, "Ada", "GQTEST", 2000, touchY)
+	bo := joinAt(hub, 2, "Bo", "GQTEST", 2010, touchY)
+	send(hub, ada, map[string]any{"t": "quoin_status", "mult": 2})
+	frames(ada)
+	frames(bo)
+	want := []struct {
+		kind string
+		lo   int
+	}{{"xp", 2}, {"mood", 2}, {"energy", 2}, {"currants", 2}}
+	for n, w := range want {
+		mod.pick = func(k int) int { picks = append(picks, k); return n }
+		var rolled [2]int
+		mod.randInt = func(lo, hi int) int { rolled = [2]int{lo, hi}; return lo + n }
+		mod.gone = map[string]map[int]func() bool{}
+		*got = nil
+		send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 1})
+		g := lastOf(t, ada, "quoin_got")
+		if g["type"] != "mystery" || g["resolved"] != w.kind || g["amount"] != float64(w.lo+n) || len(g["shards"].([]any)) != 0 {
+			t.Fatalf("%s: %v", w.kind, g)
+		}
+		if rolled != [2]int{2, 6} {
+			t.Fatalf("%s rolled %v, want small random %s's 2..6", w.kind, rolled, w.kind)
+		}
+		tk := lastOf(t, bo, "quoin_taken")
+		if tk["type"] != "mystery" || tk["resolved"] != w.kind || tk["amount"] != g["amount"] {
+			t.Fatalf("%s taken: %v", w.kind, tk)
+		}
+		if w.kind == "currants" {
+			// 5 currants x the claimer's multiplier 2, no shards.
+			if len(*got) != 1 || !sameCredit((*got)[0], creditEvent{User: 1, Why: "quoin", Got: tradeGoods{Currants: 10}}) {
+				t.Fatalf("rolled currants credits: %+v", *got)
+			}
+		} else if len(*got) != 0 {
+			t.Fatalf("rolled %s credits nothing: %+v", w.kind, *got)
+		}
+	}
+	for _, k := range picks {
+		if k != 4 {
+			t.Fatalf("picked from %d kinds, want 4", k)
+		}
+	}
+	// A class the table has no row for pays the rolled kind's base amount (mood: 10).
+	d := testQuoinData()
+	d.streets["GQTEST"][1].Class = "fast tiny currants"
+	hub, mod, _ = quoinHub(t, d)
+	mod.pick = func(int) int { return 1 }
+	ada = joinAt(hub, 1, "Ada", "GQTEST", 2000, touchY)
+	frames(ada)
+	send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 1})
+	if g := lastOf(t, ada, "quoin_got"); g["resolved"] != "mood" || g["amount"] != 10.0 {
+		t.Fatalf("unmapped class %v", g)
 	}
 }
 
@@ -398,5 +473,27 @@ func TestTheShippedQuoinData(t *testing.T) {
 	}
 	if c := d.Classes["slow medium-large energy"]; c.Respawn != 1800 || c.Benefit == nil || *c.Benefit != 25 {
 		t.Fatalf("slow medium-large energy %+v", c)
+	}
+	// Mystery quoins: the four basic kinds, and every class a mystery spot has maps each to a class of that kind.
+	if k := d.Mystery.Kinds; len(k) != 4 || k[0] != "xp" || k[1] != "mood" || k[2] != "energy" || k[3] != "currants" {
+		t.Fatalf("mystery kinds %v", k)
+	}
+	mysteries := 0
+	for tsid, spots := range d.streets {
+		for i, s := range spots {
+			if s.Type != "mystery" {
+				continue
+			}
+			mysteries++
+			for _, kind := range d.Mystery.Kinds {
+				c, ok := d.Classes[d.Mystery.Classes[s.Class][kind]]
+				if !ok || c.Type != kind {
+					t.Fatalf("%s #%d (%s) as %s: %q", tsid, i, s.Class, kind, d.Mystery.Classes[s.Class][kind])
+				}
+			}
+		}
+	}
+	if mysteries < 1000 {
+		t.Fatalf("only %d mystery spots", mysteries)
 	}
 }
