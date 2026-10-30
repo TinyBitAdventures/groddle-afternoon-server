@@ -292,3 +292,33 @@ func TestNoObjectsFileWithoutAPath(t *testing.T) {
 		t.Fatalf("files appeared: %v", entries)
 	}
 }
+
+// The invented set every street without an ecology row used to get (trees, two
+// rocks and a Piggy or two) is gone (game 2026-10-30): Gentle Island Exit's file
+// holds only 4 quoins and a Qurazy marker. A state file from before still names
+// its trees, rock and Piggy; they are dropped on load and nothing else is.
+func TestTheOldFallbackObjectsOnGentleIslandExitAreDropped(t *testing.T) {
+	const exit = "GA93VBH3H3D38HF"
+	path := filepath.Join(t.TempDir(), "objects.json")
+	file := objFile{V: 1, Streets: map[string]map[string]*objRec{
+		exit: {
+			"tree:1": {Kind: "tree", Fruit: 3, Maturity: 7, Health: 8},
+			"tree:3": {Kind: "wood", WoodCount: 2},
+			"rock:0": {Kind: "rock", Chunks: 10},
+			"pig:0":  {Kind: "pig", Mood: 40},
+		},
+		defaultStreet: {"tree:0": {Kind: "tree", Dead: true}},
+	}}
+	b, _ := json.Marshal(file)
+	os.WriteFile(path, b, 0o600)
+	r := newObjRigAt(t, path, time.Time{})
+	if n := len(r.mod.w.streets[exit]); n != 0 {
+		t.Fatalf("the layout still lays out %d objects on Gentle Island Exit", n)
+	}
+	if room, kept := r.mod.streets[exit]; kept {
+		t.Fatalf("kept %v on Gentle Island Exit", room)
+	}
+	if ob := r.mod.streets[defaultStreet]["tree:0"]; ob == nil || !ob.dead {
+		t.Fatalf("Hechey Track's dead tree went too: %+v", ob)
+	}
+}

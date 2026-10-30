@@ -486,22 +486,20 @@ func TestFeedingAndEatingAPiggy(t *testing.T) {
 
 func TestASadStreetsPiggiesRefuseAndWait(t *testing.T) {
 	r := newObjRig(t)
-	var street string
-	var pig *objSpot
-	streets := []string{}
+	// Every sad street's Piggies were the game's invented fallback set, gone since
+	// 2026-10-30 (the archive puts no Piggy on a sad street), so this rig's world
+	// makes Hechey Track sad: a layout that gains one still meets the rule.
 	for tsid := range sharedWorld.sad {
-		streets = append(streets, tsid)
-	}
-	sort.Strings(streets)
-	for _, tsid := range streets {
-		if s := sharedWorld.streets[tsid]["pig:0"]; s != nil {
-			street, pig = tsid, s
-			break
+		if sharedWorld.streets[tsid]["pig:0"] != nil {
+			t.Fatalf("%s is sad and lays out a Piggy: drop this stand-in and test that street", tsid)
 		}
 	}
+	street := defaultStreet
+	pig := sharedWorld.streets[street]["pig:0"]
 	if pig == nil {
-		t.Fatal("no sad street with a Piggy")
+		t.Fatal("Hechey Track lays out no Piggy")
 	}
+	r.mod.w = &objWorld{rules: sharedWorld.rules, streets: sharedWorld.streets, sad: map[string]bool{street: true}}
 	a := r.player(1, "Ada", street, pig.x, pig.y)
 	r.send(a, map[string]any{"t": "obj_sync"})
 	r.drain(a)
