@@ -28,12 +28,29 @@ func (f *fakeUseLedger) give(id int64, class string, n int) {
 	f.held[id][class] += n
 }
 
-func (f *fakeUseLedger) use(op string, id int64, class string) ledgerAnswer {
-	f.calls = append(f.calls, fmt.Sprintf("%s %d %s", op, id, class))
+func (f *fakeUseLedger) use(op string, id int64, class string, n int) ledgerAnswer {
+	if n > 0 {
+		f.calls = append(f.calls, fmt.Sprintf("%s %d %s x%d", op, id, class, n))
+	} else {
+		f.calls = append(f.calls, fmt.Sprintf("%s %d %s", op, id, class))
+	}
 	if f.down {
 		return ledgerAnswer{}
 	}
 	if a, ok := f.ops[op]; ok {
+		return a
+	}
+	if n > 0 {
+		// Whole items (a Piggy's food): all of them or none.
+		if f.held[id][class] < n {
+			a := ledgerAnswer{Status: "refused", Short: &ledgerShort{ID: id, C: class}}
+			f.ops[op] = a
+			return a
+		}
+		f.held[id][class] -= n
+		zero := 0
+		a := ledgerAnswer{Status: "settled", Left: &zero, Spent: true}
+		f.ops[op] = a
 		return a
 	}
 	if f.held[id][class] < 1 {
@@ -54,6 +71,20 @@ func (f *fakeUseLedger) use(op string, id int64, class string) ledgerAnswer {
 	a := ledgerAnswer{Status: "settled", Left: &left, Spent: spent}
 	f.ops[op] = a
 	return a
+}
+
+func (f *fakeUseLedger) has(id int64, classes []string) (map[string]bool, bool) {
+	f.calls = append(f.calls, fmt.Sprintf("has %d", id))
+	if f.down {
+		return nil, false
+	}
+	held := map[string]bool{}
+	for _, c := range classes {
+		if f.held[id][c] > 0 {
+			held[c] = true
+		}
+	}
+	return held, true
 }
 
 // usesRig is an objects rig whose bottles and jars are the fake ledger's; ledger calls run in place.

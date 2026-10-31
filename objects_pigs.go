@@ -34,10 +34,19 @@ package main
 //   - nibble (handler 862-910): petted by this player today (or Animal Kinship VI, the "ak6" perk)
 //     and the Piggy's mood 0 or hunger over 2: "That Piggy doesn't feel like being nibbled right
 //     now."; not petted today: "Give that Piggy some love first!"; else the ak_piggy_nibble roll.
-//   - feed (feed handler 560-750): food of base cost 5 or more sates a hungry Piggy (the client
-//     says so with the "sate" perk: the food and its cost are its own); eat: one of the player's own
-//     dropped stacks (a private place's, or a class the ledger does not carry), or a tree's fruit
-//     ("on"), eaten where only that player sees the food.
+//   - feed (feed handler 560-750): food of base cost 5 or more sates a hungry Piggy. With the site's
+//     ledger (G335 slice 5, askFeed) the client names the food and how many ("c", "n", one stack at
+//     most) and the ledger takes them before the Piggy is sated for everyone: which foods sate is
+//     data/trade.json "sates" (the game's tools/build-realtime-trade.mjs), never the client's word.
+//     Food fed to a Piggy that is not hungry, or food under base cost 5, changes nothing anyone else
+//     sees, so it stays the player's own loss and the ledger is not asked. Without the ledger the
+//     client says so with the "sate" perk, as before.
+//   - eat: a tree's fruit ("on"), eaten where only that player saw the Piggy walk to it; the fruit
+//     comes off the shared tree. A stack only that player sees (their own drop: a class the ledger
+//     does not carry, or one dropped while the server was out of reach) no longer sates a street
+//     Piggy (G335 slice 5): the server cannot see that food, and every stack the ledger carries on a
+//     public street is dropped for everyone and eaten through drops.go (pigFood), which can. The
+//     game's shared Piggies leave such stacks alone.
 // Chickens and Butterflies have no mood or hunger in the source (npc_chicken.js, npc_butterfly.js);
 // what they remember is per player (massagers[pc.tsid], the squeeze and milk limits), so it stays in
 // each player's save, as in solo.
@@ -47,6 +56,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -393,8 +403,12 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 		if ob.hunger <= 0 {
 			return refuse("not_hungry", pigNotHungry)
 		}
+		if m.On == "" {
+			// G335 slice 5: food only this player sees is not the street's to believe in.
+			return refuse("unseen", "That Piggy can't see any food there.")
+		}
 		var also []*liveObj
-		if m.On != "" {
+		{
 			spot := o.w.streets[street][m.On]
 			if spot == nil || spot.kind != "tree" || !strings.HasPrefix(m.On, "tree:") || math.Abs(spot.x-ob.spot.x) > pigReachX {
 				return refuse("unknown", "That is not something here.")
@@ -411,4 +425,56 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 		return verdict{ok: true, also: also}
 	}
 	return refuse("bad_verb", "You can't do that to a Piggy.")
+}
+
+// pigFoods is data/trade.json's food classes: whether each sates a hungry Piggy, and its stack size.
+var pigFoods = func() map[string]tradeClass {
+	var table tradeTable
+	if err := json.Unmarshal(tradeJSON, &table); err != nil {
+		panic(fmt.Sprintf("realtime: data/trade.json: %v", err))
+	}
+	foods := map[string]tradeClass{}
+	for c, it := range table.Items {
+		if it.Food {
+			foods[c] = it
+		}
+	}
+	return foods
+}()
+
+// askFeed is feeding a street Piggy when the site's ledger holds the food (G335 slice 5): the
+// Piggy's own refusals first, then, when the food would sate it, the ledger takes the food before
+// the Piggy is sated for everyone (obj_ok carries "use" with the op the page applies once).
+func (o *objects) askFeed(cl *Client, m objAct, street string, spot *objSpot, perks map[string]bool) {
+	ob := o.get(street, spot)
+	before := o.state(ob)
+	food, isFood := pigFoods[m.C]
+	switch {
+	case o.w.sad[street]:
+		o.finishAct(cl, m, street, ob, before, refuse("sad", pigSad))
+		return
+	case !isFood || m.N < 1 || m.N > food.Max:
+		o.finishAct(cl, m, street, ob, before, refuse("not_food", "That Piggy doesn't want to eat that."))
+		return
+	case !food.Sates || ob.hunger == 0:
+		// Nothing anyone else sees changes: the food is the player's own to lose.
+		o.finishAct(cl, m, street, ob, before, verdict{ok: true})
+		return
+	}
+	o.uses.ask(cl, m.C, m.N, func(use map[string]any, code, message string) {
+		ob := o.get(street, spot)
+		before := o.state(ob)
+		if code != "" {
+			o.finishAct(cl, m, street, ob, before, refuse(code, message))
+			return
+		}
+		if ob.hunger != 0 {
+			ob.hunger, ob.croak = 0, false
+		}
+		v := verdict{ok: true}
+		if use != nil {
+			v.extra = map[string]any{"use": use}
+		}
+		o.finishAct(cl, m, street, ob, before, v)
+	})
 }

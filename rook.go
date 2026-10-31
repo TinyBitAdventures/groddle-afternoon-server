@@ -95,6 +95,9 @@ import (
 //go:embed data/rook.json
 var rookJSON []byte
 
+// rookTextBalming: ours, while a balm on the same rooked thing waits for the ledger.
+const rookTextBalming = "Someone is already applying a balm to this one."
+
 const (
 	// admin.js createRookAttack 398: setSchedule(60, 60) minutes by default.
 	rookScheduleMin = 60 * time.Minute
@@ -324,11 +327,16 @@ type rook struct {
 	hubs    map[string]*rookHub
 	limits  map[int64]*objBucket
 	path    string // the state file (rook_persist.go); "": memory only
+	// A Rook Balm's full revive uses one of the balm's charges through the site's ledger first
+	// (G335 slice 5, objects_uses.go); balming holds the rooked thing while it waits.
+	uses    *useAsker
+	balming map[string]bool // street + "|" + key
 }
 
 func newRook(h *Hub) Module {
 	m := &rook{h: h, w: rookData, roll: rand.Float64, dev: os.Getenv("GRODDLE_ROOK_DEV") == "1",
-		streets: map[string]*rookStreet{}, hubs: map[string]*rookHub{}, limits: map[int64]*objBucket{}}
+		streets: map[string]*rookStreet{}, hubs: map[string]*rookHub{}, limits: map[int64]*objBucket{}, balming: map[string]bool{}}
+	m.uses = newUseAsker(h, "rook: Rook Balm")
 	if m.dev {
 		log.Printf("rook: GRODDLE_ROOK_DEV=1, rook_dev messages are on (QA only)")
 	}
@@ -1180,6 +1188,33 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 		return
 	}
 	r := s.rooked[msg.Key]
+	hold := cl.Street() + "|" + msg.Key
+	if m.balming[hold] {
+		m.no(cl, "revive", "busy", rookTextBalming)
+		return
+	}
+	if msg.Balm && m.uses.ledger != nil {
+		// G335 slice 5: the balm is the ledger's to confirm and use (potion_rook_balm.js:25
+		// points_capacity 5, tool_base use(1) at 570 and 631; the fifth pour consumes it).
+		street := cl.Street()
+		m.balming[hold] = true
+		m.uses.ask(cl, useBalm, 0, func(use map[string]any, code, message string) {
+			delete(m.balming, hold)
+			if code != "" {
+				m.no(cl, "revive", code, message)
+				return
+			}
+			s := m.streets[street]
+			if s == nil || s.rooked[msg.Key] == nil {
+				// Held while it waited, so only a clearing can have taken it: the charge is used all the same.
+				log.Printf("rook: a balm on %s %s by %d was paid for, but it was no longer rooked", street, msg.Key, cl.ID())
+				m.no(cl, "revive", "not_rooked", "That is not rooked any more.")
+				return
+			}
+			m.revive(cl, street, s, msg.Key, true, use)
+		})
+		return
+	}
 	if !msg.Balm {
 		// 112: one dose per player; canRevive 365-372: three at most.
 		for _, id := range r.healers {
@@ -1193,24 +1228,35 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 			return
 		}
 	}
+	m.revive(cl, cl.Street(), s, msg.Key, msg.Balm, nil)
+}
+
+// revive is one dose (or a balm's full revive) landing on a rooked thing; use is the ledger's word on
+// the balm's charge (nil without a ledger, or for a dose).
+func (m *rook) revive(cl *Client, street string, s *rookStreet, key string, balm bool, use map[string]any) {
+	r := s.rooked[key]
 	r.healers = append(r.healers, cl.ID())
 	doses := len(r.healers)
-	done := msg.Balm || doses >= rookHealers
+	done := balm || doses >= rookHealers
 	xp := rookReviveXp
-	if msg.Balm {
+	if balm {
 		xp += rookBalmXp
 	}
 	favor := 0
 	if done {
-		delete(s.rooked, msg.Key)
+		delete(s.rooked, key)
 		xp += rookReviveFinal
 		favor = rookReviveFavor
 		doses = rookHealers
 	}
 	m.save()
-	m.you(cl, "revive", map[string]any{"xp": xp, "energy": -rookReviveEnergy, "mood": -rookReviveMood, "favor": favor, "key": msg.Key, "doses": doses, "done": done, "balm": msg.Balm, "class": r.class})
-	m.broadcast(cl.Street(), map[string]any{"type": "revive", "key": msg.Key, "by": cl.ID(), "name": cl.Name(), "doses": doses, "done": done, "balm": msg.Balm, "class": r.class})
-	m.tidy(cl.Street())
+	you := map[string]any{"xp": xp, "energy": -rookReviveEnergy, "mood": -rookReviveMood, "favor": favor, "key": key, "doses": doses, "done": done, "balm": balm, "class": r.class}
+	if use != nil {
+		you["use"] = use
+	}
+	m.you(cl, "revive", you)
+	m.broadcast(street, map[string]any{"type": "revive", "key": key, "by": cl.ID(), "name": cl.Name(), "doses": doses, "done": done, "balm": balm, "class": r.class})
+	m.tidy(street)
 }
 
 // ---------------------------------------------------------------------------

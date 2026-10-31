@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -32,15 +31,14 @@ type Tickets struct {
 	secret []byte
 	now    func() time.Time
 
-	mu   sync.Mutex
-	used map[string]int64 // jti -> exp
+	used *proofJournal // spent jtis until they expire (proofs.go: kept across a restart)
 }
 
 func NewTickets(secret []byte, now func() time.Time) *Tickets {
 	if now == nil {
 		now = time.Now
 	}
-	return &Tickets{secret: secret, now: now, used: map[string]int64{}}
+	return &Tickets{secret: secret, now: now, used: sharedProofs()}
 }
 
 // Check verifies a ticket's signature and expiry, then spends it.
@@ -64,17 +62,9 @@ func (t *Tickets) Check(ticket string) (Claims, error) {
 	if c.Exp < now {
 		return Claims{}, errTicketExpired
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for jti, exp := range t.used {
-		if exp < now {
-			delete(t.used, jti)
-		}
-	}
-	if _, seen := t.used[c.Jti]; seen {
+	if !t.used.spend("ticket", c.Jti, c.Exp, now) {
 		return Claims{}, errTicketReused
 	}
-	t.used[c.Jti] = c.Exp
 	c.Name = cleanName(c.Name)
 	return c, nil
 }

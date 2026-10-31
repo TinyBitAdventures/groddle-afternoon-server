@@ -101,7 +101,7 @@ type buddies struct {
 	live   map[int64]string // told online, and the street last told
 	away   map[int64]func() bool
 	settle map[int64]func() bool
-	spent  map[string]int64 // add proofs used: n -> exp
+	spent  *proofJournal // proofs used until they expire (proofs.go: kept across a restart)
 	rates  map[string]*bucket
 }
 
@@ -116,7 +116,7 @@ func newBuddies(h *Hub) Module {
 		secret, _ = readSecret(path)
 	}
 	return &buddies{h: h, secret: secret, watch: map[int64]*buddyWatch{}, live: map[int64]string{},
-		away: map[int64]func() bool{}, settle: map[int64]func() bool{}, spent: map[string]int64{}, rates: map[string]*bucket{}}
+		away: map[int64]func() bool{}, settle: map[int64]func() bool{}, spent: sharedProofs(), rates: map[string]*bucket{}}
 }
 
 func (m *buddies) Register(r *Registry) {
@@ -386,15 +386,9 @@ func (m *buddies) tell(cl *Client, frame json.RawMessage) {
 		return
 	}
 	now := m.h.Now().Unix()
-	for n, exp := range m.spent {
-		if exp < now {
-			delete(m.spent, n)
-		}
-	}
-	if _, used := m.spent[c.N]; used {
+	if !m.spent.spend("buddy_add", c.N, c.Exp, now) {
 		return
 	}
-	m.spent[c.N] = c.Exp
 	// inc_buddies.js:209 sendOnlineActivity: only when they are online, and not to someone ignoring you.
 	if m.h.ClientLocked(c.To) == nil || m.ignores(c.To, c.Sub) {
 		return

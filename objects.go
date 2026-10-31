@@ -465,7 +465,7 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_act", o.kept(o.handleAct))
 	r.OnConnect(func(*Client) { o.resume() })
 	r.OnShutdown(func() { o.save() })
-	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()) })
+	r.OnDisconnect(func(cl *Client) { delete(o.limits, cl.ID()); delete(o.uses.tools, cl.ID()) })
 	r.Handle("obj_mine", o.kept(o.handleMine))
 	r.Handle("obj_dig", o.kept(o.handleDig))
 	r.Handle("obj_dev", o.kept(o.pigDev))
@@ -765,6 +765,8 @@ type objAct struct {
 	Skill string   `json:"skill"`
 	On    string   `json:"on"` // eat: the tree whose fruit a Piggy ate
 	Ms    int64    `json:"ms"` // poison, GRODDLE_TREES_DEV=1 only: the die timer for QA
+	C     string   `json:"c"`  // feed: the food's class (G335 slice 5)
+	N     int      `json:"n"`  // feed: how many of it, one stack at most
 }
 
 // verdict is what one verb decided: ok, or a refusal code and line; extra rides on obj_ok.
@@ -796,7 +798,7 @@ func refuse(code, message string) verdict { return verdict{code: code, message: 
 
 func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	var m objAct
-	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.Perks) > 8 || len(m.Skill) > 32 || len(m.On) > 40 {
+	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.Perks) > 8 || len(m.Skill) > 32 || len(m.On) > 40 || len(m.C) > 64 || m.N < 0 || m.N > tradeSlotMax {
 		o.h.ErrorLocked(cl, "bad_obj", "That object message did not check out.")
 		return
 	}
@@ -841,6 +843,26 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		o.askPour(cl, m, street, spot)
 		return
 	}
+	if spot.kind == "pig" && m.Verb == "feed" && o.uses.ledger != nil {
+		// G335 slice 5: food that sates a hungry Piggy is the ledger's to confirm and take (objects_pigs.go).
+		o.askFeed(cl, m, street, spot, perks)
+		return
+	}
+	if need := toolFor(spot, m.Verb); need != nil {
+		// G335 slice 5: the tool behind the take is the ledger's to confirm (objects_tools.go).
+		o.withTool(cl, street, need, func(code, message string) {
+			no(code, message, o.state(o.get(street, spot)))
+			o.forget(street, o.get(street, spot))
+		},
+			func(credit bool) { o.actOn(cl, m, street, spot, perks, credit) })
+		return
+	}
+	o.actOn(cl, m, street, spot, perks, true)
+}
+
+// actOn decides one verb on a shared object and answers it; credit false keeps the take out of the
+// ledger's receipts (its tool could not be confirmed: objects_tools.go).
+func (o *objects) actOn(cl *Client, m objAct, street string, spot *objSpot, perks map[string]bool, credit bool) {
 	ob := o.get(street, spot)
 	before := o.state(ob)
 	var v verdict
@@ -861,6 +883,9 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		v = o.chopWood(ob, m.Verb, cl.ID())
 	default:
 		v = o.tendTree(ob, m.Verb, m.Skill)
+	}
+	if !credit {
+		v.got = tradeGoods{}
 	}
 	o.finishAct(cl, m, street, ob, before, v)
 }

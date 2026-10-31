@@ -76,6 +76,8 @@ type ledgerAnswer struct {
 	// ledger/use (objects_uses.go): the charges left in the open jar or bottle, and whether this use emptied it.
 	Left  *int `json:"left,omitempty"`
 	Spent bool `json:"spent,omitempty"`
+	// ledger/has (objects_tools.go): which of the asked classes the player holds.
+	Has []string `json:"has,omitempty"`
 }
 
 // ledgerSite is the site's ledger. Calls block; trade.go makes them off the hub lock.

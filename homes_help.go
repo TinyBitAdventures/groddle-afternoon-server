@@ -144,12 +144,12 @@ type homeHelp struct {
 	spawn  func(func())
 	newID  func() string
 	busy   map[int64]int64 // owner -> the visitor whose parcel the site is weighing
-	spent  map[string]int64
+	spent  *proofJournal   // proofs used until they expire (proofs.go: kept across a restart)
 	rates  map[string]*bucket
 }
 
 func newHomeHelp(h *Hub) Module {
-	m := &homeHelp{h: h, secret: homeHelpSecretForTest, spawn: func(fn func()) { go fn() }, busy: map[int64]int64{}, spent: map[string]int64{}, rates: map[string]*bucket{},
+	m := &homeHelp{h: h, secret: homeHelpSecretForTest, spawn: func(fn func()) { go fn() }, busy: map[int64]int64{}, spent: sharedProofs(), rates: map[string]*bucket{},
 		newID: func() string {
 			b := make([]byte, 8)
 			rand.Read(b)
@@ -343,19 +343,13 @@ func (m *homeHelp) tendTell(cl *Client, frame json.RawMessage) {
 		return
 	}
 	now := m.h.Now().Unix()
-	for n, exp := range m.spent {
-		if exp < now {
-			delete(m.spent, n)
-		}
-	}
-	if _, used := m.spent[c.N]; used {
-		return
-	}
 	exp := c.Exp
 	if most := now + int64(homeTendLife.Seconds()); exp > most {
 		exp = most
 	}
-	m.spent[c.N] = exp
+	if !m.spent.spend("home_tend", c.N, exp, now) {
+		return
+	}
 	acts := make([]map[string]any, 0, len(c.Acts))
 	for _, a := range c.Acts {
 		act := map[string]any{}

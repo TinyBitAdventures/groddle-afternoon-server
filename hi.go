@@ -89,9 +89,15 @@ package main
 // Trust. The server decides every sign, target, infection, bonus, count and
 // record from the positions it holds and its own clock. Mood and badges are
 // the client's to apply to its own save from these messages, as every
-// reward is. A powder's use is the client's word that it held the jar (the
-// server cannot see packs, the line projects.go draws for tools): the jar's
-// charge is the user's own, nothing of value moves, and the pace is held.
+// reward is. A powder's jar is the site's ledger's to confirm (G335 slice 5):
+// once the street has room for it, one charge is used through ledger/use
+// (objects_uses.go; sneezing_powder.js and sparkle_powder.js maxCharges 5,
+// powder_base use() takes one and the jar goes at 0) before anyone catches it,
+// the go-ahead carries the ledger's word ("use"), and without the jar the user
+// hears the ledger's line ("You don't have enough of that item.",
+// inc_trading.js:456) and nobody sneezes. A crowded street refuses first and
+// uses nothing, as the source's verbs return before doVerb. Without the ledger
+// the jar is the client's word, as before.
 //
 // Persistence: the day's signs, targets, the tally, the records and what is
 // owed are written to -hi-file (default realtime-hi.json beside
@@ -240,6 +246,7 @@ type hiModule struct {
 	powderAt map[int64]time.Time
 	hitDone  map[[2]int64]int64      // (from, to) -> the sent-at of the missile already counted
 	sneezing map[int64][]func() bool // a player's sneezes still to come
+	uses     *useAsker               // the jar's charge through the site's ledger (G335 slice 5)
 }
 
 func newHiState() *hiState {
@@ -266,6 +273,7 @@ func newHi(h *Hub) Module {
 func newHiWith(h *Hub, path string) *hiModule {
 	m := &hiModule{h: h, st: newHiState(), path: path, roll: rand.IntN, sayAt: map[int64]time.Time{}, powderAt: map[int64]time.Time{},
 		hitDone: map[[2]int64]int64{}, sneezing: map[int64][]func() bool{}}
+	m.uses = newUseAsker(h, "hi: Sneezing and Sparkle Powder")
 	if path != "" {
 		if err := m.load(); err != nil {
 			log.Printf("hi %s: %v (hi signs are kept in memory only)", path, err)
@@ -925,6 +933,27 @@ func (m *hiModule) powder(cl *Client, frame json.RawMessage) {
 		m.h.SendLocked(cl, map[string]any{"t": "powder_spread", "cls": msg.Cls, "ok": false, "why": "crowd"})
 		return
 	}
+	m.uses.ask(cl, msg.Cls, 0, func(use map[string]any, code, message string) {
+		if code != "" {
+			m.h.SendLocked(cl, map[string]any{"t": "powder_spread", "cls": msg.Cls, "ok": false, "why": code, "message": message})
+			return
+		}
+		m.spread(cl, msg.Cls, street, use)
+	})
+}
+
+// spread is a powder the jar was confirmed for reaching everyone else still on street.
+func (m *hiModule) spread(cl *Client, cls, street string, use map[string]any) {
+	var others []*Client
+	if street != "" && cl.Street() == street {
+		for _, o := range m.h.StreetLocked(street) {
+			if o.ID() != cl.ID() {
+				others = append(others, o)
+			}
+		}
+	}
+	sort.Slice(others, func(i, j int) bool { return others[i].ID() < others[j].ID() })
+	msg := struct{ Cls string }{cls}
 	from := map[string]any{"id": cl.ID(), "name": cl.Name()}
 	reached := 0
 	for _, o := range others {
@@ -943,7 +972,11 @@ func (m *hiModule) powder(cl *Client, frame json.RawMessage) {
 		counters = append(counters, [2]any{"powders:sparkle_buddy", 1})
 	}
 	log.Printf("hi: %s (%d) spread %s to %d on %s", cl.Name(), cl.ID(), msg.Cls, reached, street)
-	m.h.SendLocked(cl, map[string]any{"t": "powder_spread", "cls": msg.Cls, "ok": true, "players": reached, "counters": counters})
+	ok := map[string]any{"t": "powder_spread", "cls": msg.Cls, "ok": true, "players": reached, "counters": counters}
+	if use != nil {
+		ok["use"] = use
+	}
+	m.h.SendLocked(cl, ok)
 }
 
 // startSneezing is the Sneezing buff's events (catalog_buffs.js:2420-2441): a sneeze 0-8 s in, one at

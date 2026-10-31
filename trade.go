@@ -168,8 +168,9 @@ type tradeClass struct {
 	Max    int    `json:"max"`
 	Name   string `json:"name"`
 	Plural string `json:"plural"`
-	Pts    int    `json:"pts,omitempty"`  // a tool's points capacity
-	Food   bool   `json:"food,omitempty"` // include/food.js is_food: a street Piggy eats it off the ground (drops.go)
+	Pts    int    `json:"pts,omitempty"`   // a tool's points capacity
+	Food   bool   `json:"food,omitempty"`  // include/food.js is_food: a street Piggy eats it off the ground (drops.go)
+	Sates  bool   `json:"sates,omitempty"` // food of base cost 5 or more: feeding it sates a hungry Piggy (npc_piggy.js 672-676)
 }
 
 type tradeTable struct {

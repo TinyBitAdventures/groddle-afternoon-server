@@ -106,7 +106,7 @@ type homes struct {
 	passes map[int64]map[int64]*homePass   // visitor -> owner -> pass
 	authed map[int64]map[int64]bool        // owner -> visitors let in (house_auth), while the owner is online
 	asked  map[int64]map[int64]func() bool // owner -> visitors knocking now (house_auth_req) -> stop the wait
-	spent  map[string]int64                // key proofs used: n -> exp
+	spent  *proofJournal                   // proofs used until they expire (proofs.go: kept across a restart)
 	rates  map[string]*bucket
 }
 
@@ -121,7 +121,7 @@ func newHomes(h *Hub) Module {
 		secret, _ = readSecret(path)
 	}
 	return &homes{h: h, secret: secret, passes: map[int64]map[int64]*homePass{}, authed: map[int64]map[int64]bool{},
-		asked: map[int64]map[int64]func() bool{}, spent: map[string]int64{}, rates: map[string]*bucket{}}
+		asked: map[int64]map[int64]func() bool{}, spent: sharedProofs(), rates: map[string]*bucket{}}
 }
 
 func (m *homes) Register(r *Registry) {
@@ -466,15 +466,9 @@ func (m *homes) keyTell(cl *Client, frame json.RawMessage) {
 	if c.Exp > now+int64(homeTellLife.Seconds()) {
 		c.Exp = now + int64(homeTellLife.Seconds())
 	}
-	for n, exp := range m.spent {
-		if exp < now {
-			delete(m.spent, n)
-		}
-	}
-	if _, used := m.spent[c.N]; used {
+	if !m.spent.spend("home_key", c.N, c.Exp, now) {
 		return
 	}
-	m.spent[c.N] = c.Exp
 	owner, holder, on := cl.ID(), c.To, c.On == 1
 	if p := m.passes[holder][owner]; p != nil {
 		p.key = on
