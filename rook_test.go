@@ -602,3 +602,41 @@ func TestRookLeavingFoldsYourOrbAndPrime(t *testing.T) {
 		t.Fatal("nothing kept for a street the Rook never visits")
 	}
 }
+
+// An arrival while the hub's Rook is out does not start the next hour early: the hub's next
+// turn is an hour after the Rook leaves (rook_attack.js stopAttack 428-451 -> setAttackTimer).
+func TestRookNextHourCountsFromTheClear(t *testing.T) {
+	r := newRookRig(t, false)
+	hub := r.mod.w.streets[rookTestStreet].hub
+	var other string
+	for _, tsid := range r.mod.w.hubs[hub] {
+		if tsid != rookTestStreet {
+			other = tsid
+			break
+		}
+	}
+	a := r.player(1, "Ada")
+	r.advance(rookScheduleMin)
+	if s := r.mod.streets[rookTestStreet]; s == nil || s.attack == nil {
+		t.Fatal("the hour brings the Rook to the street Ada is on")
+	}
+	// Ada walks on; the Rook stays on its street (newLocation's epicentre) and flies off unfought.
+	r.send(a, map[string]any{"t": "join", "street": other, "x": 100.0, "y": 100.0})
+	r.drain(a)
+	if r.mod.hubs[hub].timer != nil {
+		t.Fatal("an arrival while the Rook is out arms nothing")
+	}
+	r.advance(rookHerald + rookMaxWingBeats*rookWingBeat + rookDepartClear)
+	cleared := r.now
+	if s := r.mod.streets[rookTestStreet]; s != nil && s.attack != nil {
+		t.Fatal("the Rook left after three wing beats")
+	}
+	r.advance(rookScheduleMin - time.Second)
+	if s := r.mod.streets[other]; s != nil && s.attack != nil {
+		t.Fatalf("no new Rook within the hour after the last one left (%v)", r.now.Sub(cleared))
+	}
+	r.advance(time.Second)
+	if s := r.mod.streets[other]; s == nil || s.attack == nil {
+		t.Fatal("an hour after the clear, the Rook comes to Ada's street")
+	}
+}

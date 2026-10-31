@@ -549,6 +549,13 @@ func (m *rook) armHub(hub string) {
 	if hb.timer != nil {
 		return
 	}
+	// While the hub's Rook is out, its clear arms the next turn (stopAttack 428-451 calls
+	// setAttackTimer only then): an arrival meanwhile must not start the hour early.
+	for _, tsid := range m.w.hubs[hub] {
+		if s := m.streets[tsid]; s != nil && s.attack != nil {
+			return
+		}
+	}
 	d := rookScheduleMin
 	if rookScheduleMax > rookScheduleMin {
 		d += time.Duration(m.roll() * float64(rookScheduleMax-rookScheduleMin))
