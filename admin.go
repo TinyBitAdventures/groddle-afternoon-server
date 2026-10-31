@@ -18,6 +18,7 @@ package main
 //	give    {"player":7,"op":"admin-give-<16 hex>","items":[{"c":"cherry","n":3}],"currants":50,"text":"An administrator gave you 3 Cherries and 50 currants."}
 //	                                                  200 {"status":"sent"} | {"status":"offline"} (the site's ledger already holds it; their next load applies it)
 //	refill  {"player":7}                              200 {"status":"sent"} | {"status":"offline"}
+//	chatlog {…filters}                                200 {"status":"ok","lines":[…],"next":"…"}   the chat log, newest first (chatlog.go)
 //	any:    401 {"status":"refused"} unsigned, a bad, old or replayed signature; 400 {"status":"bad"} not a call this server can make
 //
 // Server to the player:

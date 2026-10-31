@@ -572,10 +572,12 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 	}
 	// main.js:5808-5843: the cones of silence.
 	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) {
+		m.h.logChatLocked("channel", room, cl, text, "silenced", nil) // chatlog.go
 		m.refuse(cl, chanSuspended)
 		return
 	}
 	if !m.allow("say", cl, chanSayBurst, chanSayEvery) {
+		m.h.logChatLocked("channel", room, cl, text, "slow_down", nil)
 		return
 	}
 	line := chanLine{ID: id, Name: cl.Name(), Text: text, At: m.h.Now().UnixMilli()}
@@ -586,6 +588,7 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 	}
 	// chat_send_msg: everyone in it, the speaker too.
 	m.broadcast(room, map[string]any{"t": "channel_said", "channel": ch, "id": id, "name": line.Name, "text": text, "at": line.At}, 0)
+	m.h.logChatLocked("channel", room, cl, text, "", nil)
 }
 
 func (m *channels) who(cl *Client, frame json.RawMessage) {

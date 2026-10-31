@@ -55,6 +55,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -98,6 +99,16 @@ type party struct {
 	starting bool             // a pack's spend is with the ledger
 	kicked   map[int64]bool   // party.js kicked_players (kicked 129-135)
 	missed   map[int64]string // members away when the space ended: why, told when they come back
+
+	logID string // the chat log's name for it (chatlog.go), given at its first line
+}
+
+// chatlogID names the party in the chat log: party-<who spoke first>-<when, base 36 ms>, kept for its life.
+func (p *party) chatlogID(by int64, now time.Time) string {
+	if p.logID == "" {
+		p.logID = "party-" + strconv.FormatInt(by, 10) + "-" + strconv.FormatInt(now.UnixMilli(), 36)
+	}
+	return p.logID
 }
 
 type bucket struct {
@@ -612,13 +623,17 @@ func (m *parties) chatLine(cl *Client, frame json.RawMessage) {
 		m.chat[cl.ID()] = b
 	}
 	if !b.take(m.h.Now(), chatBurst, chatEvery) {
+		m.h.logChatLocked("party", p.chatlogID(cl.ID(), m.h.Now()), cl, text, "slow_down", nil) // chatlog.go
 		m.h.ErrorLocked(cl, "slow_down", "Slow down a little.")
 		return
 	}
 	out := map[string]any{"t": "party_said", "id": cl.ID(), "name": cl.Name(), "text": text, "at": m.h.Now().UnixMilli()}
+	to := make([]int64, 0, len(p.members))
 	for _, mem := range p.members {
 		m.to(mem.id, out)
+		to = append(to, mem.id)
 	}
+	m.h.logChatLocked("party", p.chatlogID(cl.ID(), m.h.Now()), cl, text, "", to)
 }
 
 // —— Lifecycle ——

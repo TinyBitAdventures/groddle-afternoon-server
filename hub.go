@@ -235,12 +235,14 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 			return
 		}
 		if !h.allowChatLocked(cl) {
+			h.logChatLocked("local", cl.street, cl, text, "slow_down", nil) // chatlog.go; before the reply, which may drop a client that stopped reading
 			h.replyLocked(cl, "slow_down", "Slow down a little.")
 			return
 		}
 		msg := map[string]any{"t": "said", "id": cl.id, "name": cl.name, "text": text, "at": h.now().UnixMilli()}
 		h.queueLocked(cl, msg)
 		h.broadcastLocked(cl, msg)
+		h.logChatLocked("local", cl.street, cl, text, "", nil)
 		for _, fn := range h.onChat {
 			fn(cl, text)
 		}
