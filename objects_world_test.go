@@ -457,16 +457,16 @@ func TestFeedingAndEatingAPiggy(t *testing.T) {
 	if no := r.only(a, "obj_no"); no["code"] != "not_hungry" {
 		t.Fatalf("a full Piggy eating answered %v", no)
 	}
-	// It ate tree:4's fruit where Ada sees it: one fruit off the shared tree for everyone.
+	// It ate tree:1's fruit where Ada sees it: one fruit off the shared tree for everyone.
 	ob.hunger = 4
 	b := r.player(2, "Bo", defaultStreet, pig.x, pig.y)
 	r.now = r.now.Add(time.Second)
-	r.act(a, 5, "pig:2", "eat", map[string]any{"on": "tree:4"})
+	r.act(a, 5, "pig:2", "eat", map[string]any{"on": "tree:1"})
 	r.only(a, "obj_ok")
 	f := r.frames(b, "objs")
 	var tree, p map[string]any
 	for _, m := range f {
-		if got := objOf(m, "tree:4"); got != nil {
+		if got := objOf(m, "tree:1"); got != nil {
 			tree = got
 		}
 		if got := objOf(m, "pig:2"); got != nil {
@@ -515,27 +515,27 @@ func TestASadStreetsPiggiesRefuseAndWait(t *testing.T) {
 
 func TestPigDevOnlyWithTheFlag(t *testing.T) {
 	r := newObjRig(t)
-	pig := sharedWorld.streets[defaultStreet]["pig:4"]
+	pig := sharedWorld.streets[defaultStreet]["pig:3"]
 	a := r.player(1, "Ada", defaultStreet, pig.x, pig.y)
 	r.send(a, map[string]any{"t": "obj_sync"})
 	r.drain(a)
-	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:4", "hunger": 5})
-	if f := r.drain(a); len(f) != 0 || r.mod.streets[defaultStreet]["pig:4"].hunger != 0 {
+	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:3", "hunger": 5})
+	if f := r.drain(a); len(f) != 0 || r.mod.streets[defaultStreet]["pig:3"].hunger != 0 {
 		t.Fatalf("without the flag obj_dev did %v", f)
 	}
 	r.mod.dev = true
-	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:4", "hunger": 5})
-	if p := objOf(r.only(a, "objs"), "pig:4"); num(p["hunger"]) != 5 {
+	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:3", "hunger": 5})
+	if p := objOf(r.only(a, "objs"), "pig:3"); num(p["hunger"]) != 5 {
 		t.Fatalf("obj_dev set %v", p)
 	}
-	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:4", "hunger": 2, "tick": true})
+	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:3", "hunger": 2, "tick": true})
 	var ate bool
 	for _, m := range r.drain(a) {
-		if m["t"] == "obj_ev" && m["id"] == "pig:4" && m["ev"] == "ate" && m["on"] == "tree:3" {
+		if m["t"] == "obj_ev" && m["id"] == "pig:3" && m["ev"] == "ate" && m["on"] == "tree:2" {
 			ate = true
 		}
 	}
-	if !ate || r.mod.streets[defaultStreet]["pig:4"].hunger != 0 {
-		t.Fatalf("a dev tick at hunger 2 did not eat tree:3's fruit (hunger %d)", r.mod.streets[defaultStreet]["pig:4"].hunger)
+	if !ate || r.mod.streets[defaultStreet]["pig:3"].hunger != 0 {
+		t.Fatalf("a dev tick at hunger 2 did not eat tree:2's fruit (hunger %d)", r.mod.streets[defaultStreet]["pig:3"].hunger)
 	}
 }
