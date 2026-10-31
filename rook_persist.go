@@ -1,12 +1,14 @@
 package main
 
 // The Rook's lasting marks (rook.go): what it rooked stays rooked until it is
-// revived, with the doses given so far, and a street it attacked rests its
-// hour, across a restart of this server. -rook-file (default realtime-rook.json
-// beside -secret-file; off: memory only) is the whole state, written through
-// writeFileSynced when something is rooked, a dose is given and an attack
-// ends. A fight under way is not kept: a restart ends it (the offering was the
-// initiator's, spent on their client), as it ends every session.
+// revived, with the doses given so far, a street it attacked rests its hour,
+// and a player who met it rests their 6 hours (rookPlayerRest), across a
+// restart of this server. -rook-file (default realtime-rook.json beside
+// -secret-file; off: memory only) is the whole state, written through
+// writeFileSynced when something is rooked, a dose is given, a player meets a
+// Rook, an attack ends and the server stops. Rests that are over are dropped on
+// load and save. A fight under way is not kept: a restart ends it (the offering
+// was the initiator's, spent on their client), as it ends every session.
 
 import (
 	"encoding/json"
@@ -14,7 +16,7 @@ import (
 	"log"
 )
 
-var rookFileFlag = flag.String("rook-file", "", "file that keeps what the Rook rooked until it is revived, and the streets resting after an attack (default: realtime-rook.json beside -secret-file; off: memory only)")
+var rookFileFlag = flag.String("rook-file", "", "file that keeps what the Rook rooked until it is revived, the streets resting after an attack and the players resting after meeting a Rook (default: realtime-rook.json beside -secret-file; off: memory only)")
 
 // rookFileForTest lets a test give the module a state file; under go test the flag is ignored.
 var rookFileForTest string
@@ -33,6 +35,7 @@ type rookedRec struct {
 type rookFile struct {
 	V       int                 `json:"v"`
 	Streets map[string]*rookRec `json:"streets"`
+	Met     map[int64]int64     `json:"met,omitempty"` // player (user id) -> Unix ms they rest from the Rook until
 }
 
 func (m *rook) load() error {
@@ -42,6 +45,11 @@ func (m *rook) load() error {
 		return err
 	}
 	now := m.h.Now()
+	for id, ms := range f.Met {
+		if until := timeOf(ms); id > 0 && until.After(now) {
+			m.met[id] = until
+		}
+	}
 	n := 0
 	for tsid, rec := range f.Streets {
 		if _, known := m.w.streets[tsid]; !known || rec == nil {
@@ -65,17 +73,28 @@ func (m *rook) load() error {
 			n++
 		}
 	}
-	log.Printf("rook %s: %d rooked things on %d streets", m.path, n, len(m.streets))
+	log.Printf("rook %s: %d rooked things on %d streets, %d players resting", m.path, n, len(m.streets), len(m.met))
 	return nil
 }
 
 // save writes the rooked things and the resting streets now; false when it could not.
 func (m *rook) save() bool {
+	now := m.h.Now()
+	for id, until := range m.met {
+		if !until.After(now) {
+			delete(m.met, id)
+		}
+	}
 	if m.path == "" {
 		return true
 	}
-	now := m.h.Now()
 	f := rookFile{V: 1, Streets: map[string]*rookRec{}}
+	for id, until := range m.met {
+		if f.Met == nil {
+			f.Met = map[int64]int64{}
+		}
+		f.Met[id] = msOf(until)
+	}
 	for tsid, s := range m.streets {
 		if len(s.rooked) == 0 && !s.restUntil.After(now) {
 			continue

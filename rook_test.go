@@ -621,8 +621,12 @@ func TestRookNextHourCountsFromTheClear(t *testing.T) {
 		t.Fatal("the hour brings the Rook to the street Ada is on")
 	}
 	// Ada walks on; the Rook stays on its street (newLocation's epicentre) and flies off unfought.
+	// Bo, who has not met a Rook (Ada rests from hers, rookPlayerRest), joins her there.
 	r.send(a, map[string]any{"t": "join", "street": other, "x": 100.0, "y": 100.0})
 	r.drain(a)
+	b := r.hub.Connect(Claims{Sub: 2, Name: "Bo"})
+	r.send(b, map[string]any{"t": "join", "street": other, "x": 100.0, "y": 100.0})
+	r.drain(b)
 	if r.mod.hubs[hub].timer != nil {
 		t.Fatal("an arrival while the Rook is out arms nothing")
 	}
@@ -637,6 +641,6 @@ func TestRookNextHourCountsFromTheClear(t *testing.T) {
 	}
 	r.advance(time.Second)
 	if s := r.mod.streets[other]; s == nil || s.attack == nil {
-		t.Fatal("an hour after the clear, the Rook comes to Ada's street")
+		t.Fatal("an hour after the clear, the Rook comes to Ada and Bo's street")
 	}
 }
