@@ -221,3 +221,49 @@ func TestAVisitorMinesTheOwnersRockAndHarvestsANode(t *testing.T) {
 		}
 	}
 }
+
+// HOMES2: a visitor plants their bean in the owner's Patch (the bean named, the spend's receipt back), pets a Seedling, harvests a Wood Tree.
+func TestAVisitorPlantsPetsASeedlingAndHarvestsAWoodTree(t *testing.T) {
+	r := newYardRig(t)
+	ada, bo, _ := r.visiting()
+	r.site.answer = yardAnswer{Status: "settled", Act: json.RawMessage(`{"id":"yd-0000000000000001","kind":"plot","target":"patch:0","verb":"plant","what":"bean_fruit","took":0,"at":1}`), Receipt: json.RawMessage(`{"op":"yd-0000000000000001","gave":{"items":[{"c":"bean_fruit","n":1}],"currants":0}}`)}
+	r.do(bo, map[string]any{"t": "home_yard", "req": 1, "owner": 7, "kind": "plot", "id": "patch:0", "verb": "plant", "what": "bean_fruit"})
+	r.settle()
+	if c := r.site.calls[0]; c.Verb != "plant" || c.What != "bean_fruit" || c.Kind != "plot" {
+		t.Fatalf("the site hears the bean: %+v", c)
+	}
+	f := only(t, drain(bo), "home_yard_done")
+	if f["receipt"].(map[string]any)["op"] != "yd-0000000000000001" {
+		t.Fatalf("Bo gets the spend's receipt: %v", f)
+	}
+	if a := only(t, drain(ada), "home_yard_acted"); a["act"].(map[string]any)["what"] != "bean_fruit" {
+		t.Fatalf("Ada hears what was planted: %v", a)
+	}
+	r.site.answer = yardAnswer{Status: "settled", Act: json.RawMessage(`{"id":"yd-0000000000000002","kind":"plot","target":"patch:0","verb":"pet","took":0,"at":2}`)}
+	r.do(bo, map[string]any{"t": "home_yard", "req": 2, "owner": 7, "kind": "plot", "id": "patch:0", "verb": "pet"})
+	r.do(bo, map[string]any{"t": "home_yard", "req": 3, "owner": 7, "kind": "tree", "id": "patch:1", "verb": "harvest"})
+	r.settle()
+	if len(r.site.calls) != 3 || r.site.calls[1].What != "" || r.site.calls[2].Kind != "tree" {
+		t.Fatalf("a pet and a Wood Tree harvest go as they are: %+v", r.site.calls)
+	}
+	if f := drain(bo); len(f) != 2 || f[0]["receipt"] != nil {
+		t.Fatalf("no receipt but a planting's: %v", f)
+	}
+	r.do(bo, map[string]any{"t": "home_yard", "req": 5, "owner": 7, "kind": "node", "id": "node:npc_firefly:3", "verb": "open"})
+	r.settle()
+	if c := r.site.calls[3]; c.Kind != "node" || c.ID != "node:npc_firefly:3" || c.Verb != "open" {
+		t.Fatalf("a whistle at the hive's Firefly goes to the site: %+v", c)
+	}
+	drain(bo)
+	for _, c := range []map[string]any{
+		{"t": "home_yard", "req": 4, "owner": 7, "kind": "plot", "id": "patch:0", "verb": "plant"},
+		{"t": "home_yard", "req": 4, "owner": 7, "kind": "plot", "id": "patch:0", "verb": "plant", "what": "cherry"},
+		{"t": "home_yard", "req": 4, "owner": 7, "kind": "plot", "id": "patch:0", "verb": "tend", "what": "bean_fruit"},
+		{"t": "home_yard", "req": 4, "owner": 7, "kind": "tree", "id": "patch:0", "verb": "plant", "what": "bean_fruit"},
+	} {
+		r.do(bo, c)
+		if f := only(t, drain(bo), "home_yard_done"); f["why"] != "bad" {
+			t.Fatalf("%v: bad, got %v", c, f)
+		}
+	}
+}

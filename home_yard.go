@@ -74,9 +74,11 @@ const (
 var (
 	yardAnimalRe = regexp.MustCompile(`^a[0-9]{1,6}$`)
 	yardPlotRe   = regexp.MustCompile(`^patch(_dark)?:[0-9]{1,2}$`)
-	yardVerbRe   = regexp.MustCompile(`^(pet|nibble|massage|milk|squeeze|dig|tend|water|harvest|mine|scrape|scoop)$`)
-	yardRockRe   = regexp.MustCompile(`^rock:[0-9]{1,2}$`)
-	yardNodeRe   = regexp.MustCompile(`^node:[a-z][a-z0-9_]{2,19}:[0-9]{1,2}$`)
+	yardVerbRe   = regexp.MustCompile(`^(pet|nibble|massage|milk|squeeze|dig|tend|water|harvest|mine|scrape|scoop|plant|open)$`)
+	// HOMES2: a planting names the visitor's Seasoned Bean (patch.js verbs.plant 216-310).
+	yardBeanRe = regexp.MustCompile(`^bean_[a-z]{2,12}$`)
+	yardRockRe = regexp.MustCompile(`^rock:[0-9]{1,2}$`)
+	yardNodeRe = regexp.MustCompile(`^node:[a-z][a-z0-9_]{2,19}:[0-9]{1,2}$`)
 )
 
 func init() { modules = append(modules, newHomeYard) }
@@ -90,6 +92,8 @@ type yardAnswer struct {
 	Today  int             `json:"today,omitempty"`
 	Again  bool            `json:"again,omitempty"`
 	Act    json.RawMessage `json:"act,omitempty"`
+	// Receipt is a planting's spend (the bean that left the visitor's ledger), applied once by their save.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
 }
 
 type yardAct struct {
@@ -99,6 +103,7 @@ type yardAct struct {
 	Kind    string `json:"kind"`
 	ID      string `json:"id"`
 	Verb    string `json:"verb"`
+	What    string `json:"what,omitempty"`
 }
 
 // yardSite is the site's yard (httpLedger). Calls block; the module makes them off the hub lock.
@@ -199,6 +204,7 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 		Kind  string `json:"kind"`
 		ID    string `json:"id"`
 		Verb  string `json:"verb"`
+		What  string `json:"what"`
 	}
 	_ = json.Unmarshal(frame, &msg)
 	owner, visitor := msg.Owner, cl.ID()
@@ -208,7 +214,8 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 	}
 	okID := (msg.Kind == "animal" && yardAnimalRe.MatchString(msg.ID)) || ((msg.Kind == "plot" || msg.Kind == "tree") && yardPlotRe.MatchString(msg.ID)) ||
 		(msg.Kind == "rock" && yardRockRe.MatchString(msg.ID) && msg.Verb == "mine") || (msg.Kind == "node" && yardNodeRe.MatchString(msg.ID) && msg.Verb != "mine")
-	if owner <= 0 || owner == visitor || !okID || !yardVerbRe.MatchString(msg.Verb) {
+	okWhat := (msg.Verb == "plant") == (msg.What != "") && (msg.What == "" || (msg.Kind == "plot" && yardBeanRe.MatchString(msg.What)))
+	if owner <= 0 || owner == visitor || !okID || !yardVerbRe.MatchString(msg.Verb) || !okWhat {
 		m.refuse(cl, req, owner, "bad", yardTextBad)
 		return
 	}
@@ -224,7 +231,7 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, req, owner, "off", yardTextOff)
 		return
 	}
-	a := yardAct{Op: "yd-" + m.newID(), Owner: owner, Visitor: visitor, Kind: msg.Kind, ID: msg.ID, Verb: msg.Verb}
+	a := yardAct{Op: "yd-" + m.newID(), Owner: owner, Visitor: visitor, Kind: msg.Kind, ID: msg.ID, Verb: msg.Verb, What: msg.What}
 	site := m.site
 	name := cl.Name()
 	m.spawn(func() {
@@ -238,7 +245,11 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 				act = ans.Act
 			}
 			if c := m.h.ClientLocked(visitor); c != nil {
-				m.h.SendLocked(c, map[string]any{"t": "home_yard_done", "req": req, "owner": owner, "status": ans.Status, "why": ans.Why, "text": ans.Text, "act": act, "added": ans.Added})
+				done := map[string]any{"t": "home_yard_done", "req": req, "owner": owner, "status": ans.Status, "why": ans.Why, "text": ans.Text, "act": act, "added": ans.Added}
+				if len(ans.Receipt) > 0 && string(ans.Receipt) != "null" {
+					done["receipt"] = ans.Receipt
+				}
+				m.h.SendLocked(c, done)
 			}
 			if ans.Status != "settled" || act == nil {
 				return
