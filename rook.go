@@ -67,6 +67,10 @@ package main
 //     (rook_attack.js:15). The source has no such scaling.
 //   - A 30 s herald (the Forehorseman, items/npc_forehorseman.js, and the 2011 "Der Rook iz Coming!"
 //     warning) comes before the Rook, as in solo.
+//   - A player alone on the street (ticket 19, 2026-11-01) fights as in solo: the street's un-rooked
+//     critters and trees and its shrine join their orb (rookStreetJoiners), and the game lets them
+//     start the orb and prime the shrine without Martial Imagination or Piety. With anyone else
+//     there the source rules stand.
 //   - After three wing beats the Rook flies off, and a recovery from a stun re-arms the 10-minute
 //     wing beat (rook_attack.js stunRecovery 466-473 leaves none), so an abandoned fight still ends.
 //   - Attacks come to a street with someone on it (newLocation 30-66 picks any rookable street of
@@ -138,6 +142,7 @@ const (
 	rookReachX        = 500              // how close to the shrine a primer or striker stands
 	rookReachY        = 400
 	rookMaxKeys       = 128 // rookable keys remembered per street
+	rookOrbJoinMax    = 8   // ours: the street joins a lone player's orb up to this many (ROOK_SOLO.maxJoiners)
 	rookMaxCount      = 999 // one offering's count
 
 	rookStunEnergy   = 50  // focusing_orb.js stun_attack 607
@@ -949,8 +954,32 @@ func (m *rook) dropOrb(a *rookAttack, by int64) {
 	}
 }
 
+// rookStreetJoiners is ours (ticket 19, 2026-11-01): a player alone on the street fights the Rook
+// as in solo (the game's js/rook-attack.js ROOK_SOLO): the street's un-rooked critters and trees
+// and its shrine join the orb, at most rookOrbJoinMax. With others there the source rule stands:
+// an orb is only as strong as the players who focus on it (doOrbAttack 684-812).
+func (m *rook) rookStreetJoiners(a *rookAttack) int {
+	s := m.streets[a.street]
+	if s == nil {
+		return 0
+	}
+	n := 0
+	for key := range s.keys {
+		if s.rooked[key] == nil {
+			n++
+		}
+	}
+	if _, ok := m.w.streets[a.street]; ok {
+		n++ // the street's shrine
+	}
+	return min(n, rookOrbJoinMax)
+}
+
 func (m *rook) fireOrb(a *rookAttack, o *rookOrb) {
 	n := len(o.joiners)
+	if n == 0 && len(m.h.StreetLocked(a.street)) <= 1 {
+		n = m.rookStreetJoiners(a)
+	}
 	first := a.phase == "build_up" // doOrbAttack 691: FIRST STUN ATTEMPT!
 	players := append([]int64{o.by}, o.joiners...)
 	m.dropOrb(a, o.by)

@@ -644,3 +644,33 @@ func TestRookNextHourCountsFromTheClear(t *testing.T) {
 		t.Fatal("an hour after the clear, the Rook comes to Ada and Bo's street")
 	}
 }
+
+// Ticket 19 (2026-11-01): alone on the street, the street joins your orb as in solo (the game's
+// ROOK_SOLO): its un-rooked critters and trees and its shrine. With anyone else there an orb is only
+// its players (TestRookOrbsStunAndAnger's lone orb with Bo on the street still fails).
+func TestRookALonePlayersStreetJoinsTheOrb(t *testing.T) {
+	r := newRookRig(t, true)
+	a := r.player(1, "Ada")
+	r.send(a, map[string]any{"t": "rook_sync", "keys": []string{"npc_piggy:0", "npc_chicken:0", "trant_bean:2"}})
+	r.send(a, map[string]any{"t": "rook_dev", "do": "attack"})
+	r.drain(a)
+	if _, ok := r.mod.w.streets[rookTestStreet]; !ok {
+		t.Fatalf("the test street has a shrine spot")
+	}
+	r.send(a, map[string]any{"t": "rook_orb"})
+	r.drain(a)
+	r.advance(rookOrbWindow)
+	fa := r.drain(a)
+	y := rookYous(fa)
+	// Three critters and trees and the shrine: four joiners, 85 stun (inc_rook.js doOrbAttack table).
+	if rnum(y["stun_lead"]["xp"]) != 30 || y["stun_fail"] != nil {
+		t.Fatalf("a lone player's orb: %v", y)
+	}
+	at := rookLastAttack(t, fa)
+	if at["phase"] != "angry" || rnum(at["stun"]) != 85 {
+		t.Fatalf("after a lone stun: %v", at)
+	}
+	if got := r.mod.rookStreetJoiners(r.mod.streets[rookTestStreet].attack); got != 4 {
+		t.Fatalf("joiners %d", got)
+	}
+}
