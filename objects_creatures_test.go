@@ -323,6 +323,80 @@ func TestAChickenWaitsForEveryoneWhileAPlayerIsAtIt(t *testing.T) {
 	}
 }
 
+// Austin 2026-11-01 (lane CHICKLOOP): "I'm still seeing chickens jump around." The player's screen
+// stops a Chicken when its menu opens, a trip before the wait reaches the server: the hold starts
+// where that screen stopped it, so it carries on from there for everyone (npc_chicken.js onWaitStart
+// 1635-1643, onWaitEnd 1626-1633).
+func TestAWaitHoldsTheChickenWhereThePlayersScreenStoppedIt(t *testing.T) {
+	r := newObjRig(t)
+	ch := sharedWorld.streets[defaultStreet]["chicken:0"]
+	a := r.player(1, "Ada", defaultStreet, ch.x, ch.y)
+	b := r.player(2, "Bo", defaultStreet, ch.x+80, ch.y)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	r.send(b, map[string]any{"t": "obj_sync"})
+	r.drain(a)
+	r.drain(b)
+	// The path's clock on the server: now minus lag (nothing held yet, lag 0).
+	clock := func(lag float64) int64 { return r.now.UnixMilli() - int64(lag) }
+	// Ada's screen stopped it 180 ms ago (its path clock then); the wait arrives now.
+	r.act(a, 1, "chicken:0", "wait", map[string]any{"at": clock(0) - 180})
+	c := objOf(r.only(b, "objs"), "chicken:0")
+	if num(c["hold"]) != 1200 || num(c["lag"]) != 1380 {
+		t.Fatalf("the first wait: %v", c)
+	}
+	// Where it stands for everyone: the hold's end minus lag = where Ada's screen stopped it.
+	frozen := r.now.UnixMilli() + int64(num(c["hold"])) - int64(num(c["lag"]))
+	if frozen != clock(0)-180 {
+		t.Fatalf("held at %d, Ada stopped it at %d", frozen, clock(0)-180)
+	}
+	r.drain(a)
+	// Her next waits keep it there: an "at" while it is held moves nothing back.
+	r.now = r.now.Add(700 * time.Millisecond)
+	r.act(a, 2, "chicken:0", "wait", map[string]any{"at": frozen})
+	c = objOf(r.only(b, "objs"), "chicken:0")
+	if got := r.now.UnixMilli() + int64(num(c["hold"])) - int64(num(c["lag"])); got != frozen || num(c["lag"]) != 2080 {
+		t.Fatalf("a second wait: %v", c)
+	}
+	r.drain(a)
+	// Bo opens it too, from a screen that drew it a little further on: it stays where it stands.
+	r.now = r.now.Add(100 * time.Millisecond)
+	r.act(b, 1, "chicken:0", "wait", map[string]any{"at": frozen + 40})
+	c = objOf(r.only(a, "objs"), "chicken:0")
+	if got := r.now.UnixMilli() + int64(num(c["hold"])) - int64(num(c["lag"])); got != frozen {
+		t.Fatalf("Bo's wait moved it: %v", c)
+	}
+	r.drain(b)
+	// Both leave: once the hold runs out it walks on from there.
+	r.now = r.now.Add(5 * time.Second)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	c = objOf(r.only(a, "objs"), "chicken:0")
+	// The path's clock is now = where it stood plus the time since the last hold ran out.
+	if lastEnd := r.now.Add(-5*time.Second).UnixMilli() + 1200; num(c["hold"]) != 0 || clock(num(c["lag"])) != frozen+r.now.UnixMilli()-lastEnd {
+		t.Fatalf("after the waits: %v", c)
+	}
+	held := int64(num(c["lag"]))
+	// A stale or forged "at" moves nothing: from the future, or further back than creatureWaitBack.
+	r.act(a, 3, "chicken:0", "wait", map[string]any{"at": clock(float64(held)) + 500})
+	if c = objOf(r.only(b, "objs"), "chicken:0"); num(c["lag"]) != float64(held)+1200 {
+		t.Fatalf("a wait from the future: %v", c)
+	}
+	r.drain(a)
+	r.now = r.now.Add(5 * time.Second)
+	held = int64(num(c["lag"]))
+	r.act(a, 4, "chicken:0", "wait", map[string]any{"at": clock(float64(held)) - creatureWaitBack.Milliseconds() - 1})
+	if c = objOf(r.only(b, "objs"), "chicken:0"); num(c["lag"]) != float64(held)+1200 {
+		t.Fatalf("a wait from too long ago: %v", c)
+	}
+	r.drain(a)
+	// An old page (no "at") holds it from now, as before.
+	r.now = r.now.Add(5 * time.Second)
+	held = int64(num(c["lag"]))
+	r.act(a, 5, "chicken:0", "wait", nil)
+	if c = objOf(r.only(b, "objs"), "chicken:0"); num(c["lag"]) != float64(held)+1200 {
+		t.Fatalf("a wait without at: %v", c)
+	}
+}
+
 func TestANibbleIsHeldToTheDailyLimitAndCreditsItsMeat(t *testing.T) {
 	r := newObjRig(t)
 	got := r.credited()

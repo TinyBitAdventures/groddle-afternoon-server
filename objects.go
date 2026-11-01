@@ -850,6 +850,7 @@ type objAct struct {
 	Ms    int64    `json:"ms"` // poison, GRODDLE_TREES_DEV=1 only: the die timer for QA
 	C     string   `json:"c"`  // feed: the food's class (G335 slice 5)
 	N     int      `json:"n"`  // feed: how many of it, one stack at most
+	At    int64    `json:"at"` // wait: the path's clock (server ms minus lag) where the player's screen stopped the animal
 }
 
 // verdict is what one verb decided: ok, or a refusal code and line; extra rides on obj_ok.
@@ -925,7 +926,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 			no("bad_verb", "That is not something here.", nil)
 			return
 		}
-		o.waitCreature(street, spot)
+		o.waitCreature(street, spot, m.At)
 		return
 	}
 	perks := map[string]bool{}

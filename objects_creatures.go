@@ -65,6 +65,8 @@ package main
 // Client to server (obj_act, as objects.go): verbs squeeze (chicken), massage, milk (butterfly),
 // incubate with "c":"chicken_egg" (chicken), feed with "c" and "n" (batterfly, perks "guano1" /
 // "guano2" for the bonus cards). "skill" is the player's Animal Kinship rank (animalkinship_<n>).
+// "wait" (chicken, butterfly) holds it while the player is at it, with "at": the path's clock
+// (server ms minus lag) where that player's screen stopped it (waitCreature).
 //
 // Server to client:
 //
@@ -89,6 +91,10 @@ const (
 	// page sends it again while its menu or a verb stays open (creatureWaitEvery in the game), so it
 	// walks on about a second after the player leaves it (npc_chicken.js onWaitEnd 1621-1628).
 	creatureWait = 1200 * time.Millisecond
+	// creatureWaitBack is how far back the first "wait" of a hold may set the path: the player's
+	// screen stopped the animal when its menu opened, a trip to the server and a frame or two before
+	// the wait got here, so the hold starts where that screen stopped it (lane CHICKLOOP).
+	creatureWaitBack = 2 * time.Second
 	// batterflyChew: the Batterfly's chew sheet, 120 frames at 30 fps (animal-husbandry-feature).
 	batterflyChew  = 4 * time.Second
 	creatureReachX = pigReachX
@@ -184,11 +190,25 @@ func (o *objects) hold(ob *liveObj, d time.Duration) {
 // everyone (npc_chicken.js onWaitStart 1630-1639 apiStopMoving; npc_butterfly.js onWaitStart
 // 1513-1531), not only on that player's screen. Each "wait" holds it creatureWait from now and the
 // street hears the new hold. A Batterfly does not stop for a menu (its page never held it).
-func (o *objects) waitCreature(street string, spot *objSpot) {
+//
+// The source's Chicken stopped where it stood and walked on from there (npc_chicken.js onWaitStart
+// 1635-1643, onWaitEnd 1626-1633 startMoving). The player's screen stopped it a trip earlier than
+// the wait arrives, so "at" (the path's clock, server ms minus lag, when that screen stopped it)
+// starts the hold there: the first wait of a hold moves the path's clock back to it, at most
+// creatureWaitBack, never forward, and never while it is already held (someone else's hold, a verb,
+// an egg: it already stands still for everyone). Then nobody's Chicken slides on when the menu
+// closes (lane CHICKLOOP, Austin 2026-11-01: "I'm still seeing chickens jump around").
+func (o *objects) waitCreature(street string, spot *objSpot, at int64) {
 	ob := o.get(street, spot)
-	before := ob.holdEnd
+	before, lag := ob.holdEnd, ob.lag
+	now := o.h.Now()
+	if at > 0 && !ob.holdEnd.After(now) {
+		if back := now.UnixMilli() - ob.lag - at; back > 0 && back <= creatureWaitBack.Milliseconds() {
+			ob.lag += back
+		}
+	}
 	o.hold(ob, creatureWait)
-	if !ob.holdEnd.Equal(before) {
+	if !ob.holdEnd.Equal(before) || ob.lag != lag {
 		o.broadcast(street, 0, ob)
 	}
 	o.forget(street, ob)
