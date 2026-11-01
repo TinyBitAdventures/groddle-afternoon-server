@@ -5,7 +5,7 @@ package main
 // animal for everyone there, so where it is, what it is doing and what it remembers are shared.
 // Ids are the client's spawn index on the street (data/objects.json from the game's
 // tools/build-realtime-objects.mjs, the same index the Rook's keys use): chicken:<i> (game.js
-// spawnChickens), butterfly:<i> (spawnButterflies: the resting ones first, then the flying ones),
+// spawnChickens), butterfly:<i> (spawnButterflies: all flying since ticket 25; a resting spot still holds),
 // batterfly:<i> (animal-husbandry-feature, batterfly:<i>).
 //
 // Where they are (the remake's own paths, shared): every client draws each animal on the same path

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,11 +24,14 @@ func TestTheStreetAnimalsAreLaidOut(t *testing.T) {
 		}
 	}
 	// The census (the game's street-ecology.json): 1,547 Chickens, 1,722 Butterflies, 139 Batterflies.
-	if counts["chicken"] < 1000 || counts["butterfly"] < 1000 || counts["batterfly"] < 100 || fly == 0 || fly == counts["butterfly"] {
+	// Every Butterfly flies (ticket 25: npc_butterfly.js flyAround 886-969 never sets a healthy one down).
+	if counts["chicken"] < 1000 || counts["butterfly"] < 1000 || counts["batterfly"] < 100 || fly != counts["butterfly"] {
 		t.Fatalf("animals laid out: %v, %d flying", counts, fly)
 	}
-	if b := sharedWorld.streets[defaultStreet]["butterfly:2"]; b == nil || !b.fly || sharedWorld.streets[defaultStreet]["butterfly:0"].fly {
-		t.Fatalf("Hechey Track's Butterflies: the resting ones first, then the flyers: %v", b)
+	for i := 0; i < 4; i++ {
+		if b := sharedWorld.streets[defaultStreet][fmt.Sprintf("butterfly:%d", i)]; b == nil || !b.fly {
+			t.Fatalf("Hechey Track's four Butterflies all fly: butterfly:%d %v", i, b)
+		}
 	}
 	if rows := sharedWorld.rules.Ak["npc_chicken:squeeze"]; len(rows) != 8 || rows[0][0] != 1 || rows[0][1] != 60 || rows[1][0] != 2 {
 		t.Fatalf("ak_chicken_squeeze: %v", rows)
@@ -141,12 +145,7 @@ func TestMilkNeedsYourOwnMassageAndEveryoneSeesIt(t *testing.T) {
 	if strings.Join(*got, ",") != "1:take:milk_butterflyx2,2:take:milk_butterflyx4" {
 		t.Fatalf("credited %v", *got)
 	}
-	// A flyer is milked from anywhere along the street; a resting one only near.
-	far := r.player(3, "Cy", defaultStreet, bf.x+creatureReachX+10, bf.y)
-	r.act(far, 1, "butterfly:0", "massage", nil)
-	if no := r.only(far, "obj_no"); no["code"] != "far" {
-		t.Fatalf("a far massage answered %v", no)
-	}
+	// A flyer is milked from anywhere along the street (every street Butterfly flies, ticket 25).
 	fl := sharedWorld.streets[defaultStreet]["butterfly:2"]
 	far2 := r.player(4, "Di", defaultStreet, fl.x+creatureReachX+10, fl.y)
 	r.act(far2, 1, "butterfly:2", "massage", nil)
