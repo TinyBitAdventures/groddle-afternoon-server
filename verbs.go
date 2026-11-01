@@ -187,7 +187,7 @@ func (m *verbs) Register(r *Registry) {
 func verbWho(cl *Client) map[string]any { return map[string]any{"id": cl.ID(), "name": cl.Name()} }
 
 func verbRaceStreet(street string) bool {
-	return strings.HasPrefix(street, "RACE_") || strings.HasPrefix(street, "CROWNS_")
+	return strings.HasPrefix(street, "RACE_") || strings.HasPrefix(street, "CROWNS_") || strings.HasPrefix(street, "MAYHEM_")
 }
 
 // —— Verbs on another player ——

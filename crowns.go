@@ -182,7 +182,7 @@ var (
 	crownsMatchRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 	crownsIDRe    = regexp.MustCompile(`^crowns-[0-9a-f]{16}-[0-9]{1,3}-[0-9]{1,12}$`)
 	// Streets a challenge can't start from: instances and homes (race_ticket.js activate is a street verb).
-	crownsPrivatePrefix = []string{"CROWNS_", "RACE_", "PARTY_", "HOME_", "HOUSE_"}
+	crownsPrivatePrefix = []string{"CROWNS_", "MAYHEM_", "RACE_", "PARTY_", "HOME_", "HOUSE_"}
 )
 
 type crownsArena struct {
@@ -377,6 +377,8 @@ func (m *crowns) Register(r *Registry) {
 	r.OnLeave(m.onLeave)
 	r.OnDisconnect(m.onDisconnect)
 	r.GateJoin(m.gate)
+	// mayhem.go asks before a join: a player in a challenge or a Game of Crowns is busy.
+	r.Provide("crowns.busy", m.busy)
 }
 
 // crownsStreet is the hub street a match's players share: unguessable.
@@ -422,7 +424,14 @@ func (m *crowns) busy(id int64) bool {
 	if _, ok := m.joined[id]; ok {
 		return true
 	}
-	return m.matchOf[id] != nil
+	if m.matchOf[id] != nil {
+		return true
+	}
+	// In a Math Mayhem game (mayhem.go).
+	if inMayhem, ok := m.h.ProvidedLocked("mayhem.busy").(func(int64) bool); ok && inMayhem(id) {
+		return true
+	}
+	return false
 }
 
 func (m *crowns) secondsLeft(inv *crownInvite) int {
