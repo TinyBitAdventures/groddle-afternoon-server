@@ -79,7 +79,7 @@ func (r *Registry) Provide(name string, fn any) {
 // The caller asserts the type it expects: fn, ok := h.ProvidedLocked("objects.rookTree").(func(string, string) bool).
 func (h *Hub) ProvidedLocked(name string) any { return h.provided[name] }
 
-var coreKinds = map[string]struct{}{"auth": {}, "join": {}, "move": {}, "chat": {}, "emote": {}, "leave": {}, "ping": {}}
+var coreKinds = map[string]struct{}{"auth": {}, "join": {}, "move": {}, "chat": {}, "typing": {}, "emote": {}, "leave": {}, "ping": {}}
 
 // Helpers for modules. All need the hub lock, which every handler and hook already holds.
 

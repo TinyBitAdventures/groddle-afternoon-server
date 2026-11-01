@@ -98,8 +98,8 @@ save while the trade runs, and the journal keeps a finished trade until both hav
 ## Protocol
 
 JSON text frames over the WebSocket, one object per frame, `"t"` naming the kind. The core kinds
-(`auth`, `join`, `move`, `chat`, `emote`, `leave`, `ping`, and the server's `hello`, `street`,
-`joined`, `left`, `moved`, `said`, `emoted`, `error`, `pong`) are listed in the header of
+(`auth`, `join`, `move`, `chat`, `typing`, `emote`, `leave`, `ping`, and the server's `hello`, `street`,
+`joined`, `left`, `moved`, `said`, `typing`, `emoted`, `error`, `pong`) are listed in the header of
 [`hub.go`](hub.go). One character has one live session: a second socket for the same character
 closes the first with code 4001. A bad or used ticket closes with 4003.
 
@@ -126,6 +126,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `feats.go` | One Feat a day for everyone playing: contributions at the source's pace, the minimum, bonus and supermegabonus goals, ranks, rewards by place with their currants through the site's ledger; rewards by place: 1-13 a Large Petrified Rock (petrified_rock_large.js:8), 14-26 a Medium, 1-26 feats:top_26, 27-30 The Cigar |
 | `homes.go` | Visiting real players' homes: `HOME_<id>` and `HOUSE_<id>` gated by a pass the site signs, knocking and answering, house keys given and revoked live; a revoked key-holder, and anyone without a key when the owner goes offline, is walked out |
 | `homes_help.go` | The owner's Butler takes a visitor's package and message from the home street through the site's signed `ledger/butler` (`butler_leave`, `butler_parcel` to the owner); relays key-holders' tending proofs (`home_tend_tell`, `home_tended`); tells an owner a hosted party (`home_hosted`) |
+| `butler_im.go` | The Butler's IMs (G367): while an owner who has a Butler is away from their home street, `butler_im` tells them who comes onto it and what visitors say there (`butler_watch` carries their quit and eavesdrop choices); `butler_announce`, `butler_tell` and `butler_who` make the Butler speak to the street (`butler_said`) or answer; blocks keep both sides out |
 | `hi.go` | Hi signs between players: the daily sign, the 400 px target, infection, the bonus, the day's tally with yesterday's winner and top spreader, street evasion records, and Sneezing and Sparkle Powder reaching the street |
 | `radiance.go` | Transcendental Radiation between players: range by rank and Radius cards, the rolled time, pulses every 3 s to everyone in range, the end and the Sharing the Oneness flag, from a rank the site signs (`radiance_watch`); who is meditating on a street (the orb bubble) and how many meditate together |
 | `gifts.go` | Giving a stack, a written note or a wrapped Gift Box to a player on your street (`gift_give`, `gift_given`, `gift_got`), moved through the site's signed `ledger/gift` |

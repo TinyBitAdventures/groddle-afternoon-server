@@ -18,6 +18,7 @@ import (
 //	{"t":"join","street":"GA5…","x":0,"y":0,"dir":1,"anim":"idle","look":{…}}
 //	{"t":"move","x":0,"y":0,"dir":1,"anim":"walk"}
 //	{"t":"chat","text":"hi"}
+//	{"t":"typing"}                                     started a Local chat line (no text)
 //	{"t":"emote","e":"wave"}
 //	{"t":"leave"}                                      off the street, still connected
 //	{"t":"ping"}
@@ -30,6 +31,7 @@ import (
 //	{"t":"left","id":7}
 //	{"t":"moved","id":7,"x":0,"y":0,"dir":1,"anim":"walk"}
 //	{"t":"said","id":7,"name":"Ada","text":"hi","at":1730000000000}
+//	{"t":"typing","id":7}                              Ada is typing a Local chat line: "…" over her for typingShow
 //	{"t":"emoted","id":7,"e":"wave"}
 //	{"t":"error","code":"…","message":"…"}
 //	{"t":"pong"}
@@ -39,6 +41,18 @@ import (
 // One live session per character: a second socket for the same player closes the
 // first with closeReplaced. An administrator's boot closes with closeBooted (4010),
 // a ban with closeBanned (4011), which also refuses a banned account at auth.
+//
+// The typing mark (register G366) is main.js doLocalChatStart 1677-1694: a
+// player starting a Local chat line (ChatArea.as 529-537, local_chat_start) puts
+// the typing_in_location_overlay over their head for everyone else on the
+// location for 5 s (duration 5000, apiSendAnnouncementX: not the typer), and
+// their line clears it (doLocalChat 1758, overlay_dismiss). The client sends one
+// per line, at most each 4 s (ChatArea.as ACTIVITY_TIMER 4000); the server
+// relays at most one each typingEvery, with no text, and not between players
+// where either blocks the other (blockedBetween). Ours: the source skips the
+// mark for a player in a timeout or the cone of silence (main.js 1679); here
+// Local chat itself has no cone (channels.go keeps it for Global, Trade and
+// Live Help), so neither has the mark.
 //
 // Shared systems (quoins, street objects, parties, …) are modules (modules.go),
 // each in a file of its own with its message kinds listed in its header.
@@ -52,6 +66,7 @@ const (
 	movesPerSec = 20
 	chatBurst   = 5
 	chatEvery   = time.Second
+	typingEvery = 4 * time.Second // ChatArea.as:65 ACTIVITY_TIMER 4000
 )
 
 var (
@@ -86,6 +101,7 @@ type Client struct {
 	moveCount  int
 	chatTokens float64
 	chatAt     time.Time
+	typingAt   time.Time
 }
 
 // Hub holds every connected character and the street each stands on.
@@ -245,6 +261,18 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		h.logChatLocked("local", cl.street, cl, text, "", nil)
 		for _, fn := range h.onChat {
 			fn(cl, text)
+		}
+	case "typing":
+		now := h.now()
+		if cl.street == "" || (!cl.typingAt.IsZero() && now.Sub(cl.typingAt) < typingEvery) {
+			return
+		}
+		cl.typingAt = now
+		b, _ := json.Marshal(map[string]any{"t": "typing", "id": cl.id})
+		for id, o := range h.streets[cl.street] {
+			if id != cl.id && !blockedBetween(h, cl.id, id) {
+				h.pushLocked(o, b)
+			}
 		}
 	case "emote":
 		e := word(m.E, "")
