@@ -270,6 +270,59 @@ func TestAHoldStillsThePathForEveryone(t *testing.T) {
 	}
 }
 
+// Lane PIGSTUCK (Austin, 2026-11-01, Groddle Forest Junction: Chickens "hop, like they're restarting
+// their animation from the other side"): a menu open on a shared Chicken stopped it only on that
+// player's screen while its path ran on, so it jumped ahead when the menu closed and the others saw
+// it walk. A "wait" holds it for everyone (npc.js onInteractionStarting, npc_chicken.js onWaitStart).
+func TestAChickenWaitsForEveryoneWhileAPlayerIsAtIt(t *testing.T) {
+	r := newObjRig(t)
+	ch := sharedWorld.streets[defaultStreet]["chicken:0"]
+	a := r.player(1, "Ada", defaultStreet, ch.x, ch.y)
+	b := r.player(2, "Bo", defaultStreet, ch.x+80, ch.y)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	r.send(b, map[string]any{"t": "obj_sync"})
+	r.drain(a)
+	r.drain(b)
+	r.act(a, 1, "chicken:0", "wait", nil)
+	for _, cl := range []*Client{a, b} {
+		m := r.only(cl, "objs")
+		if c := objOf(m, "chicken:0"); num(c["hold"]) != 1200 || num(c["lag"]) != 1200 {
+			t.Fatalf("the wait as heard: %v", m)
+		}
+	}
+	// Ada's menu stays open: each wait holds it on from now, the lag grows by what is new.
+	r.now = r.now.Add(700 * time.Millisecond)
+	r.act(a, 2, "chicken:0", "wait", nil)
+	if c := objOf(r.only(b, "objs"), "chicken:0"); num(c["hold"]) != 1200 || num(c["lag"]) != 1900 {
+		t.Fatalf("a second wait: %v", c)
+	}
+	r.drain(a)
+	// A Batterfly keeps its loop (its page never stopped it for a menu); a far player is refused.
+	var bfStreet string
+	var bf *objSpot
+	for tsid, spots := range sharedWorld.streets {
+		if s := spots["batterfly:0"]; s != nil && (bfStreet == "" || tsid < bfStreet) {
+			bfStreet, bf = tsid, s
+		}
+	}
+	cy := r.player(3, "Cy", bfStreet, bf.x, bf.y)
+	r.act(cy, 1, "batterfly:0", "wait", nil)
+	if no := r.only(cy, "obj_no"); no["code"] != "bad_verb" {
+		t.Fatalf("a Batterfly's wait answered %v", no)
+	}
+	far := r.player(4, "Di", defaultStreet, ch.x+creatureReachX+10, ch.y)
+	r.act(far, 1, "chicken:0", "wait", nil)
+	if no := r.only(far, "obj_no"); no["code"] != "far" {
+		t.Fatalf("a far wait answered %v", no)
+	}
+	// Once nobody is at it, the hold runs out and the path goes on from where it stood.
+	r.now = r.now.Add(5 * time.Second)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	if c := objOf(r.only(a, "objs"), "chicken:0"); num(c["hold"]) != 0 || num(c["lag"]) != 1900 {
+		t.Fatalf("after the wait: %v", c)
+	}
+}
+
 func TestANibbleIsHeldToTheDailyLimitAndCreditsItsMeat(t *testing.T) {
 	r := newObjRig(t)
 	got := r.credited()

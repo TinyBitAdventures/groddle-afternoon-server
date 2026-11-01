@@ -85,6 +85,10 @@ const (
 	// creatureHold is how long a landed verb holds the animal still for everyone (the verb's
 	// pose: the source stops it while the player is at it, onWaitStart).
 	creatureHold = 2500 * time.Millisecond
+	// creatureWait is how long one "wait" holds a Chicken or Butterfly while a player is at it; the
+	// page sends it again while its menu or a verb stays open (creatureWaitEvery in the game), so it
+	// walks on about a second after the player leaves it (npc_chicken.js onWaitEnd 1621-1628).
+	creatureWait = 1200 * time.Millisecond
 	// batterflyChew: the Batterfly's chew sheet, 120 frames at 30 fps (animal-husbandry-feature).
 	batterflyChew  = 4 * time.Second
 	creatureReachX = pigReachX
@@ -173,6 +177,21 @@ func (o *objects) hold(ob *liveObj, d time.Duration) {
 		ob.lag += d.Milliseconds()
 	}
 	ob.holdEnd = end
+}
+
+// waitCreature is npc.js onInteractionStarting 1981-1990 and checkWaiting 1878-1900 for a shared
+// Chicken or Butterfly: while any player has it open (its menu, a verb on it) it stands still for
+// everyone (npc_chicken.js onWaitStart 1630-1639 apiStopMoving; npc_butterfly.js onWaitStart
+// 1513-1531), not only on that player's screen. Each "wait" holds it creatureWait from now and the
+// street hears the new hold. A Batterfly does not stop for a menu (its page never held it).
+func (o *objects) waitCreature(street string, spot *objSpot) {
+	ob := o.get(street, spot)
+	before := ob.holdEnd
+	o.hold(ob, creatureWait)
+	if !ob.holdEnd.Equal(before) {
+		o.broadcast(street, 0, ob)
+	}
+	o.forget(street, ob)
 }
 
 func (o *objects) creatureFresh(ob *liveObj) bool {

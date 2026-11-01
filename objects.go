@@ -176,7 +176,8 @@ const (
 var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
-		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true}
+		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
+		"wait": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true}
 )
 
@@ -916,6 +917,15 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	}
 	if x, y := cl.Pos(); math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY {
 		no("far", "You need to be closer.", nil)
+		return
+	}
+	if m.Verb == "wait" {
+		// A player at a street animal (its menu open, a verb on it): it stands for everyone, no answer.
+		if !isCreature(spot.kind) || spot.kind == "batterfly" {
+			no("bad_verb", "That is not something here.", nil)
+			return
+		}
+		o.waitCreature(street, spot)
 		return
 	}
 	perks := map[string]bool{}
