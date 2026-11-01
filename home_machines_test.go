@@ -112,14 +112,62 @@ func TestOnlyTheOwnerSetsOneDownAndOnlyOnHerStreet(t *testing.T) {
 	if f := only(t, drain(bo), "home_machine_done"); f["why"] != "away" {
 		t.Fatalf("nor on his own while he stands on hers: %v", f)
 	}
-	r.join(ada, house(7))
+	r.join(ada, "LA5101HF7F429V")
 	drain(ada)
 	r.do(ada, map[string]any{"t": "home_machine", "req": 1, "owner": 7, "verb": "place", "class": "fuelmaker", "rx": 120})
 	if f := only(t, drain(ada), "home_machine_done"); f["why"] != "away" {
-		t.Fatalf("the owner sets one down on the street, not in the house: %v", f)
+		t.Fatalf("never on a public street: %v", f)
 	}
 	if len(r.site.calls) != 0 {
 		t.Fatalf("the site is never asked: %v", r.site.calls)
+	}
+}
+
+// HOMES2: in the house and on a Tower floor too; the site hears the place, and only those standing there see it.
+func TestMachinesStandInTheHouseAndTheTower(t *testing.T) {
+	r := newMachineRig(t)
+	ada, bo, cy := r.onHerStreet()
+	if p, _ := machinePlace("TOWER_7_3", 7); p != "tower:3" {
+		t.Fatalf("a Tower floor: %q", p)
+	}
+	for _, s := range []string{"TOWER_9_3", "HOUSE_9", "HOME_9", "TOWER_7_x", "LA5101HF7F429V", ""} {
+		if p, _ := machinePlace(s, 7); p != "" {
+			t.Fatalf("%s is not Ada's home: %q", s, p)
+		}
+	}
+	r.join(ada, house(7))
+	r.pass(bo, 7, "Ada", true)
+	r.join(bo, house(7))
+	drain(ada)
+	drain(bo)
+	drain(cy)
+	r.do(ada, map[string]any{"t": "home_machine", "req": 1, "owner": 7, "verb": "place", "class": "woodworker", "rx": 300})
+	r.settle()
+	if c := r.site.calls[0]; c.Place != "house" || c.Verb != "place" {
+		t.Fatalf("the site hears it is the house: %+v", c)
+	}
+	only(t, drain(ada), "home_machine_done")
+	if a := only(t, drain(bo), "home_machine_changed"); a["verb"] != "place" {
+		t.Fatalf("a key-holder in the house sees it: %v", a)
+	}
+	if got := drain(cy); len(got) != 0 {
+		t.Fatalf("Cy on the street is not told of the house's machine: %v", got)
+	}
+	r.join(cy, "TOWER_7_2")
+	drain(cy)
+	drain(ada)
+	drain(bo)
+	r.do(cy, map[string]any{"t": "home_machine", "req": 2, "owner": 7, "verb": "refuel", "id": "hm-00000000000000aa"})
+	r.settle()
+	if c := r.site.calls[1]; c.Place != "tower:2" || c.Actor != 11 {
+		t.Fatalf("a visitor on her Tower's third floor: %+v", c)
+	}
+	only(t, drain(cy), "home_machine_done")
+	if a := only(t, drain(ada), "home_machine_changed"); a["verb"] != "refuel" {
+		t.Fatalf("the owner is told wherever she is: %v", a)
+	}
+	if got := drain(bo); len(got) != 0 {
+		t.Fatalf("Bo in the house is not: %v", got)
 	}
 }
 

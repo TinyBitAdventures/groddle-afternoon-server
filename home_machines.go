@@ -10,10 +10,15 @@ package main
 // someone who is not the owner adds 7 to the owner's Magic Rock pool
 // (players/inc_making.js:836).
 //
-// This module checks what the site cannot see: that the actor stands on
-// HOME_<owner> (the verbs' ok_states "in_location"; homes.go lets only the
-// owner and holders of the site's pass onto it), that only the owner sets one
-// down, and that neither blocks the other. The site decides the rest from the
+// This module checks what the site cannot see: that the actor stands in the
+// owner's home, on HOME_<owner>, in HOUSE_<owner> or on a floor of their
+// Tower, TOWER_<owner>_<floor> (the verbs' ok_states "in_location"; homes.go
+// lets only the owner, holders of the site's pass and, in the house, a
+// key-holder or someone let in), that only the owner sets one down, and that
+// neither blocks the other. It names the place to the site ("street",
+// "house", "tower:<floor>"; lane HOMES2, Austin 2026-11-01: "Machines may
+// stand on the home street, in the house and in the Tower"), so a machine is
+// used only by someone standing where it stands. The site decides the rest from the
 // machine's row, the recipe data and the actor's ledger and stored save
 // (groddle-afternoon-site src/HomeMachines.php, POST groddle/v1/homes/machines,
 // signed as ledger.go signs): whether it is free, the fuel, the ingredients
@@ -45,7 +50,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,7 +61,7 @@ const (
 	machineEvery            = time.Second
 	machineRxMax            = 20000 // HomeMachines::RX_MAX
 
-	machineTextAway = "You need to be on their home street to do that."
+	machineTextAway = "You need to be in their home to do that."
 	machineTextOwn  = "Only the owner can set a machine down here."
 	machineTextOff  = "That can't be done right now."
 	machineTextBad  = "Nothing to do here."
@@ -89,6 +94,7 @@ type machineAct struct {
 	Op    string `json:"op"`
 	Owner int64  `json:"owner"`
 	Actor int64  `json:"actor"`
+	Place string `json:"place"`
 	Verb  string `json:"verb"`
 	ID    string `json:"id,omitempty"`
 	Class string `json:"class,omitempty"`
@@ -226,7 +232,8 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, req, owner, msg.Verb, "bad", machineTextBad)
 		return
 	}
-	if cl.Street() != homeStreetPrefix+strconv.FormatInt(owner, 10) {
+	place, street := machinePlace(cl.Street(), owner)
+	if place == "" {
 		m.refuse(cl, req, owner, msg.Verb, "away", machineTextAway)
 		return
 	}
@@ -242,7 +249,7 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, req, owner, msg.Verb, "off", machineTextOff)
 		return
 	}
-	a := machineAct{Op: "hm-" + m.newID(), Owner: owner, Actor: actor, Verb: msg.Verb, ID: msg.ID, Class: msg.Class, Rx: msg.Rx, Fuel: msg.Fuel, Key: msg.Key, Qty: msg.Qty, All: msg.All, Force: msg.Force, On: msg.On}
+	a := machineAct{Op: "hm-" + m.newID(), Owner: owner, Actor: actor, Place: place, Verb: msg.Verb, ID: msg.ID, Class: msg.Class, Rx: msg.Rx, Fuel: msg.Fuel, Key: msg.Key, Qty: msg.Qty, All: msg.All, Force: msg.Force, On: msg.On}
 	// Each verb carries only what it needs.
 	if msg.Verb != "place" {
 		a.Class, a.Rx, a.Fuel = "", nil, nil
@@ -263,8 +270,28 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 	name := cl.Name()
 	m.spawn(func() {
 		ans := site.homeMachine(a)
-		m.h.After(0, func() { m.answered(a, req, name, ans) })
+		m.h.After(0, func() { m.answered(a, street, req, name, ans) })
 	})
+}
+
+// machinePlace names where in owner's home a street is: "street" (HOME_<owner>), "house"
+// (HOUSE_<owner>) or "tower:<floor>" (TOWER_<owner>_<floor>); "" anywhere else.
+func machinePlace(street string, owner int64) (string, string) {
+	if t := towerOwner(street); t > 0 {
+		if t != owner {
+			return "", ""
+		}
+		_, floor, _ := strings.Cut(strings.TrimPrefix(street, towerStreetPrefix), "_")
+		return "tower:" + floor, street
+	}
+	o, house := homeOwner(street)
+	if o != owner || o == 0 {
+		return "", ""
+	}
+	if house {
+		return "house", street
+	}
+	return "street", street
 }
 
 func machineRaw(j json.RawMessage) any {
@@ -274,7 +301,7 @@ func machineRaw(j json.RawMessage) any {
 	return j
 }
 
-func (m *homeMachines) answered(a machineAct, req any, name string, ans machineAnswer) {
+func (m *homeMachines) answered(a machineAct, street string, req any, name string, ans machineAnswer) {
 	if ans.Status == "" {
 		ans = machineAnswer{Status: "refused", Why: "off", Text: machineTextOff}
 	}
@@ -298,7 +325,7 @@ func (m *homeMachines) answered(a machineAct, req any, name string, ans machineA
 		return
 	}
 	if ans.Status == "settled" {
-		log.Printf("home machines: %d %s %s on %d's home street (%s)", a.Actor, a.Verb, a.ID, a.Owner, a.Op)
+		log.Printf("home machines: %d %s %s in %d's home, %s (%s)", a.Actor, a.Verb, a.ID, a.Owner, a.Place, a.Op)
 	}
 	out := map[string]any{"t": "home_machine_changed", "owner": a.Owner, "verb": a.Verb, "by": map[string]any{"id": a.Actor, "name": name}, "machine": machineRaw(ans.Machine), "paid": paid, "now": ans.Now}
 	if ans.Status != "settled" {
@@ -312,7 +339,7 @@ func (m *homeMachines) answered(a machineAct, req any, name string, ans machineA
 		told[a.Owner] = true
 		m.h.SendLocked(o, out)
 	}
-	for _, o := range m.h.StreetLocked(homeStreetPrefix + strconv.FormatInt(a.Owner, 10)) {
+	for _, o := range m.h.StreetLocked(street) {
 		if !told[o.ID()] {
 			told[o.ID()] = true
 			m.h.SendLocked(o, out)
