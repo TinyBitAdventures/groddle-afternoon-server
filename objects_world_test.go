@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -457,16 +458,17 @@ func TestFeedingAndEatingAPiggy(t *testing.T) {
 	if no := r.only(a, "obj_no"); no["code"] != "not_hungry" {
 		t.Fatalf("a full Piggy eating answered %v", no)
 	}
-	// It ate tree:1's fruit where Ada sees it: one fruit off the shared tree for everyone.
+	// It ate a tree's fruit where Ada sees it: one fruit off the shared tree for everyone.
+	ate := fruitTreeFor(t, r, defaultStreet, pig)
 	ob.hunger = 4
 	b := r.player(2, "Bo", defaultStreet, pig.x, pig.y)
 	r.now = r.now.Add(time.Second)
-	r.act(a, 5, "pig:2", "eat", map[string]any{"on": "tree:1"})
+	r.act(a, 5, "pig:2", "eat", map[string]any{"on": ate})
 	r.only(a, "obj_ok")
 	f := r.frames(b, "objs")
 	var tree, p map[string]any
 	for _, m := range f {
-		if got := objOf(m, "tree:1"); got != nil {
+		if got := objOf(m, ate); got != nil {
 			tree = got
 		}
 		if got := objOf(m, "pig:2"); got != nil {
@@ -526,14 +528,26 @@ func TestPigDevOnlyWithTheFlag(t *testing.T) {
 	if p := objOf(r.only(a, "objs"), "pig:3"); num(p["hunger"]) != 5 {
 		t.Fatalf("obj_dev set %v", p)
 	}
+	tree := fruitTreeFor(t, r, defaultStreet, pig)
 	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:3", "hunger": 2, "tick": true})
 	var ate bool
 	for _, m := range r.drain(a) {
-		if m["t"] == "obj_ev" && m["id"] == "pig:3" && m["ev"] == "ate" && m["on"] == "tree:2" {
+		if m["t"] == "obj_ev" && m["id"] == "pig:3" && m["ev"] == "ate" && m["on"] == tree {
 			ate = true
 		}
 	}
 	if !ate || r.mod.streets[defaultStreet]["pig:3"].hunger != 0 {
-		t.Fatalf("a dev tick at hunger 2 did not eat tree:2's fruit (hunger %d)", r.mod.streets[defaultStreet]["pig:3"].hunger)
+		t.Fatalf("a dev tick at hunger 2 did not eat %s's fruit (hunger %d)", tree, r.mod.streets[defaultStreet]["pig:3"].hunger)
 	}
+}
+
+// fruitTreeFor is the fruiting tree a Piggy at pig eats from (fruitNear) and can reach (pigReachX),
+// so the tests follow data/objects.json's layout when the planner moves things.
+func fruitTreeFor(t *testing.T, r *objRig, street string, pig *objSpot) string {
+	t.Helper()
+	tree := r.mod.fruitNear(street, pig)
+	if tree == nil || math.Abs(tree.spot.x-pig.x) > pigReachX {
+		t.Fatalf("no fruiting tree in a Piggy's reach on %s", street)
+	}
+	return tree.spot.id
 }
