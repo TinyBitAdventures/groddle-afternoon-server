@@ -5,8 +5,9 @@ package main
 // carried them for every player there. The server holds each street Piggy (pig:<i>, the client's
 // spawnPiggies index, laid out by tools/build-realtime-objects.mjs) from the first time anyone is
 // on its street, runs its twice-daily tick, and decides pet, nibble, feed and a Piggy eating.
-// Each player's own side stays theirs, as in solo: the Animal Kinship daily limits and energy, the
-// Meat, iMG and Plops a verb gives, and the food they spend.
+// Each player's own side stays theirs, as in solo: energy, the iMG and Plops a verb gives, and the
+// food they spend; the server also counts each player's nibbles (the daily limit) and credits the
+// Meat a nibble gives (see the end of this header).
 //
 // The rules (glitch-GameServerJS items/npc_piggy.js, as the remake has them in js/animal-mood.js):
 //   - onCreate 1433-1472: mood 1, hunger 0, is_daily 1, a tick every game_days_to_ms(0.5) (two real
@@ -47,9 +48,9 @@ package main
 //     Piggy (G335 slice 5): the server cannot see that food, and every stack the ledger carries on a
 //     public street is dropped for everyone and eaten through drops.go (pigFood), which can. The
 //     game's shared Piggies leave such stacks alone.
-// Chickens and Butterflies have no mood or hunger in the source (npc_chicken.js, npc_butterfly.js);
-// what they remember is per player (massagers[pc.tsid], the squeeze and milk limits), so it stays in
-// each player's save, as in solo.
+// Chickens, Butterflies and Batterflies are street animals the server shares too (objects_creatures.go).
+// A nibble is held to each player's daily limit of this Piggy (ak_piggy_nibble interval_limit) and
+// its Meat is credited to the ledger (credits.go "take").
 // A street Piggy outlives a restart of the server (objects_persist.go, -objects-file): its mood,
 // hunger, petters and clock are kept, and the ticks it missed while the server was down run when
 // it is back.
@@ -391,8 +392,20 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 		if ob.mood == 0 || ob.hunger > pigNibbleMax {
 			return refuse("not_in_mood", pigNotMood)
 		}
+		// Each player's nibbles of this Piggy a game day (ak_piggy_nibble interval_limit,
+		// objects_creatures.go): the Meat it gives is credited, so the limit is the server's too.
+		o.creatureDay(ob)
+		limit, _, amount := o.akRow("npc_piggy:nibble", akRank(m.Skill))
+		if ob.usesOf(user, "nibble") >= limit {
+			return refuse("daily_limit", dailyLimitLine("nibble", "Piggy", limit))
+		}
 		roll := o.roll()
-		return verdict{ok: true, extra: map[string]any{"roll": roll, "success": roll*100 < rate}}
+		v := verdict{ok: true, extra: map[string]any{"roll": roll, "success": roll*100 < rate}}
+		if roll*100 < rate {
+			ob.use(user, "nibble")
+			v.got = creditItem(creatureItem["nibble"], amount)
+		}
+		return v
 	case "feed":
 		// js/animal-husbandry.js feedPiggyStack: base cost 5 or more, and hungry (npc_piggy.js 672-676).
 		if perks["sate"] && ob.hunger != 0 {

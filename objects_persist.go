@@ -6,8 +6,11 @@ package main
 // world and the saves agree), a poison clock goes on running from where it
 // was, a street Piggy keeps its mood, hunger and twice-daily clock (the ticks
 // it missed while the server was down run when it is back, as the remake's
-// replay of a tick nobody watched does), and rocks, resource nodes, trees and
-// Wood Trees keep what was taken and when it comes back.
+// replay of a tick nobody watched does), a street Chicken, Butterfly or
+// Batterfly keeps its path's lag, today's uses by each player, a Chicken's egg
+// (it hatches when due, for an owner on the street) and a Batterfly's food
+// counter (objects_creatures.go), and rocks, resource nodes, trees and Wood
+// Trees keep what was taken and when it comes back.
 //
 // -objects-file (default realtime-objects.json beside -secret-file; off:
 // memory only) is the whole state, written through writeFileSynced within a
@@ -62,6 +65,17 @@ type objRec struct {
 	TickAt    int64           `json:"tickAt,omitempty"`
 	Petters   map[int64]int64 `json:"petters,omitempty"`
 	Due       int64           `json:"due,omitempty"`
+	// Street animals (objects_creatures.go) and a Piggy's nibbles: each player's uses on UsesDay,
+	// today's tally, the path's lag and hold, a Chicken's egg, a Batterfly's food counter.
+	Uses    map[int64]map[string]int `json:"uses,omitempty"`
+	UsesDay int64                    `json:"usesDay,omitempty"`
+	Tally   map[string]int           `json:"tally,omitempty"`
+	Lag     int64                    `json:"lag,omitempty"`
+	HoldEnd int64                    `json:"holdEnd,omitempty"`
+	IncEgg  string                   `json:"incEgg,omitempty"`
+	IncBy   int64                    `json:"incBy,omitempty"`
+	IncEnd  int64                    `json:"incEnd,omitempty"`
+	Food    int                      `json:"food,omitempty"`
 }
 
 type objFile struct {
@@ -88,7 +102,23 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Petted: ob.petted, Watered: ob.watered, ResetAt: msOf(ob.resetAt), Fruit: ob.fruit, Health: ob.health,
 		Maturity: ob.maturity, Day: ob.day, WoodCount: ob.woodCount, PoisonEnd: msOf(ob.poisonEnd), PoisonBy: ob.poisonBy,
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
-		TickAt: msOf(ob.tickAt), Due: msOf(ob.due)}
+		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
+		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food}
+	if len(ob.uses) > 0 {
+		r.Uses = make(map[int64]map[string]int, len(ob.uses))
+		for id, verbs := range ob.uses {
+			r.Uses[id] = make(map[string]int, len(verbs))
+			for verb, n := range verbs {
+				r.Uses[id][verb] = n
+			}
+		}
+	}
+	if len(ob.tally) > 0 {
+		r.Tally = make(map[string]int, len(ob.tally))
+		for verb, n := range ob.tally {
+			r.Tally[verb] = n
+		}
+	}
 	for id := range ob.woodBy {
 		r.WoodBy = append(r.WoodBy, id)
 	}
@@ -149,8 +179,39 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 			}
 			ob.petters[id] = day
 		}
+	case "chicken", "butterfly", "batterfly":
+		ob.lag, ob.holdEnd = max(0, r.Lag), timeOf(r.HoldEnd)
+		ob.food = max(0, r.Food)
+		if _, egg := o.w.rules.Incubate.Hatches[r.IncEgg]; egg && spot.kind == "chicken" && r.IncBy > 0 && r.IncEnd > 0 {
+			ob.incEgg, ob.incBy, ob.incEnd = r.IncEgg, r.IncBy, timeOf(r.IncEnd)
+		}
+		ob.due = time.Time{}
 	default:
 		return nil
+	}
+	if spot.kind == "pig" || isCreature(spot.kind) {
+		ob.usesDay = r.UsesDay
+		for id, verbs := range r.Uses {
+			for verb, n := range verbs {
+				if n > 0 {
+					if ob.uses == nil {
+						ob.uses = map[int64]map[string]int{}
+					}
+					if ob.uses[id] == nil {
+						ob.uses[id] = map[string]int{}
+					}
+					ob.uses[id][verb] = n
+				}
+			}
+		}
+		for verb, n := range r.Tally {
+			if n > 0 {
+				if ob.tally == nil {
+					ob.tally = map[string]int{}
+				}
+				ob.tally[verb] = n
+			}
+		}
 	}
 	if spot.kind == "tree" || spot.kind == "wood" {
 		ob.dead, ob.deadBy = r.Dead, r.DeadBy
@@ -271,6 +332,16 @@ func (o *objects) resume() {
 				}
 			case "pig":
 				pigs = true
+			case "chicken":
+				// A Chicken on an egg: it hatches when it was due (its owner is not here after a
+				// restart until they connect again, so an egg due while the server was down is lost).
+				if ob.incEgg != "" {
+					if d := ob.incEnd.Sub(now); d > 0 {
+						o.armIncubation(street, ob, d)
+					} else {
+						o.hatch(street, ob)
+					}
+				}
 			}
 		}
 		for _, id := range ids {
