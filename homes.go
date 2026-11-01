@@ -68,6 +68,8 @@ import (
 const (
 	homeStreetPrefix  = "HOME_"
 	houseStreetPrefix = "HOUSE_"
+	towerStreetPrefix = "TOWER_"
+	towerFloorsMax    = 9                // config_base.js towers MAX_FLOORS (the floor under construction is index 8 at most)
 	homeKnockWait     = 20 * time.Second // inc_houses.js:146 the knock prompt's timeout 20
 	homePassLife      = time.Hour        // ours: the longest a pass is honoured, whatever it says
 	homeTellLife      = 2 * time.Minute  // the longest a key proof is honoured
@@ -132,6 +134,29 @@ func (m *homes) Register(r *Registry) {
 	r.GateJoin(m.gate)
 	r.OnJoin(m.joined)
 	r.OnDisconnect(m.disconnected)
+}
+
+// towerOwner reads the owner's id from a TOWER_<id>_<floor> street (a floor of the Tower on their
+// home street, 0..towerFloorsMax), or 0. MPVISIT: the source's Tower is a home location created
+// is_public (locations/tower.js:2-22), so pols_canEnter lets anyone in but those the owner blocks
+// (locations/inc_pols.js:452-458), as on the home street; its elevator signposts lead to every
+// floor with no further check (tower.js:584-620). The remake's floors are rooms of their own, so
+// each floor is a street of its own; the same pass that opens the home street opens them.
+func towerOwner(street string) int64 {
+	rest, ok := strings.CutPrefix(street, towerStreetPrefix)
+	if !ok {
+		return 0
+	}
+	id, floor, ok := strings.Cut(rest, "_")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(id, 10, 64)
+	f, ferr := strconv.Atoi(floor)
+	if err != nil || ferr != nil || n <= 0 || strconv.FormatInt(n, 10) != id || f < 0 || f > towerFloorsMax || strconv.Itoa(f) != floor {
+		return 0
+	}
+	return n
 }
 
 // homeOwner reads the owner's id from a HOME_<id> or HOUSE_<id> street; 0 for any other street.
@@ -257,6 +282,9 @@ func (m *homes) send(id int64, msg any) {
 
 func (m *homes) gate(cl *Client, street string) (bool, string, string) {
 	owner, house := homeOwner(street)
+	if t := towerOwner(street); t > 0 {
+		owner, house = t, false
+	}
 	if owner == 0 || owner == cl.ID() {
 		return true, "", ""
 	}

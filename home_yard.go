@@ -25,11 +25,23 @@ package main
 // Client to server:
 //
 //	{"t":"home_yard","req":3,"owner":7,"kind":"animal|plot|tree","id":"a3|patch:0","verb":"pet"}
+//	{"t":"home_yard","req":4,"owner":7,"kind":"rock","id":"rock:0","verb":"mine"}
+//	{"t":"home_yard","req":5,"owner":7,"kind":"node","id":"node:peat_1:0","verb":"harvest"}
 //
 // Server to client:
 //
 //	{"t":"home_yard_done","req":3,"owner":7,"status":"settled|refused","why":"…","text":"…","act":{…},"added":4}
+//	   (a rock's or node's act carries "took": the chunks the site rolled, or the uses it took)
 //	{"t":"home_yard_acted","owner":7,"from":{"id":9,"name":"Bo"},"act":{"id":"yd-…","kind":"tree","target":"patch:1","verb":"water","took":0,"at":…}}
+//
+// Rocks and resource nodes the owner cultivated on the street (MPVISIT): a
+// visitor's mining swing and a node's harvest, dig, scrape or scoop are just
+// as open (items/include/mining.js verbs.mine asks for a pick and the skill,
+// peat_1.js, dirt_pile.js, mortar_barnacle.js, jellisac.js ask for the tool;
+// none asks for the owner or a key), and what they yield is the actor's
+// (mining.js:344 pc.createItemFromSource). The site rolls a swing's chunks
+// and keeps the rock's chunks, the node's stock and each cultivation's wear,
+// so they are the same for every visitor and for the owner, online or not.
 //
 // Ours: an act the site has not answered in time is refused to the visitor,
 // and its op is idempotent at the site, so nothing counts twice.
@@ -62,7 +74,9 @@ const (
 var (
 	yardAnimalRe = regexp.MustCompile(`^a[0-9]{1,6}$`)
 	yardPlotRe   = regexp.MustCompile(`^patch(_dark)?:[0-9]{1,2}$`)
-	yardVerbRe   = regexp.MustCompile(`^(pet|nibble|massage|milk|squeeze|dig|tend|water|harvest)$`)
+	yardVerbRe   = regexp.MustCompile(`^(pet|nibble|massage|milk|squeeze|dig|tend|water|harvest|mine|scrape|scoop)$`)
+	yardRockRe   = regexp.MustCompile(`^rock:[0-9]{1,2}$`)
+	yardNodeRe   = regexp.MustCompile(`^node:[a-z][a-z0-9_]{2,19}:[0-9]{1,2}$`)
 )
 
 func init() { modules = append(modules, newHomeYard) }
@@ -192,7 +206,8 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 	if f, ok := req.(float64); !ok || f < 0 || f > 1e9 {
 		req = nil
 	}
-	okID := (msg.Kind == "animal" && yardAnimalRe.MatchString(msg.ID)) || ((msg.Kind == "plot" || msg.Kind == "tree") && yardPlotRe.MatchString(msg.ID))
+	okID := (msg.Kind == "animal" && yardAnimalRe.MatchString(msg.ID)) || ((msg.Kind == "plot" || msg.Kind == "tree") && yardPlotRe.MatchString(msg.ID)) ||
+		(msg.Kind == "rock" && yardRockRe.MatchString(msg.ID) && msg.Verb == "mine") || (msg.Kind == "node" && yardNodeRe.MatchString(msg.ID) && msg.Verb != "mine")
 	if owner <= 0 || owner == visitor || !okID || !yardVerbRe.MatchString(msg.Verb) {
 		m.refuse(cl, req, owner, "bad", yardTextBad)
 		return

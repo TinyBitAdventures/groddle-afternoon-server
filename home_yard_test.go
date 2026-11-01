@@ -191,3 +191,33 @@ func TestNoSiteNoYardVerbs(t *testing.T) {
 		t.Fatalf("off: %v", f)
 	}
 }
+
+func TestAVisitorMinesTheOwnersRockAndHarvestsANode(t *testing.T) {
+	r := newYardRig(t)
+	ada, bo, _ := r.visiting()
+	r.site.answer = yardAnswer{Status: "settled", Added: 25, Act: json.RawMessage(`{"id":"yd-0000000000000001","kind":"rock","target":"rock:0","verb":"mine","took":7,"at":1}`)}
+	r.do(bo, map[string]any{"t": "home_yard", "req": 1, "owner": 7, "kind": "rock", "id": "rock:0", "verb": "mine"})
+	r.do(bo, map[string]any{"t": "home_yard", "req": 2, "owner": 7, "kind": "node", "id": "node:peat_1:0", "verb": "harvest"})
+	r.settle()
+	if len(r.site.calls) != 2 || r.site.calls[0].Kind != "rock" || r.site.calls[1].ID != "node:peat_1:0" || r.site.calls[1].Verb != "harvest" {
+		t.Fatalf("both go to the site, which rolls and keeps the stock: %+v", r.site.calls)
+	}
+	f := drain(bo)
+	if len(f) != 2 || f[0]["act"].(map[string]any)["took"] != float64(7) {
+		t.Fatalf("Bo hears the chunks the site rolled: %v", f)
+	}
+	if got := drain(ada); len(got) != 2 || got[0]["t"] != "home_yard_acted" {
+		t.Fatalf("Ada sees both: %v", got)
+	}
+	for _, c := range []map[string]any{
+		{"t": "home_yard", "req": 3, "owner": 7, "kind": "rock", "id": "rock:0", "verb": "harvest"},
+		{"t": "home_yard", "req": 3, "owner": 7, "kind": "node", "id": "node:peat_1:0", "verb": "mine"},
+		{"t": "home_yard", "req": 3, "owner": 7, "kind": "rock", "id": "rock:100", "verb": "mine"},
+		{"t": "home_yard", "req": 3, "owner": 7, "kind": "node", "id": "node:PEAT:0", "verb": "dig"},
+	} {
+		r.do(bo, c)
+		if f := only(t, drain(bo), "home_yard_done"); f["why"] != "bad" {
+			t.Fatalf("%v: bad, got %v", c, f)
+		}
+	}
+}

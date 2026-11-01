@@ -409,3 +409,35 @@ func TestHomePassesAreRateLimited(t *testing.T) {
 		t.Fatalf("burst: %s", got)
 	}
 }
+
+func TestTowerFloorsAreOpenLikeTheHomeStreet(t *testing.T) {
+	for street, want := range map[string]int64{"TOWER_7_0": 7, "TOWER_7_8": 7, "TOWER_7_9": 7, "TOWER_7_10": 0, "TOWER_7_01": 0, "TOWER_07_0": 0, "TOWER_7": 0, "TOWER_x_0": 0, "TOWER_-7_0": 0, "HOME_7": 0} {
+		if got := towerOwner(street); got != want {
+			t.Errorf("%s: owner %d, want %d", street, got, want)
+		}
+	}
+	r := newHomesRig(t)
+	ada, bo, cy := r.connect(7, "Ada"), r.connect(9, "Bo"), r.connect(11, "Cy")
+	r.join(ada, "TOWER_7_1")
+	if f := drain(ada); f[0]["t"] != "street" {
+		t.Fatalf("the owner climbs her own Tower: %v", f)
+	}
+	// tower.js:2-22 is_public: pols_canEnter lets in anyone but those the owner blocks (inc_pols.js:452-458).
+	r.join(bo, "TOWER_7_1")
+	if got := buddyKinds(drain(bo)); got != "error:home_private" {
+		t.Fatalf("no pass, no Tower: %s", got)
+	}
+	r.pass(bo, 7, "Ada", false)
+	drain(bo)
+	r.join(bo, "TOWER_7_1")
+	if f := drain(bo); f[0]["t"] != "street" || len(f[0]["players"].([]any)) != 1 {
+		t.Fatalf("a visitor without a key rides up to Ada: %v", f)
+	}
+	r.pass(cy, 7, "Ada", false)
+	drain(cy)
+	r.ign.ign[[2]int64{7, 11}] = true
+	r.join(cy, "TOWER_7_0")
+	if got := buddyKinds(drain(cy)); got != "error:home_blocked" {
+		t.Fatalf("a blocked visitor stays out: %s", got)
+	}
+}
