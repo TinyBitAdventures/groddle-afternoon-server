@@ -25,8 +25,10 @@ package main
 // (onCreate 1008-1023, onPathing 1168-1214) and a Butterfly or Batterfly flies anywhere in a band
 // over the whole street (flyAround 886-969; npc_batterfly.js 1039-1052); the remake keeps the
 // paths its solo game always drew (a Chicken's 100 px patrol, the drifting flyers), now on a
-// shared clock. Its pauses to peck (onPause 1216-1277) and its kicks into the air
-// (onPlayerCollision 1299-1343) are each player's own decoration, not shared.
+// shared clock. Its pauses (onPause 1216-1277: every 6-14 s it stands or pecks 2-4 s and turns
+// round half the time) are on that shared path too, rolled from a seed every page shares (the
+// game's chickenWalkAt, lane CHICKWALK); its kicks into the air (onPlayerCollision 1299-1343) are
+// each player's own decoration, not shared.
 //
 // What each animal remembers (shared) and what each player has (per player):
 //   - Chicken (npc_chicken.js): one egg at a time, owned by the one player who asked (incubate
