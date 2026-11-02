@@ -30,7 +30,7 @@ import (
 //	{"t":"joined","player":Player}
 //	{"t":"left","id":7}
 //	{"t":"moved","id":7,"x":0,"y":0,"dir":1,"anim":"walk"}
-//	{"t":"said","id":7,"name":"Ada","text":"hi","at":1730000000000}
+//	{"t":"said","id":7,"name":"Ada","text":"hi","at":1730000000000}  text through the word filter (wordfilter.go)
 //	{"t":"typing","id":7}                              Ada is typing a Local chat line: "…" over her for typingShow
 //	{"t":"emoted","id":7,"e":"wave"}
 //	{"t":"error","code":"…","message":"…"}
@@ -255,12 +255,13 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 			h.replyLocked(cl, "slow_down", "Slow down a little.")
 			return
 		}
-		msg := map[string]any{"t": "said", "id": cl.id, "name": cl.name, "text": text, "at": h.now().UnixMilli()}
+		shown := filterWords(text) // wordfilter.go (the remake's own addition): nobody hears a bad word, the log keeps it
+		msg := map[string]any{"t": "said", "id": cl.id, "name": cl.name, "text": shown, "at": h.now().UnixMilli()}
 		h.queueLocked(cl, msg)
 		h.broadcastLocked(cl, msg)
 		h.logChatLocked("local", cl.street, cl, text, "", nil)
 		for _, fn := range h.onChat {
-			fn(cl, text)
+			fn(cl, shown)
 		}
 	case "typing":
 		now := h.now()

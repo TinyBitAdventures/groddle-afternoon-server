@@ -244,7 +244,7 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 	}
 	_ = json.Unmarshal(frame, &msg)
 	owner, visitor := msg.Owner, cl.ID()
-	text := cleanButlerText(msg.Text)
+	text := filterWords(cleanButlerText(msg.Text)) // wordfilter.go: the owner reads the message filtered
 	var item any
 	gave := tradeGoods{Items: []tradeItem{}}
 	if msg.Item != nil {

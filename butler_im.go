@@ -177,9 +177,11 @@ func (m *butlerIM) chat(cl *Client, text string) {
 }
 
 // say is sendBubbleAndChat on the owner's home street: everyone there but a player blocking or blocked by the owner.
-func (m *butlerIM) say(owner *Client, text string, to *Client) {
+// What is said goes through the word filter (wordfilter.go); the log keeps the owner's words as typed. It returns what was said.
+func (m *butlerIM) say(owner *Client, text string, to *Client) string {
 	street := homeStreetPrefix + strconv.FormatInt(owner.ID(), 10)
-	msg := map[string]any{"t": "butler_said", "owner": owner.ID(), "text": text}
+	shown := filterWords(text)
+	msg := map[string]any{"t": "butler_said", "owner": owner.ID(), "text": shown}
 	if to != nil {
 		msg["to"] = map[string]any{"id": to.ID(), "name": to.Name()}
 	}
@@ -190,6 +192,7 @@ func (m *butlerIM) say(owner *Client, text string, to *Client) {
 		}
 	}
 	m.h.logChatLocked("local", street, owner, text, "", nil) // chatlog.go: the owner's words, said by the Butler
+	return shown
 }
 
 func (m *butlerIM) command(cl *Client, frame json.RawMessage) (string, bool) {
@@ -213,8 +216,7 @@ func (m *butlerIM) announce(cl *Client, frame json.RawMessage) {
 	if !ok || text == "" {
 		return
 	}
-	m.say(cl, text, nil)
-	m.h.SendLocked(cl, map[string]any{"t": "butler_im", "kind": "announced", "text": text})
+	m.h.SendLocked(cl, map[string]any{"t": "butler_im", "kind": "announced", "text": m.say(cl, text, nil)})
 }
 
 // tell is doFarCommand's tellRecentRe (1196-1244): to the most recent visitor, if they are still there.
@@ -234,8 +236,7 @@ func (m *butlerIM) tell(cl *Client, frame json.RawMessage) {
 		return
 	}
 	said := fmt.Sprintf(butlerTellText, to.Name(), cl.Name(), text)
-	m.say(cl, said, to)
-	m.h.SendLocked(cl, map[string]any{"t": "butler_im", "kind": "told", "text": said})
+	m.h.SendLocked(cl, map[string]any{"t": "butler_im", "kind": "told", "text": m.say(cl, said, to)})
 }
 
 // who is doFarCommand's whoRe (1270-1296): the players on the home street now.

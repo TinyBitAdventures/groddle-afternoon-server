@@ -627,7 +627,7 @@ func (m *parties) chatLine(cl *Client, frame json.RawMessage) {
 		m.h.ErrorLocked(cl, "slow_down", "Slow down a little.")
 		return
 	}
-	out := map[string]any{"t": "party_said", "id": cl.ID(), "name": cl.Name(), "text": text, "at": m.h.Now().UnixMilli()}
+	out := map[string]any{"t": "party_said", "id": cl.ID(), "name": cl.Name(), "text": filterWords(text), "at": m.h.Now().UnixMilli()} // wordfilter.go
 	to := make([]int64, 0, len(p.members))
 	for _, mem := range p.members {
 		m.to(mem.id, out)

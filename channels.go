@@ -580,14 +580,14 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 		m.h.logChatLocked("channel", room, cl, text, "slow_down", nil)
 		return
 	}
-	line := chanLine{ID: id, Name: cl.Name(), Text: text, At: m.h.Now().UnixMilli()}
+	line := chanLine{ID: id, Name: cl.Name(), Text: filterWords(text), At: m.h.Now().UnixMilli()} // wordfilter.go: heard and kept filtered, logged as typed
 	r := m.rooms[room]
 	r.history = append(r.history, line)
 	if over := len(r.history) - chanHistory; over > 0 {
 		r.history = append([]chanLine{}, r.history[over:]...)
 	}
 	// chat_send_msg: everyone in it, the speaker too.
-	m.broadcast(room, map[string]any{"t": "channel_said", "channel": ch, "id": id, "name": line.Name, "text": text, "at": line.At}, 0)
+	m.broadcast(room, map[string]any{"t": "channel_said", "channel": ch, "id": id, "name": line.Name, "text": line.Text, "at": line.At}, 0)
 	m.h.logChatLocked("channel", room, cl, text, "", nil)
 }
 

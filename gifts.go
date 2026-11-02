@@ -316,7 +316,7 @@ func (m *gifts) give(cl *Client, frame json.RawMessage) {
 		}
 		if it.C == "note" {
 			if msg.Note != nil {
-				n := giftNote{Title: cleanNoteText(msg.Note.Title, giftNoteTitle, false), Body: cleanNoteText(msg.Note.Body, giftNoteBody, true)}
+				n := giftNote{Title: filterWords(cleanNoteText(msg.Note.Title, giftNoteTitle, false)), Body: filterWords(cleanNoteText(msg.Note.Body, giftNoteBody, true))} // wordfilter.go
 				if n.Title != "" || n.Body != "" {
 					call.Note = &n
 				}

@@ -17,11 +17,14 @@ package main
 //	{"at":"…","kind":"channel","where":"global","id":7,"name":"Ada","text":"buy gold","delivered":false,"why":"silenced"}
 //	{"at":"…","kind":"party","where":"party-7-lq3x0b2s","id":7,"name":"Ada","text":"hi","delivered":true,"to":[7,9]}
 //	{"at":"…","kind":"local","where":"GA5…","id":7,"name":"Ada","text":"spam","delivered":false,"why":"slow_down","skipped":12}
+//	{"at":"…","kind":"local","where":"GA5…","id":7,"name":"Ada","text":"oh fuck","delivered":true,"filtered":true,"shown":"oh #!@$"}
 //
 // kind local | channel | party. where: the street's tsid (the site names it),
 // the channel (global, trade, help, newbie, group:<id>) or the party's log id
 // (given the first time the party chats; a restart gives a resumed party a new
-// one). text exactly as it was broadcast (cleanChat). delivered false with why
+// one). text exactly as the player typed it (cleanChat); when the word filter
+// changed it (wordfilter.go, the remake's own addition) filtered is true and
+// shown is what the others saw, so moderation still reads the original. delivered false with why
 // for a refused line; skipped counts that player's refused lines left out
 // before this one (at most chatlogRefusedBurst refused lines, then one each
 // chatlogRefusedEvery, so a flood cannot fill the disk). to: who a party line
@@ -113,6 +116,8 @@ type chatLine struct {
 	Why       string  `json:"why,omitempty"`
 	Skipped   int     `json:"skipped,omitempty"`
 	To        []int64 `json:"to,omitempty"`
+	Filtered  bool    `json:"filtered,omitempty"`
+	Shown     string  `json:"shown,omitempty"`
 
 	t time.Time // when, for the day's file
 }
@@ -185,15 +190,21 @@ func (h *Hub) chatlogOf() *chatLog {
 	return c
 }
 
-// logChatLocked writes down one chat line (why "" when it was delivered). Under the hub lock; never waits.
+// logChatLocked writes down one chat line (why "" when it was delivered): text is
+// what was typed, and a line the word filter changes is marked with what was
+// shown. Under the hub lock; never waits.
 func (h *Hub) logChatLocked(kind, where string, cl *Client, text, why string, to []int64) {
 	c := h.chatlogOf()
 	if c == nil {
 		return
 	}
 	at := h.now()
-	c.addLocked(chatLine{At: at.UTC().Format("2006-01-02T15:04:05.000Z"), Kind: kind, Where: where, ID: cl.id, Name: cl.name,
-		Text: text, Delivered: why == "", Why: why, To: to, t: at})
+	l := chatLine{At: at.UTC().Format("2006-01-02T15:04:05.000Z"), Kind: kind, Where: where, ID: cl.id, Name: cl.name,
+		Text: text, Delivered: why == "", Why: why, To: to, t: at}
+	if shown := filterWords(text); shown != text {
+		l.Filtered, l.Shown = true, shown
+	}
+	c.addLocked(l)
 }
 
 func (c *chatLog) addLocked(l chatLine) {

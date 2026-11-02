@@ -116,7 +116,8 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `objects_uses.go` | Jars, bottles and food a shared act uses up (Fertilidust, Tree Poison and Antidote, Piggy food, Rook Balm, Sneezing and Sparkle Powder) through the site's signed `ledger/use`; a use with no answer is given back through `ledger/use/void` (`-uses-file`) |
 | `objects_tools.go` | The tool behind a shared take (pick, Hatchet, scraper, shovel, watering can) confirmed through the site's signed `ledger/has`, once per street visit |
 | `proofs.go` | One-use proofs (connect tickets, buddy adds, house keys, tend claims) stay spent across a restart (`-proofs-file`) |
-| `chatlog.go` | The chat log for moderation: every street, channel and party line, refused ones marked (`slow_down`, `silenced`), one JSON line each in a file a UTC day (`-chatlog-dir`, default `chatlog/` beside `-secret-file`), kept `-chatlog-days` (30; 0 turns it off); the console reads it through the signed `chatlog` call |
+| `wordfilter.go` | The word filter (the remake's own addition; Glitch had none): a bad word in street, channel, party and Butler chat, a Butler message or a gift note becomes a grawlix of the same length (`fuck` to `#!@$`) before anyone gets it; a bad Charades word is refused. The list is `data/word-filter.json` from the game repo |
+| `chatlog.go` | The chat log for moderation: every street, channel and party line as typed (a filtered one marked `filtered`, with what was `shown`), refused ones marked (`slow_down`, `silenced`), one JSON line each in a file a UTC day (`-chatlog-dir`, default `chatlog/` beside `-secret-file`), kept `-chatlog-days` (30; 0 turns it off); the console reads it through the signed `chatlog` call |
 | `rook.go` | Rook attacks fought by everyone on the street |
 | `races.go` | Grab 'Em Good and the finish-line races between real players; the dead (a player on a Naraka street) cannot challenge and are left out of a starting game |
 | `hoghaul.go` | The Great Hog Haul between real players on races.go's challenge: sacks, hogties, the pen and three wins decided from `data/hoghaul.json`; the winner credited through credits.go |
@@ -160,6 +161,7 @@ repo, so the server and the game agree. With the game checked out beside this re
     node tools/build-realtime-crowns.mjs
     node tools/build-realtime-mayhem.mjs
     node tools/build-realtime-hoghaul.mjs
+    node tools/build-word-filter.mjs     (also testdata/word-filter-vectors.json, the cases the game and the site share)
 
 The game's tests fail when this data is out of date.
 

@@ -39,7 +39,7 @@ package main
 //
 //	{"t":"verb_done","verb":"hug","ref":"…","status":"ok|refused","text":"…","to":{"id":9,"name":"Bo"},"id":"v-…","block":"…","garlic":false}
 //	{"t":"verb_got","verb":"hug","id":"v-…","from":{"id":7,"name":"Ada"},"block":"…","garlic":false}
-//	{"t":"charades_started","status":"ok|refused","text":"…","word":"…","ends":1730000000000}   to the drinker
+//	{"t":"charades_started","status":"ok|refused","text":"…","word":"…","ends":1730000000000}   to the drinker (refused why "word": a bad word, wordfilter.go)
 //	{"t":"charades_on","from":{"id":7,"name":"Ada"},"ends":…,"text":"Ada is playing Charades. …"}   to the street (and to a joiner)
 //	{"t":"charades_end","why":"guessed|ruined|timeout|left","word":"…","winner":{…}}            to the drinker
 //	{"t":"charades_over","from":{…},"why":"…","winner":{…}|null,"text":"…"}                   to the rest of the street
@@ -117,6 +117,7 @@ const (
 	charadesTextAlone = "You need other people around to play Charades. Trying to play with yourself is grossly inappropriate." // potion_charades.js:512
 	charadesTextAgain = "You are already playing charades."                                                                     // potion_charades.js:514
 	charadesTextWhere = "You need to be on a street to play Charades."                                                          // ours
+	charadesTextWord  = "Please pick a different word."                                                                         // ours: the word filter (wordfilter.go)
 )
 
 var (
@@ -329,6 +330,11 @@ func (m *verbs) charadesStart(cl *Client, frame json.RawMessage) {
 	if word == "" {
 		// potion_charades.js:536: no word, no game; the potion stays.
 		refuse("empty", "")
+		return
+	}
+	if hasBadWord(word) {
+		// wordfilter.go (the remake's own addition): a bad secret word would be said to the street when nobody guesses it.
+		refuse("word", charadesTextWord)
 		return
 	}
 	g := &charadesGame{street: street, word: word, ends: m.h.Now().Add(charadesFor)}
