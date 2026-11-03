@@ -455,3 +455,67 @@ func TestABlockRefusesPartyInvitesAndTradesBothWays(t *testing.T) {
 		}
 	}
 }
+
+func TestAPartyMemberWhoBlocksTheSpeakerIsNotSentTheirLines(t *testing.T) {
+	savedSecret := buddySecretForTest
+	buddySecretForTest = buddyTestSecret
+	defer func() { buddySecretForTest = savedSecret }()
+	r := &buddyRig{t: t, now: time.Unix(1_700_000_000, 0)}
+	saved := modules
+	modules = []moduleFactory{
+		func(h *Hub) Module { r.m = newBuddies(h).(*buddies); return r.m },
+		newParties,
+	}
+	r.hub = NewHub(func() time.Time { return r.now })
+	modules = saved
+	r.hub.afterFunc = func(d time.Duration, fn func()) func() bool { return func() bool { return true } }
+	ada := r.connect(1, "Ada")
+	bo := r.connect(2, "Bo")
+	cy := r.connect(3, "Cy")
+	for _, cl := range []*Client{ada, bo, cy} {
+		r.join(cl, "GA1")
+	}
+	// One party of three, made before the block (the invite itself is refused once it is there).
+	for _, cl := range []*Client{bo, cy} {
+		r.do(ada, map[string]any{"t": "party_invite", "id": cl.ID()})
+		r.do(cl, map[string]any{"t": "party_accept", "from": 1})
+	}
+	r.watch(ada, nil, nil, []int64{3}) // Ada blocks Cy
+	drain(ada)
+	drain(bo)
+	drain(cy)
+	said := func(cl *Client) []string {
+		var out []string
+		for _, f := range drain(cl) {
+			if f["t"] == "party_said" {
+				out = append(out, f["name"].(string)+":"+f["text"].(string))
+			}
+		}
+		return out
+	}
+	r.do(cy, map[string]any{"t": "party_chat", "text": "psst"})
+	if got := said(ada); len(got) != 0 {
+		t.Fatalf("Ada blocks Cy but heard %v", got)
+	}
+	if got := fmt.Sprint(said(bo)); got != "[Cy:psst]" {
+		t.Fatalf("Bo heard %s", got)
+	}
+	if got := fmt.Sprint(said(cy)); got != "[Cy:psst]" {
+		t.Fatalf("Cy's own line came back as %s", got)
+	}
+	// One way, as Local chat: Cy (who blocks nobody) still hears Ada.
+	r.do(ada, map[string]any{"t": "party_chat", "text": "hello all"})
+	for _, cl := range []*Client{ada, bo, cy} {
+		if got := fmt.Sprint(said(cl)); got != "[Ada:hello all]" {
+			t.Fatalf("%s heard %s", cl.Name(), got)
+		}
+	}
+	// Un-blocked: Cy's lines reach Ada again.
+	r.watch(ada, nil, nil, nil)
+	drain(ada)
+	r.now = r.now.Add(chatEvery)
+	r.do(cy, map[string]any{"t": "party_chat", "text": "back"})
+	if got := fmt.Sprint(said(ada)); got != "[Cy:back]" {
+		t.Fatalf("after the un-block Ada heard %s", got)
+	}
+}

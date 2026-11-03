@@ -46,8 +46,10 @@ package main
 //     closes (party.js player_logout 387-413). Members who are offline stay in it.
 //   - Party chat reaches members only, and refuses slash commands (main.js:1833).
 //
-// Ours: partyGrace (a socket that drops has a minute to come back before it
-// counts as logging out), the invite rate and the caps on pending invites.
+// Ours: a member who blocks the speaker is not sent their party lines (Glitch's
+// client dropped them, RightSideManager.as 218-223), partyGrace (a socket that
+// drops has a minute to come back before it counts as logging out), the invite
+// rate and the caps on pending invites.
 // Party Spaces (party.js create_space and the rest, the creator's kick and the
 // kicked list) are party_spaces.go, on this module.
 
@@ -628,8 +630,15 @@ func (m *parties) chatLine(cl *Client, frame json.RawMessage) {
 		return
 	}
 	out := map[string]any{"t": "party_said", "id": cl.ID(), "name": cl.Name(), "text": filterWords(text), "at": m.h.Now().UnixMilli()} // wordfilter.go
+	// A member who blocks the speaker never gets the line (buddies.ignoring). Glitch sent it and
+	// its client dropped it (RightSideManager.as chatUpdate 218-223, pc.ignored); ours stops it
+	// here too, as IMs are, and the game still drops it (party-feature).
+	ign, _ := m.h.ProvidedLocked("buddies.ignoring").(func(int64, int64) bool)
 	to := make([]int64, 0, len(p.members))
 	for _, mem := range p.members {
+		if mem.id != cl.ID() && ign != nil && ign(mem.id, cl.ID()) {
+			continue
+		}
 		m.to(mem.id, out)
 		to = append(to, mem.id)
 	}
