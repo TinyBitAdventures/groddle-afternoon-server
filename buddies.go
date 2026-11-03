@@ -127,6 +127,9 @@ func (m *buddies) Register(r *Registry) {
 	r.OnDisconnect(m.disconnected)
 	// For party.go and trade.go: refuse what an ignored player sends (fn(ignorer, other)).
 	r.Provide("buddies.ignoring", m.ignores)
+	// For im.go: whose blocks are known (their signed list is in), and whom a player's list names.
+	r.Provide("buddies.watching", func(id int64) bool { return len(m.secret) == 0 || m.watch[id] != nil })
+	r.Provide("buddies.holds", m.holds)
 }
 
 // —— Tokens ——
@@ -347,6 +350,10 @@ func (m *buddies) watchMsg(cl *Client, frame json.RawMessage) {
 		online = append(online, map[string]any{"id": o, "name": ocl.Name(), "street": m.live[o]})
 	}
 	m.send(id, map[string]any{"t": "buddies_status", "online": online})
+	// im.go: with the blocks known, the IMs kept for this player can go to them.
+	if fn, ok := m.h.ProvidedLocked("im.watched").(func(*Client)); ok {
+		fn(cl)
+	}
 }
 
 // cameBack makes a player with a list online for their buddies (or back from a dropped socket).

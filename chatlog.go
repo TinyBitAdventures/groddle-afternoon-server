@@ -7,7 +7,8 @@ package main
 // marked, since that is what moderation looks for: "slow_down" (over the rate)
 // and "silenced" (a channel's cone of silence). A line nobody could hear (no
 // street, not in that chat, not in a party, a slash command in party chat) is
-// not a chat line and is not written.
+// not a chat line and is not written. IMs (im.go) are private and are never
+// written here: the console's chat log has no IM text.
 //
 // Where: one file a UTC day, <dir>/2026-10-31.jsonl, the directory -chatlog-dir
 // (default chatlog/ beside -secret-file; off: no log), mode 0700, the files
