@@ -27,7 +27,7 @@ package main
 // Client to server:
 //
 //	{"t":"furn_buy","owner":7,"op":"furn-<16 hex>","price":1200}
-//	{"t":"home_refresh","what":"poles|tags|signpost"}            the sender's own home
+//	{"t":"home_refresh","what":"poles|tags|signpost|boxes"}      the sender's own home (boxes: home_boxes.go)
 //
 // Server to client:
 //
@@ -266,7 +266,7 @@ func (m *homeStreet) refresh(cl *Client, frame json.RawMessage) {
 	}
 	_ = json.Unmarshal(frame, &msg)
 	switch msg.What {
-	case "poles", "tags", "signpost":
+	case "poles", "tags", "signpost", "boxes":
 	default:
 		return
 	}
