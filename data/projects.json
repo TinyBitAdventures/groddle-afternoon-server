@@ -440,7 +440,7 @@
 "521":{"kind":"street","street":"GIFF96TLBO72CS3","offer":["GIFF8ITNAO72C6N"],"phases":[{"c":"job_street_baq_3","delay":0}],"connecting":["GIFF8ITNAO72C6N"],"divisor":50},
 "522":{"kind":"street","street":"GIFF8K9RAO72LP5","offer":["GIFF96TLBO72CS3"],"phases":[{"c":"job_street_baq_6","delay":0}],"connecting":["GIFF96TLBO72CS3"],"divisor":50},
 "523":{"kind":"street","street":"GIFF7UIP9O724RP","offer":["GIFF8K9RAO72LP5"],"phases":[{"c":"job_street_baq_7","delay":0}],"connecting":["GIFF8K9RAO72LP5"],"divisor":50},
-"524":{"kind":"street","street":"GIFF8A7EAO72NPH","offer":["GIFF7UIP9O724RP"],"phases":[{"c":"job_street_baq_4","delay":0}],"connecting":["GIFF7UIP9O724RP"],"divisor":50},
+"524":{"kind":"street","street":"GIFF8A7EAO72NPH","offer":["GIFF7UIP9O724RP"],"phases":[{"c":"job_street_baq_4","delay":0}],"connecting":["GIFF7UIP9O724RP"],"built":true,"divisor":50},
 "525":{"kind":"street","street":"GIFF8C3IAO7210R","offer":["GIFF8A7EAO72NPH"],"phases":[{"c":"job_street_baq_8","delay":0}],"connecting":["GIFF8A7EAO72NPH"],"divisor":50},
 "526":{"kind":"street","street":"GIFF8GBMAO72KNI","offer":["GIFF8C3IAO7210R"],"phases":[{"c":"job_street_baq_2","delay":0}],"connecting":["GIFF8C3IAO7210R"],"divisor":50},
 "527":{"kind":"street","street":"GIFF7RSJ9O725F1","offer":["GIFF8GBMAO72KNI"],"phases":[{"c":"job_street_baq_5","delay":0}],"connecting":["GIFF8GBMAO72KNI"],"divisor":50},

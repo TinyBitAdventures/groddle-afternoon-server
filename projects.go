@@ -201,6 +201,7 @@ type projJob struct {
 	Proto      string         `json:"proto,omitempty"`   // and its worn-out cultivation
 	Yard       string         `json:"yard,omitempty"`    // street | back
 	Mult       float64        `json:"mult,omitempty"`    // the rewards' lifespan multiplier (quest.js:1762-1767)
+	Built      bool           `json:"built,omitempty"`   // every world starts with it built (the game's tools/street-jobs-built-from-start.json)
 }
 
 type projDropRow struct {
@@ -415,7 +416,38 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 			log.Printf("projects %s: %d projects, %d contributions waiting for the ledger, %d rewards to credit", path, len(m.st.Jobs), len(m.st.Gives), len(m.st.Credits))
 		}
 	}
+	if opened := m.buildFromStart(); len(opened) > 0 {
+		log.Printf("projects: built from the start %v", opened)
+		m.save()
+	}
 	return m
+}
+
+// buildFromStart marks done every street project the table says each world starts with built
+// (projJob.Built: Austin's chosen roads, the game's tools/street-jobs-built-from-start.json), on a
+// new world and on one saved before the list had it. It runs on every start and changes nothing the
+// second time. A row already under way keeps what it was given and pays nothing out: Glitch's admins
+// opened a street by unlocking it and left its job alone (locations/inc_admin.js
+// admin_jobs_set_unlocked 431-439). Returns the jobs it marked.
+func (m *projects) buildFromStart() []string {
+	ids := make([]string, 0)
+	for id, job := range m.t.Jobs {
+		if job.Built && job.Kind == "street" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	opened := []string{}
+	now := m.ms()
+	for _, id := range ids {
+		r := m.row(id)
+		if r.Done > 0 {
+			continue
+		}
+		r.Done = now
+		opened = append(opened, id)
+	}
+	return opened
 }
 
 func (m *projects) Register(r *Registry) {
