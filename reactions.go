@@ -357,6 +357,10 @@ func (m *reacts) react(cl *Client, frame json.RawMessage) {
 		return
 	}
 	l.r = next
+	if l.kind == "channel" {
+		// chatstore.go: a channel or group line's reactions are kept on the site with it.
+		m.h.storeChatLocked(chatEntry{K: "react", Lid: msg.Line, R: storeReactions(l.r)})
+	}
 	m.tell(msg.Line, l, to)
 }
 

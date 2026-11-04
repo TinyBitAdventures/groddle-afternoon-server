@@ -196,12 +196,17 @@ func (h *Hub) chatlogOf() *chatLog {
 // what was typed, and a line the word filter changes is marked with what was
 // shown. Under the hub lock; never waits.
 func (h *Hub) logChatLocked(kind, where string, cl *Client, text, why string, to []int64) {
+	h.logChatAsLocked(kind, where, cl.id, cl.name, text, why, to)
+}
+
+// logChatAsLocked is logChatLocked for a player with no socket here (a line said from the website, webchat.go).
+func (h *Hub) logChatAsLocked(kind, where string, id int64, name, text, why string, to []int64) {
 	c := h.chatlogOf()
 	if c == nil {
 		return
 	}
 	at := h.now()
-	l := chatLine{At: at.UTC().Format("2006-01-02T15:04:05.000Z"), Kind: kind, Where: where, ID: cl.id, Name: cl.name,
+	l := chatLine{At: at.UTC().Format("2006-01-02T15:04:05.000Z"), Kind: kind, Where: where, ID: id, Name: name,
 		Text: text, Delivered: why == "", Why: why, To: to, t: at}
 	if shown := filterWords(text); shown != text {
 		l.Filtered, l.Shown = true, shown

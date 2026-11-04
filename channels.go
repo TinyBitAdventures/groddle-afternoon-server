@@ -29,6 +29,7 @@ package main
 //	{"t":"channel_joined","channel":"global","history":[{"id":7,"name":"Ada","text":"hi","at":…,"lid":…,"r":[…]}]}  the last chanHistory lines, with their reactions as you may see them (reactions.go)
 //	{"t":"channel_left","channel":"group:12"}                                                      you left, or may no longer be there
 //	{"t":"channel_said","channel":"global","id":7,"name":"Ada","text":"hi","at":1730000000000,"lid":…}  to everyone in it, you too; lid the line's id for reactions
+//	        ("web":true on a line said from the website, webchat.go; history lines carry it too)
 //	{"t":"channel_note","channel":"group:12","text":"Ada has joined"}                              the source's lines from "God"
 //	{"t":"error","code":"channels","message":"…"}
 //
@@ -61,7 +62,8 @@ package main
 //     drops them (RightSideManager.as:218-223 chatUpdate, pc.ignored), so the
 //     game hides them (buddies-feature realtimeHidden); nothing is refused here.
 //
-// Ours: each chat keeps its last chanHistory lines, sent to whoever opens it;
+// Ours: each chat keeps its last chanHistory lines, sent to whoever opens it
+// (and the site keeps every line for good, chatstore.go);
 // a /who in a channel names at most chanWhoNames players; rates; the chat a
 // player has open survives a new socket for the same character (a reload).
 
@@ -110,6 +112,7 @@ type chanLine struct {
 	At   int64      `json:"at"`
 	Lid  int64      `json:"lid,omitempty"` // reactions.go
 	R    []reaction `json:"r,omitempty"`   // in a history sent to one player: the reactions they may see
+	Web  bool       `json:"web,omitempty"` // said from the website's /chat/ (webchat.go)
 }
 
 type chanRoom struct {
@@ -156,6 +159,7 @@ func (m *channels) Register(r *Registry) {
 	r.OnDisconnect(m.disconnected)
 	// reactions.go: who has a channel line (everyone in the room now), and whether id may react there.
 	r.Provide("channels.audience", m.audience)
+	r.Provide("channels.self", m) // webchat.go
 }
 
 // audience is room's members when id may react to its lines there ("" why), else why not.
@@ -628,6 +632,14 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 	}
 	m.broadcast(room, said, 0)
 	m.h.logChatLocked("channel", room, cl, text, "", nil)
+	m.store(room, line, false) // chatstore.go: kept on the site
+}
+
+// store sends a channel or group line to the site's long-term history (chatstore.go).
+func (m *channels) store(room string, line chanLine, web bool) {
+	if line.Lid > 0 {
+		m.h.storeChatLocked(chatEntry{K: "line", Room: room, Lid: line.Lid, ID: line.ID, Name: line.Name, Text: line.Text, At: line.At, Web: web})
+	}
 }
 
 func (m *channels) who(cl *Client, frame json.RawMessage) {

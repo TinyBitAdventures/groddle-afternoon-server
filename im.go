@@ -20,7 +20,9 @@ package main
 // chat's last 150 lines in Flash local storage, ChatHistory.as 47-93,
 // ChatArea.as:53 MAX_ELEMENTS). The source wrote every IM's text to its
 // action log (apiLogAction('IM', …, 'msg='+msg.txt), 4342); IMs are private
-// here and their text is written nowhere but the state file below.
+// here and their text is written nowhere but the state file below and the
+// site's long-term history (chatstore.go, Austin 2026-11-04), which gives a
+// conversation to its two players only.
 //
 // Client to server:
 //
@@ -67,7 +69,8 @@ package main
 // -secret-file; off: memory only, mode 0600) is written within a second of a
 // change and at shutdown. IM text is private: it is never written to the chat
 // log (chatlog.go) or the server's log, and the administrators' console has no
-// call that reads it. Rates: imBurst lines then one each imEvery; imNewBurst new
+// call that reads it (nor does the site's: its groddle_im_lines answer only the
+// conversation's two players). Rates: imBurst lines then one each imEvery; imNewBurst new
 // conversations then one each imNewEvery.
 
 import (
@@ -185,6 +188,7 @@ func (m *ims) Register(r *Registry) {
 		m.forget(cl.ID())
 	})
 	r.OnShutdown(func() { m.save() })
+	r.Provide("ims.self", m) // chatstore.go reads the kept lines once
 	// buddies.go calls this when a player's signed list is in: their blocks are known, so their lines can go.
 	r.Provide("im.watched", m.watched)
 }
@@ -431,6 +435,7 @@ func (m *ims) send(cl *Client, frame json.RawMessage) {
 	c.Closed = [2]bool{}
 	c.Read[c.side(from)] = c.Seq // your own line is read
 	m.saveSoon()
+	m.h.storeChatLocked(imEntry(c, l)) // chatstore.go: kept on the site, for the two of them only
 	m.h.SendLocked(cl, map[string]any{"t": "im", "with": m.who(c, msg.To), "line": lineMsg(l), "unread": c.unread(from)})
 	if to := m.ready(msg.To); to != nil && m.sent[msg.To] == to {
 		m.h.SendLocked(to, map[string]any{"t": "im", "with": m.who(c, from), "line": lineMsg(l), "unread": c.unread(msg.To)})
@@ -560,6 +565,7 @@ func (m *ims) react(cl *Client, frame json.RawMessage) {
 	if changed {
 		l.R = next
 		m.saveSoon()
+		m.h.storeChatLocked(imReactEntry(c, *l))
 	}
 	r := []reaction(l.R)
 	if r == nil {
