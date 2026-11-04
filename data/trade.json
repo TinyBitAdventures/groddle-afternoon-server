@@ -586,7 +586,7 @@
 "potion_garden_water":{"max":1,"name":"Soak-All Solution","plural":"Soak-All Solutions","pts":5},
 "potion_keycutter_tonic":{"max":1,"name":"Keycutter Tonic","plural":"Keycutter Tonics","pts":5},
 "potion_rainbow_juice":{"max":1,"name":"Rainbow Juice","plural":"Rainbow Juices"},
-"potion_rook_balm":{"max":1,"name":"Rook Balm","plural":"Rook Balms"},
+"potion_rook_balm":{"max":1,"name":"Rook Balm","plural":"Rook Balms","pts":5},
 "potion_trantsformation_fluid":{"max":1,"name":"Trantsformation Fluid","plural":"Trantsformation Fluids","pts":3},
 "potion_tree_poison":{"max":1,"name":"Tree Poison","plural":"Tree Poisons","pts":5},
 "potion_tree_poison_antidote":{"max":1,"name":"Tree Poison Antidote","plural":"Tree Poison Antidotes","pts":5},

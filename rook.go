@@ -1324,6 +1324,7 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 	var msg struct {
 		Key  string `json:"key"`
 		Balm bool   `json:"balm"`
+		K    *int   `json:"k"` // the tube poured: its place among the player's Rook Balms in the pack (objects_uses.go copyOf)
 	}
 	if json.Unmarshal(frame, &msg) != nil || !rookKeyRe.MatchString(msg.Key) {
 		m.no(cl, "revive", "bad", "That revive did not check out.")
@@ -1347,9 +1348,10 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 	if msg.Balm && m.uses.ledger != nil {
 		// G335 slice 5: the balm is the ledger's to confirm and use (potion_rook_balm.js:25
 		// points_capacity 5, tool_base use(1) at 570 and 631; the fifth pour consumes it).
+		// Each tube keeps its own pours (2026-11-04): k names the one poured.
 		street := cl.Street()
 		m.balming[hold] = true
-		m.uses.ask(cl, useBalm, 0, func(use map[string]any, code, message string) {
+		m.uses.askCopy(cl, useBalm, 0, copyOf(msg.K), func(use map[string]any, code, message string) {
 			delete(m.balming, hold)
 			if code != "" {
 				m.no(cl, "revive", code, message)

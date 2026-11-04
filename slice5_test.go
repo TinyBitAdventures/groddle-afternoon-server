@@ -374,3 +374,29 @@ func TestTheLedgerIsAskedForWholeItemsAndToolsOverHTTP(t *testing.T) {
 		t.Fatalf("bodies %v", bodies)
 	}
 }
+
+// Each Rook Balm keeps its own pours (2026-11-04): the tube poured goes to the ledger as k.
+func TestARookBalmNamesTheTubePouredToTheLedger(t *testing.T) {
+	r := newRookRig(t, true)
+	l := newFakeUseLedger()
+	r.mod.uses = fakeAsker(r.hub, l)
+	a := r.player(1, "Ada")
+	r.send(a, map[string]any{"t": "rook_sync", "keys": []string{"npc_piggy:0", "npc_piggy:1", "npc_piggy:2"}})
+	r.send(a, map[string]any{"t": "rook_dev", "do": "attack"})
+	r.roll = 0
+	r.send(a, map[string]any{"t": "rook_dev", "do": "wingbeat"})
+	r.drain(a)
+	l.give(1, useBalm, 2)
+	r.send(a, map[string]any{"t": "rook_revive", "key": "npc_piggy:0", "balm": true, "k": 1})
+	r.advance(0)
+	if y := rookYous(r.drain(a))["revive"]; y["done"] != true {
+		t.Fatalf("the second tube's pour answered %v", y)
+	}
+	// None, or one out of range, names no tube: the one in use.
+	r.send(a, map[string]any{"t": "rook_revive", "key": "npc_piggy:1", "balm": true, "k": 999})
+	r.advance(0)
+	r.drain(a)
+	if len(l.copies) != 1 || l.copies[0] != useBalm+" #1" {
+		t.Fatalf("the tubes named were %v (want only the first pour's tube 1)", l.copies)
+	}
+}
