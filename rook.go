@@ -75,22 +75,39 @@ package main
 //     wing beat (rook_attack.js stunRecovery 466-473 leaves none), so an abandoned fight still ends.
 //   - An administrator can send the Rook off from the console (rook_admin.go rook_end): the same
 //     departure, nothing paid (Glitch's /kill_rook was a defeat with its rewards).
+//   - One scheduled Rook a day in the whole world (Austin 2026-11-04: with our few players the hourly
+//     turn of every hub, admin.js createRookAttack's setSchedule(60, 60), still felt too often). The
+//     source gives each hub its own timer (groups/rook_attack.js setAttackTimer 79-97); here one
+//     world clock does: after a scheduled attack starts (its herald begins, so a fight's length or
+//     an administrator's End attack does not move it), the next scheduled attack may not start for
+//     24 hours, in any hub. The time is kept in the state file (rook_persist.go), so a restart or a
+//     deploy does not reset it; a server that finds no time kept (a state file from before this
+//     rule, no file yet, or -rook-file off as on lane and QA servers, where rook_dev starts one)
+//     counts the 24 hours from its own start, so a deploy brings no Rook straight away. Once they are
+//     up and someone is on a rookable street, the Rook comes a random 3 to 20 minutes later
+//     (rookDelayMin/Max) to a street picked from every hub's streets that qualify then; if none
+//     does, it tries again a random 3 to 20 minutes after that, and with nobody on a rookable street
+//     it waits for the next arrival. A player counts for a street only after 2 minutes on it
+//     (rookSettle), so the Rook never comes the moment someone logs in or walks onto a street.
 //   - Attacks come to a street with someone on it (newLocation 30-66 picks any rookable street of
 //     the hub), and a street rests an hour after one before the Rook can come back (the source only
-//     skips the last location, line 50).
+//     skips the last location of its hub, line 50, which is kept per hub here too).
 //   - A player who has just met a Rook is left alone for 6 hours, in any hub (Austin 2026-10-31: with
 //     few players every attack landed on the one street someone was on, so the Rook seemed to follow
 //     them). Everyone on the street when a scheduled attack starts (its herald begins), and anyone
 //     who arrives there while that Rook is out, has met it; the 6 hours run from that moment and are
 //     kept by user id, so reconnecting does not reset them. A street is picked only if at least one
-//     player on it is not resting; when everyone in the hub is resting, the hub waits its next turn.
-//     A street with one resting and one fresh player can still be picked, and the resting one is in
-//     the fight. rook_dev starts (QA) neither check nor give the rest.
+//     player on it is not resting (and has been there 2 minutes); when no street qualifies, the
+//     world waits its next try. A street with one resting and one fresh player can still be picked,
+//     and the resting one is in the fight. Under the daily clock this rest and the street's hour
+//     rarely matter; they stay for a clock moved by hand. rook_dev starts (QA) neither check nor
+//     set the daily clock, nor check or give the rest; neither does the console's End attack.
 //   - An offering too small to hurt the Rook is refused and kept (shrines.js launchAttack 1036-1038
 //     would take it for nothing).
 //
-// What the Rook rooked (until it is revived), a street's hour of rest and each player's 6 hours
-// outlive a restart of the server (rook_persist.go, -rook-file); a fight under way does not.
+// What the Rook rooked (until it is revived), a street's hour of rest, each player's 6 hours and
+// the time the next scheduled attack may start outlive a restart of the server (rook_persist.go,
+// -rook-file); a fight under way does not.
 
 import (
 	_ "embed"
@@ -113,9 +130,15 @@ var rookJSON []byte
 const rookTextBalming = "Someone is already applying a balm to this one."
 
 const (
-	// admin.js createRookAttack 398: setSchedule(60, 60) minutes by default.
-	rookScheduleMin = 60 * time.Minute
-	rookScheduleMax = 60 * time.Minute
+	// Ours (Austin 2026-11-04): one scheduled attack in the whole world per this long, counted from
+	// its start (header). The source's admin.js createRookAttack 398 set each hub to setSchedule(60, 60).
+	rookDaily = 24 * time.Hour
+	// Ours: once the day is up, the Rook comes this long after someone is on a rookable street (and
+	// tries again as long when no street qualifies).
+	rookDelayMin = 3 * time.Minute
+	rookDelayMax = 20 * time.Minute
+	// Ours: a player counts for picking a street only after this long on it.
+	rookSettle = 2 * time.Minute
 	// Ours: a street rests this long after an attack clears.
 	rookStreetRest = 60 * time.Minute
 	// Ours (Austin 2026-10-31): a player who has met a Rook is not picked again for this long, in
@@ -223,6 +246,7 @@ type rookSpot struct {
 
 type rookWorld struct {
 	streets map[string]rookSpot
+	order   []string // every street, sorted (the world's schedule walks them in this order)
 	hubs    map[string][]string
 	values  map[string]int
 	refused map[string]bool
@@ -255,6 +279,10 @@ func loadRookWorld(raw []byte) (*rookWorld, error) {
 	for _, list := range w.hubs {
 		sort.Strings(list)
 	}
+	for tsid := range w.streets {
+		w.order = append(w.order, tsid)
+	}
+	sort.Strings(w.order)
 	for _, id := range file.Refused {
 		w.refused[id] = true
 	}
@@ -332,21 +360,22 @@ type rookStreet struct {
 	restUntil time.Time
 }
 
-type rookHub struct {
-	timer *rookTimer
-	last  string // newLocation 50: never the last location again
-}
-
 type rook struct {
 	h       *Hub
 	w       *rookWorld
 	roll    func() float64
 	dev     bool
 	streets map[string]*rookStreet
-	hubs    map[string]*rookHub
+	last    map[string]string // hub -> its last street (newLocation 50: never the last location again)
 	limits  map[int64]*objBucket
 	path    string              // the state file (rook_persist.go); "": memory only
 	met     map[int64]time.Time // player (user id) -> resting from the Rook until (rookPlayerRest)
+	// The world's one schedule (Austin 2026-11-04, header): the next scheduled attack may not start
+	// before next (kept in the state file); timer is its one timer, arrived when each player came
+	// onto their street (rookSettle).
+	next    time.Time
+	timer   *rookTimer
+	arrived map[int64]time.Time
 	// A Rook Balm's full revive uses one of the balm's charges through the site's ledger first
 	// (G335 slice 5, objects_uses.go); balming holds the rooked thing while it waits.
 	uses    *useAsker
@@ -355,8 +384,8 @@ type rook struct {
 
 func newRook(h *Hub) Module {
 	m := &rook{h: h, w: rookData, roll: rand.Float64, dev: os.Getenv("GRODDLE_ROOK_DEV") == "1",
-		streets: map[string]*rookStreet{}, hubs: map[string]*rookHub{}, limits: map[int64]*objBucket{}, balming: map[string]bool{},
-		met: map[int64]time.Time{}}
+		streets: map[string]*rookStreet{}, last: map[string]string{}, limits: map[int64]*objBucket{}, balming: map[string]bool{},
+		met: map[int64]time.Time{}, arrived: map[int64]time.Time{}}
 	m.uses = newUseAsker(h, "rook: Rook Balm")
 	if m.dev {
 		log.Printf("rook: GRODDLE_ROOK_DEV=1, rook_dev messages are on (QA only)")
@@ -366,6 +395,13 @@ func newRook(h *Hub) Module {
 			log.Printf("rook %s: %v (rooked things are kept in memory only)", m.path, err)
 			m.path = ""
 		}
+	}
+	// No time kept (a state file from before the daily rule, none yet, or memory only): the day
+	// counts from now, so a deploy brings no Rook straight away. A time past a day away is a bad
+	// clock: a day from now too.
+	if now := h.Now(); m.next.IsZero() || m.next.After(now.Add(rookDaily)) {
+		m.next = now.Add(rookDaily)
+		m.save()
 	}
 	return m
 }
@@ -380,7 +416,7 @@ func (m *rook) Register(r *Registry) {
 	r.Handle("rook_dev", m.handleDev)
 	r.OnJoin(m.joined)
 	r.OnLeave(m.left)
-	r.OnDisconnect(func(cl *Client) { delete(m.limits, cl.ID()) })
+	r.OnDisconnect(func(cl *Client) { delete(m.limits, cl.ID()); delete(m.arrived, cl.ID()) })
 	r.OnShutdown(func() { m.save() }) // rook_persist.go
 	r.Provide("rook.treeRooked", m.treeRooked)
 	r.Provide("rook.self", m) // the console's calls (rook_admin.go)
@@ -560,83 +596,93 @@ func (m *rook) cancelWingBeat(a *rookAttack) {
 }
 
 // ---------------------------------------------------------------------------
-// Schedule (groups/rook_attack.js setAttackTimer 79-97, newLocation 30-66)
+// Schedule (groups/rook_attack.js setAttackTimer 79-97, newLocation 30-66): one for the whole
+// world, a day between scheduled attacks (Austin 2026-11-04, header)
 // ---------------------------------------------------------------------------
 
-func (m *rook) armHub(hub string) {
-	hb := m.hubs[hub]
-	if hb == nil {
-		hb = &rookHub{}
-		m.hubs[hub] = hb
-	}
-	if hb.timer != nil {
+// arm keeps the world's one schedule timer: before m.next it waits for m.next; after it, once
+// someone is on a rookable street, it fires a random rookDelayMin to rookDelayMax later. With
+// nobody on a rookable street nothing is armed: the next arrival (joined) arms it.
+func (m *rook) arm() {
+	if m.timer != nil {
 		return
 	}
-	// While the hub's Rook is out, its clear arms the next turn (stopAttack 428-451 calls
-	// setAttackTimer only then): an arrival meanwhile must not start the hour early.
-	for _, tsid := range m.w.hubs[hub] {
-		if s := m.streets[tsid]; s != nil && s.attack != nil {
+	now := m.h.Now()
+	wait := m.next.Sub(now)
+	due := wait <= 0
+	if due {
+		if !m.anyoneOut() {
 			return
 		}
-	}
-	d := rookScheduleMin
-	if rookScheduleMax > rookScheduleMin {
-		d += time.Duration(m.roll() * float64(rookScheduleMax-rookScheduleMin))
+		wait = rookDelayMin + time.Duration(m.roll()*float64(rookDelayMax-rookDelayMin))
 	}
 	t := &rookTimer{}
-	hb.timer = t
-	t.stop = m.h.After(d, func() {
-		if hb.timer != t {
+	m.timer = t
+	t.stop = m.h.After(wait, func() {
+		if m.timer != t {
 			return
 		}
-		hb.timer = nil
-		m.hubFires(hub)
+		m.timer = nil
+		if due {
+			m.fire()
+		} else {
+			m.arm()
+		}
 	})
 }
 
-// hubFires picks a street of the hub for the next attack, or waits for the next turn.
-func (m *rook) hubFires(hub string) {
-	hb := m.hubs[hub]
+// anyoneOut is whether anyone is on a rookable street.
+func (m *rook) anyoneOut() bool {
+	for _, tsid := range m.w.order {
+		if len(m.h.StreetLocked(tsid)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// fire picks a street for the day's attack among every hub's streets that qualify now, or tries
+// again a few minutes on.
+func (m *rook) fire() {
 	now := m.h.Now()
+	if now.Before(m.next) {
+		m.arm()
+		return
+	}
 	var candidates []string
-	anyone := false
-	busy := false
-	for _, tsid := range m.w.hubs[hub] {
+	for _, tsid := range m.w.order {
 		if len(m.h.StreetLocked(tsid)) == 0 {
 			continue
 		}
-		anyone = true
 		s := m.streets[tsid]
-		if s != nil && s.attack != nil {
-			busy = true
+		if s != nil && (s.attack != nil || s.restUntil.After(now)) {
 			continue
 		}
-		if tsid == hb.last || (s != nil && s.restUntil.After(now)) || !m.anyFresh(tsid, now) {
+		if tsid == m.last[m.w.streets[tsid].hub] || !m.anyFresh(tsid, now) {
 			continue
 		}
 		candidates = append(candidates, tsid)
 	}
-	if busy {
-		return // the hub's attack re-arms the schedule when it clears
-	}
-	if len(candidates) > 0 {
-		tsid := candidates[min(len(candidates)-1, int(m.roll()*float64(len(candidates))))]
-		if a := m.start(tsid, true); a != nil {
-			a.rests = true
-			m.meet(m.h.StreetLocked(tsid)...)
-		}
+	if len(candidates) == 0 {
+		m.arm() // nobody settled and fresh yet: a few minutes on (or, with nobody out, the next arrival)
 		return
 	}
-	if anyone {
-		m.armHub(hub) // everyone here may be resting from a Rook (rookPlayerRest): wait the next turn
+	tsid := candidates[min(len(candidates)-1, int(m.roll()*float64(len(candidates))))]
+	if a := m.start(tsid, true); a != nil {
+		a.rests = true
+		m.next = now.Add(rookDaily)
+		m.meet(m.h.StreetLocked(tsid)...)
+		m.save()
+		log.Printf("rook: the day's attack on %s (%d there); the next may come from %s", tsid, len(m.h.StreetLocked(tsid)), m.next.UTC().Format(time.RFC3339))
 	}
-	// Nobody in the hub: the next arrival arms it again.
+	m.arm()
 }
 
-// anyFresh is whether someone on the street is not resting from a Rook (rookPlayerRest).
+// anyFresh is whether someone on the street is not resting from a Rook (rookPlayerRest) and has
+// been on it rookSettle.
 func (m *rook) anyFresh(tsid string, now time.Time) bool {
 	for _, cl := range m.h.StreetLocked(tsid) {
-		if !m.met[cl.ID()].After(now) {
+		if !m.met[cl.ID()].After(now) && !m.arrived[cl.ID()].After(now.Add(-rookSettle)) {
 			return true
 		}
 	}
@@ -671,13 +717,7 @@ func (m *rook) start(tsid string, herald bool) *rookAttack {
 	if m.dev {
 		log.Printf("rook: attack on %s (herald %v, %d there)", tsid, herald, len(m.h.StreetLocked(tsid)))
 	}
-	if hb := m.hubs[m.w.streets[tsid].hub]; hb != nil {
-		hb.last = tsid
-		if hb.timer != nil {
-			hb.timer.stop()
-			hb.timer = nil
-		}
-	}
+	m.last[m.w.streets[tsid].hub] = tsid
 	if !herald {
 		m.arrive(a, nil)
 		return a
@@ -846,7 +886,7 @@ func (m *rook) stunnedOn(a *rookAttack) {
 	})
 }
 
-// clear is stopAttack 428-451 and rookClear 280-296: the street rests, the hub's schedule goes on.
+// clear is stopAttack 428-451 and rookClear 280-296: the street rests, the world's schedule goes on.
 func (m *rook) clear(a *rookAttack) {
 	s := m.streets[a.street]
 	if s == nil || s.attack != a {
@@ -863,9 +903,7 @@ func (m *rook) clear(a *rookAttack) {
 	s.restUntil = m.h.Now().Add(rookStreetRest)
 	m.save()
 	m.broadcast(a.street, map[string]any{"type": "clear", "defeated": defeated})
-	if hub := m.w.streets[a.street].hub; m.hubs[hub] != nil {
-		m.armHub(hub)
-	}
+	m.arm()
 	m.tidy(a.street)
 }
 
@@ -1397,11 +1435,11 @@ func (m *rook) handleSync(cl *Client, frame json.RawMessage) {
 
 func (m *rook) joined(cl *Client) {
 	tsid := cl.Street()
-	spot, rookable := m.w.streets[tsid]
-	if !rookable {
+	if _, rookable := m.w.streets[tsid]; !rookable {
 		return
 	}
-	m.armHub(spot.hub)
+	m.arrived[cl.ID()] = m.h.Now() // rookSettle
+	m.arm()
 	if s := m.streets[tsid]; s != nil && s.attack != nil {
 		if s.attack.rests {
 			m.meet(cl) // arriving while the Rook is out is meeting it (header)

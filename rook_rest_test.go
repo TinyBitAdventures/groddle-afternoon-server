@@ -10,6 +10,8 @@ import (
 )
 
 // A player who has met a Rook rests rookPlayerRest, in any hub (rook.go header, Austin 2026-10-31).
+// Under the daily clock (Austin 2026-11-04) the rest matters only when the clock is moved by hand,
+// so these tests move it (rookRig.due).
 
 // rookTestHub is the test street's hub and its other streets, sorted.
 func rookTestHub(r *rookRig) (string, []string) {
@@ -55,10 +57,11 @@ func rookAttacks(r *rookRig) []string {
 
 func TestRookLonePlayerRestsSixHoursAfterMeetingOne(t *testing.T) {
 	r := newRookRig(t, false)
+	r.due()
 	a := r.player(1, "Ada")
-	r.advance(rookScheduleMin)
+	r.advance(r.delay())
 	if got := rookAttacks(r); len(got) != 1 || got[0] != rookTestStreet {
-		t.Fatalf("Ada alone meets the hour's Rook: %v", got)
+		t.Fatalf("Ada alone meets the day's Rook: %v", got)
 	}
 	met := r.now
 	if until := r.mod.met[1]; !until.Equal(met.Add(rookPlayerRest)) {
@@ -74,18 +77,20 @@ func TestRookLonePlayerRestsSixHoursAfterMeetingOne(t *testing.T) {
 	streets := []string{here[0], there[0], here[1], there[1], rookTestStreet, there[2], here[2]}
 	for i := 0; r.now.Before(met.Add(rookPlayerRest - 30*time.Minute)); i++ {
 		r.walk(a, streets[i%len(streets)])
+		r.due() // as if the day were up every half hour
 		r.advance(30 * time.Minute)
 		if got := rookAttacks(r); len(got) != 0 {
 			t.Fatalf("%v after meeting a Rook, Ada on %s met another: %v", r.now.Sub(met), a.Street(), got)
 		}
 	}
 	r.walk(a, here[3])
+	r.due()
 	r.advance(met.Add(rookPlayerRest - time.Second).Sub(r.now))
 	if got := rookAttacks(r); len(got) != 0 {
 		t.Fatalf("still resting a second before six hours: %v", got)
 	}
-	// Rested, the hub's next turn finds her again.
-	r.advance(rookScheduleMax + time.Second)
+	// Rested, the world's next try finds her again.
+	r.advance(rookDelayMax + time.Second)
 	if got := rookAttacks(r); len(got) != 1 || got[0] != here[3] {
 		t.Fatalf("after six hours the Rook comes to Ada's street %s: %v", here[3], got)
 	}
@@ -93,7 +98,7 @@ func TestRookLonePlayerRestsSixHoursAfterMeetingOne(t *testing.T) {
 
 func TestRookFreshPlayerIsPickedWhileAnotherRests(t *testing.T) {
 	r := newRookRig(t, false)
-	hub, others := rookTestHub(r)
+	_, others := rookTestHub(r)
 	rested, fresh := others[0], others[len(others)-1]
 	a := r.player(1, "Ada")
 	b := r.player(2, "Bo")
@@ -101,9 +106,11 @@ func TestRookFreshPlayerIsPickedWhileAnotherRests(t *testing.T) {
 	r.walk(b, fresh)
 	r.mod.met[1] = r.now.Add(rookPlayerRest)
 	r.roll = 0 // the first candidate: Ada's street, were it one
-	r.mod.hubs[hub].timer.stop()
-	r.mod.hubs[hub].timer = nil
-	r.mod.hubFires(hub)
+	r.advance(rookSettle)
+	r.mod.timer.stop()
+	r.mod.timer = nil
+	r.mod.next = r.now
+	r.mod.fire()
 	if got := rookAttacks(r); len(got) != 1 || got[0] != fresh {
 		t.Fatalf("Bo's street %s, not resting Ada's, gets the Rook: %v", fresh, got)
 	}
@@ -112,28 +119,29 @@ func TestRookFreshPlayerIsPickedWhileAnotherRests(t *testing.T) {
 	}
 }
 
-func TestRookAllRestingHubWaitsItsTurn(t *testing.T) {
+func TestRookAllRestingWorldWaitsItsNextTry(t *testing.T) {
 	r := newRookRig(t, false)
-	hub, _ := rookTestHub(r)
+	r.due()
 	r.player(1, "Ada")
 	r.player(2, "Bo")
 	r.mod.met[1] = r.now.Add(rookPlayerRest)
 	r.mod.met[2] = r.now.Add(rookPlayerRest)
-	r.advance(rookScheduleMin)
+	r.advance(rookDelayMax)
 	if got := rookAttacks(r); len(got) != 0 {
 		t.Fatalf("a street of resting players is not picked: %v", got)
 	}
-	if r.mod.hubs[hub].timer == nil {
-		t.Fatal("the hub waits its next turn")
+	if r.mod.timer == nil {
+		t.Fatal("the world tries again in a few minutes")
 	}
 }
 
 func TestRookMixedStreetIsPickedAndBothMeetIt(t *testing.T) {
 	r := newRookRig(t, false)
+	r.due()
 	r.player(1, "Ada")
 	r.player(2, "Bo")
-	r.advance(rookScheduleMin - time.Second)
-	r.mod.met[1] = r.now.Add(time.Hour) // Ada is still resting when the hour comes; Bo is not
+	r.advance(r.delay() - time.Second)
+	r.mod.met[1] = r.now.Add(time.Hour) // Ada is still resting when the Rook comes; Bo is not
 	r.advance(time.Second)
 	if got := rookAttacks(r); len(got) != 1 || got[0] != rookTestStreet {
 		t.Fatalf("one fresh player is enough: %v", got)
@@ -147,8 +155,9 @@ func TestRookMixedStreetIsPickedAndBothMeetIt(t *testing.T) {
 
 func TestRookArrivingWhileItIsOutIsMeetingIt(t *testing.T) {
 	r := newRookRig(t, false)
+	r.due()
 	r.player(1, "Ada")
-	r.advance(rookScheduleMin)
+	r.advance(r.delay())
 	if got := rookAttacks(r); len(got) != 1 {
 		t.Fatalf("Ada's Rook: %v", got)
 	}
@@ -189,10 +198,11 @@ func TestRookPlayerRestSurvivesARestart(t *testing.T) {
 	if !r2.mod.met[1].Equal(until) || !r2.mod.met[9].Equal(r.now.Add(time.Hour)) {
 		t.Fatalf("after a restart: %v", r2.mod.met)
 	}
-	// Reconnected, Ada is still resting: alone in the hub, the hour brings no Rook.
+	// Reconnected, Ada is still resting: alone in the world, the day being up brings no Rook.
 	r2.mod.dev = false
 	r2.player(1, "Ada")
-	r2.advance(rookScheduleMin)
+	r2.due()
+	r2.advance(rookDelayMax)
 	if got := rookAttacks(r2); len(got) != 0 {
 		t.Fatalf("Ada rests across the restart: %v", got)
 	}

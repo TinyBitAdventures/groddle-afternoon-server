@@ -60,6 +60,22 @@ func (r *rookRig) advance(d time.Duration) {
 
 func (r *rookRig) shrine() rookSpot { return r.mod.w.streets[rookTestStreet] }
 
+// delay is the world's wait at the rig's roll once the day is up (rookDelayMin-Max).
+func (r *rookRig) delay() time.Duration {
+	return rookDelayMin + time.Duration(r.roll*float64(rookDelayMax-rookDelayMin))
+}
+
+// due moves the world's daily clock to now, as if a day had passed since the last scheduled
+// attack, and re-arms the schedule.
+func (r *rookRig) due() {
+	r.mod.next = r.now
+	if r.mod.timer != nil {
+		r.mod.timer.stop()
+		r.mod.timer = nil
+	}
+	r.mod.arm()
+}
+
 // player joins the test street standing at the shrine.
 func (r *rookRig) player(id int64, name string) *Client {
 	cl := r.hub.Connect(Claims{Sub: id, Name: name})
@@ -174,12 +190,13 @@ func TestRookDevNeedsTheFlag(t *testing.T) {
 
 func TestRookScheduleHeraldAndArrival(t *testing.T) {
 	r := newRookRig(t, false)
+	r.due()
 	a := r.player(1, "Ada")
 	b := r.player(2, "Bo")
 	r.drain(a)
-	r.advance(rookScheduleMin - time.Second)
+	r.advance(r.delay() - time.Second)
 	if got := rookEvs(r.drain(a)); len(got) != 0 {
-		t.Fatalf("nothing before the hour: %v", got)
+		t.Fatalf("nothing before the few minutes are up: %v", got)
 	}
 	r.advance(time.Second)
 	fa, fb := r.drain(a), r.drain(b)
@@ -555,14 +572,14 @@ func TestRookHubSkipsTheLastAndRestingStreets(t *testing.T) {
 	r.send(a, map[string]any{"t": "rook_strike", "item": "emblem_" + r.shrine().giant, "count": 1})
 	r.advance(rookClearAfter)
 	r.drain(a)
-	// The hub fires an hour later with only the last, resting street occupied: nothing starts.
-	r.advance(rookScheduleMin)
+	// The day is up with only the last, resting street occupied: nothing starts.
+	r.due()
+	r.advance(rookDelayMax)
 	if s := r.mod.streets[rookTestStreet]; s != nil && s.attack != nil {
 		t.Fatal("the last location is never picked again")
 	}
-	hub := r.mod.w.streets[rookTestStreet].hub
-	if r.mod.hubs[hub].timer == nil {
-		t.Fatal("the hub waits for its next turn while someone is there")
+	if r.mod.timer == nil {
+		t.Fatal("the world tries again while someone is out")
 	}
 	// A dev start still works on a resting street (main.js /rook_attack has no such check).
 	r.send(a, map[string]any{"t": "rook_dev", "do": "start"})
@@ -603,9 +620,9 @@ func TestRookLeavingFoldsYourOrbAndPrime(t *testing.T) {
 	}
 }
 
-// An arrival while the hub's Rook is out does not start the next hour early: the hub's next
-// turn is an hour after the Rook leaves (rook_attack.js stopAttack 428-451 -> setAttackTimer).
-func TestRookNextHourCountsFromTheClear(t *testing.T) {
+// Austin 2026-11-04: a day from one scheduled attack's start to the next one's, however soon it
+// clears and whoever fresh walks in meanwhile.
+func TestRookNextScheduledAttackIsADayAfterTheLastStart(t *testing.T) {
 	r := newRookRig(t, false)
 	hub := r.mod.w.streets[rookTestStreet].hub
 	var other string
@@ -615,33 +632,37 @@ func TestRookNextHourCountsFromTheClear(t *testing.T) {
 			break
 		}
 	}
+	r.due()
 	a := r.player(1, "Ada")
-	r.advance(rookScheduleMin)
+	r.advance(r.delay())
 	if s := r.mod.streets[rookTestStreet]; s == nil || s.attack == nil {
-		t.Fatal("the hour brings the Rook to the street Ada is on")
+		t.Fatal("the day's Rook comes to the street Ada is on")
 	}
-	// Ada walks on; the Rook stays on its street (newLocation's epicentre) and flies off unfought.
-	// Bo, who has not met a Rook (Ada rests from hers, rookPlayerRest), joins her there.
-	r.send(a, map[string]any{"t": "join", "street": other, "x": 100.0, "y": 100.0})
-	r.drain(a)
+	started := r.now
+	if !r.mod.next.Equal(started.Add(rookDaily)) {
+		t.Fatalf("the next may come a day from the start: %v", r.mod.next.Sub(started))
+	}
+	// Ada walks on; the Rook stays on its street and flies off unfought. Bo, who has not met a
+	// Rook, joins her there.
+	r.walk(a, other)
 	b := r.hub.Connect(Claims{Sub: 2, Name: "Bo"})
-	r.send(b, map[string]any{"t": "join", "street": other, "x": 100.0, "y": 100.0})
-	r.drain(b)
-	if r.mod.hubs[hub].timer != nil {
-		t.Fatal("an arrival while the Rook is out arms nothing")
-	}
+	r.walk(b, other)
 	r.advance(rookHerald + rookMaxWingBeats*rookWingBeat + rookDepartClear)
-	cleared := r.now
 	if s := r.mod.streets[rookTestStreet]; s != nil && s.attack != nil {
 		t.Fatal("the Rook left after three wing beats")
 	}
-	r.advance(rookScheduleMin - time.Second)
-	if s := r.mod.streets[other]; s != nil && s.attack != nil {
-		t.Fatalf("no new Rook within the hour after the last one left (%v)", r.now.Sub(cleared))
+	r.advance(started.Add(rookDaily - time.Second).Sub(r.now))
+	if got := rookAttacks(r); len(got) != 0 {
+		t.Fatalf("no new Rook within the day after the last one started: %v", got)
 	}
+	// The day is up: a few minutes later, not at once, the Rook comes to Ada and Bo's street.
 	r.advance(time.Second)
-	if s := r.mod.streets[other]; s == nil || s.attack == nil {
-		t.Fatal("an hour after the clear, the Rook comes to Ada and Bo's street")
+	if got := rookAttacks(r); len(got) != 0 {
+		t.Fatalf("not the moment the day is up: %v", got)
+	}
+	r.advance(r.delay())
+	if got := rookAttacks(r); len(got) != 1 || got[0] != other {
+		t.Fatalf("a day and a few minutes after the start, Ada and Bo's street: %v", got)
 	}
 }
 

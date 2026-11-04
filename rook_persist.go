@@ -2,21 +2,26 @@ package main
 
 // The Rook's lasting marks (rook.go): what it rooked stays rooked until it is
 // revived, with the doses given so far, a street it attacked rests its hour,
-// and a player who met it rests their 6 hours (rookPlayerRest), across a
-// restart of this server. -rook-file (default realtime-rook.json beside
-// -secret-file; off: memory only) is the whole state, written through
-// writeFileSynced when something is rooked, a dose is given, a player meets a
-// Rook, an attack ends and the server stops. Rests that are over are dropped on
-// load and save. A fight under way is not kept: a restart ends it (the offering
-// was the initiator's, spent on their client), as it ends every session.
+// a player who met it rests their 6 hours (rookPlayerRest), and the next
+// scheduled attack waits for its time ("next", a day after the last one
+// started: Austin 2026-11-04), across a restart of this server. -rook-file
+// (default realtime-rook.json beside -secret-file; off: memory only) is the
+// whole state, written through writeFileSynced when something is rooked, a dose
+// is given, a player meets a Rook, a scheduled attack starts, an attack ends and
+// the server stops. Rests that are over are dropped on load and save. A file
+// without "next" (written before the daily rule) loads as before, and the day
+// counts from that first load (rook.go newRook), which writes it at once. A
+// fight under way is not kept: a restart ends it (the offering was the
+// initiator's, spent on their client), as it ends every session.
 
 import (
 	"encoding/json"
 	"flag"
 	"log"
+	"time"
 )
 
-var rookFileFlag = flag.String("rook-file", "", "file that keeps what the Rook rooked until it is revived, the streets resting after an attack and the players resting after meeting a Rook (default: realtime-rook.json beside -secret-file; off: memory only)")
+var rookFileFlag = flag.String("rook-file", "", "file that keeps what the Rook rooked until it is revived, the streets resting after an attack, the players resting after meeting a Rook and when the next scheduled attack may come (default: realtime-rook.json beside -secret-file; off: memory only)")
 
 // rookFileForTest lets a test give the module a state file; under go test the flag is ignored.
 var rookFileForTest string
@@ -35,7 +40,8 @@ type rookedRec struct {
 type rookFile struct {
 	V       int                 `json:"v"`
 	Streets map[string]*rookRec `json:"streets"`
-	Met     map[int64]int64     `json:"met,omitempty"` // player (user id) -> Unix ms they rest from the Rook until
+	Met     map[int64]int64     `json:"met,omitempty"`  // player (user id) -> Unix ms they rest from the Rook until
+	Next    int64               `json:"next,omitempty"` // Unix ms the next scheduled attack may start from (rookDaily)
 }
 
 func (m *rook) load() error {
@@ -45,6 +51,7 @@ func (m *rook) load() error {
 		return err
 	}
 	now := m.h.Now()
+	m.next = timeOf(f.Next) // zero when the file has none: newRook counts the day from now
 	for id, ms := range f.Met {
 		if until := timeOf(ms); id > 0 && until.After(now) {
 			m.met[id] = until
@@ -73,7 +80,7 @@ func (m *rook) load() error {
 			n++
 		}
 	}
-	log.Printf("rook %s: %d rooked things on %d streets, %d players resting", m.path, n, len(m.streets), len(m.met))
+	log.Printf("rook %s: %d rooked things on %d streets, %d players resting, next scheduled attack from %s", m.path, n, len(m.streets), len(m.met), rookNextText(m.next))
 	return nil
 }
 
@@ -88,7 +95,7 @@ func (m *rook) save() bool {
 	if m.path == "" {
 		return true
 	}
-	f := rookFile{V: 1, Streets: map[string]*rookRec{}}
+	f := rookFile{V: 1, Streets: map[string]*rookRec{}, Next: msOf(m.next)}
 	for id, until := range m.met {
 		if f.Met == nil {
 			f.Met = map[int64]int64{}
@@ -123,4 +130,11 @@ func (m *rook) save() bool {
 		return false
 	}
 	return true
+}
+
+func rookNextText(t time.Time) string {
+	if t.IsZero() {
+		return "a day after this load (none kept)"
+	}
+	return t.UTC().Format(time.RFC3339)
 }
