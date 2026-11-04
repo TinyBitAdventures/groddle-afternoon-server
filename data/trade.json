@@ -255,7 +255,7 @@
 "fertilidust":{"max":1,"name":"Fertilidust","plural":"Fertilidust"},
 "fertilidust_lite":{"max":1,"name":"Fertilidust Lite","plural":"Fertilidust Lite"},
 "fiber":{"max":999,"name":"Fiber","plural":"Fibers"},
-"firefly_jar":{"max":1,"name":"Firefly Jar","plural":"Firefly Jars"},
+"firefly_jar":{"max":1,"name":"Firefly Jar","plural":"Firefly Jars","pts":7},
 "flaming_humbaba":{"max":24,"name":"Flaming Humbaba","plural":"Flaming Humbabas"},
 "flour":{"max":80,"name":"Flour","plural":"Flour","food":true,"sates":true,"cost":7},
 "flummery":{"max":12,"name":"Flummery","plural":"Flummerys","food":true,"sates":true,"cost":229},
