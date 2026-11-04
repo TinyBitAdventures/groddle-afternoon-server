@@ -324,8 +324,12 @@ func TestThreadsFromTheWebsite(t *testing.T) {
 		t.Fatalf("%v", m)
 	}
 	reply := int64(out.(map[string]any)["line"].(map[string]any)["lid"].(int64))
-	code, _ = webSayService(r.hub, []byte(`{"player":9,"name":"Bo","channel":"global","rooms":"global,newbie","text":"nested","parent":`+i64s(reply)+`}`))
-	if code != http.StatusBadRequest {
+	code, _ = webSayService(r.hub, []byte(`{"player":9,"name":"Bo","channel":"global","rooms":"global,newbie","text":"nested","parent":`+i64s(reply)+`,"kept":true}`))
+	if code != http.StatusNotFound {
+		t.Fatalf("a reply to a reply: %d", code)
+	}
+	code, _ = webSayService(r.hub, []byte(`{"player":9,"name":"Bo","channel":"global","rooms":"global,newbie","text":"made up","parent":99}`))
+	if code != http.StatusNotFound {
 		t.Fatalf("a reply to a reply: %d", code)
 	}
 }

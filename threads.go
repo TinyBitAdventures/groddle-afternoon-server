@@ -195,10 +195,11 @@ func (m *threads) say(cl *Client, frame json.RawMessage) {
 	m.h.logChatLocked("channel", room, cl, text, "", nil)
 }
 
-// webReply is webchat.go's: a reply written on the website (the site checked the parent is a line of
-// that channel). The line comes back with its lid.
-func (m *threads) webReply(ch, room string, parent int64, line chanLine) chanLine {
-	if m.replyOf[parent] != 0 {
+// webReply is webchat.go's: a reply written on the website, under a line the server has for that
+// channel or one the site keeps for it (kept: the site found it in its history, so an old line takes
+// replies too). The line comes back with its lid; a zero line when it may not go.
+func (m *threads) webReply(ch, room string, parent int64, kept bool, line chanLine) chanLine {
+	if m.replyOf[parent] != 0 || (!kept && !m.known(room, parent)) {
 		return chanLine{}
 	}
 	return m.add(ch, room, parent, line)

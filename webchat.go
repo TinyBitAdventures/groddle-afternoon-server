@@ -10,8 +10,8 @@ package main
 //	        200 {"status":"sent","line":{"lid":…,"id":7,"name":"Ada","text":"hi","at":…,"web":true}}
 //	        403 {"status":"banned"} | {"status":"closed"} (not a channel this player may use) | {"status":"silenced","message":"…"}
 //	        429 {"status":"slow_down"}   400 {"status":"bad"}
-//	web_say {…,"parent":1730000000123}   a reply in that line's thread (threads.go), the same rules; the site
-//	        checked the parent is a line of that channel (its kept history), so an old line takes replies too
+//	web_say {…,"parent":1730000000123,"kept":true}   a reply in that line's thread (threads.go), the same rules;
+//	        the parent is a line the server has for the channel, or one the site keeps ("kept"); 404 {"status":"no_line"}
 //
 // channel: global, help or trade (the game's words; help is the newbie room
 // under level 11). Group chats are not offered on the web. rooms and silence
@@ -47,6 +47,7 @@ type webSayCall struct {
 	Silence string `json:"silence"`
 	Text    string `json:"text"`
 	Parent  int64  `json:"parent"`
+	Kept    bool   `json:"kept"` // the site has the parent in its history
 }
 
 func webSayService(h *Hub, body []byte) (int, any) {
@@ -96,12 +97,12 @@ func webSayService(h *Hub, body []byte) (int, any) {
 	}
 	line := chanLine{ID: c.Player, Name: name, Text: filterWords(text), At: h.Now().UnixMilli(), Web: true}
 	if c.Parent > 0 {
-		reply, ok := h.provided["threads.web"].(func(string, string, int64, chanLine) chanLine)
+		reply, ok := h.provided["threads.web"].(func(string, string, int64, bool, chanLine) chanLine)
 		if !ok {
 			return http.StatusServiceUnavailable, map[string]string{"status": "bad"}
 		}
-		if line = reply(c.Channel, room, c.Parent, line); line.ID == 0 {
-			return http.StatusBadRequest, map[string]string{"status": "bad"} // a reply's reply
+		if line = reply(c.Channel, room, c.Parent, c.Kept, line); line.ID == 0 {
+			return http.StatusNotFound, map[string]string{"status": "no_line"} // a reply's reply, or no such line
 		}
 		h.logChatAsLocked("channel", room, c.Player, name, text, "", nil)
 		return http.StatusOK, map[string]any{"status": "sent", "line": map[string]any{"lid": line.Lid, "id": line.ID, "name": line.Name, "text": line.Text, "at": line.At, "web": true, "parent": c.Parent}}
