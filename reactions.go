@@ -54,12 +54,13 @@ import (
 )
 
 const (
-	reactBurst    = 8
-	reactEvery    = 500 * time.Millisecond
-	reactKeep     = 50 // lines a street, party or channel keeps reactable (chanHistory)
-	reactKeepFor  = 6 * time.Hour
-	reactLinesMax = 20000
-	reactPruneGap = time.Minute
+	reactBurst      = 8
+	reactEvery      = 500 * time.Millisecond
+	reactKeep       = 50  // lines a street, party or channel keeps reactable (chanHistory)
+	reactKeepThread = 500 // thread replies a channel keeps reactable (threads.go)
+	reactKeepFor    = 6 * time.Hour
+	reactLinesMax   = 20000
+	reactPruneGap   = time.Minute
 )
 
 // reactionKeys are the reactions the game offers, in the order they show. The
@@ -192,6 +193,7 @@ func (m *reacts) Register(r *Registry) {
 	// The chat modules give each line its id (chatLineIDLocked), and a channel's history its reactions.
 	r.Provide("reactions.line", m.line)
 	r.Provide("reactions.of", m.of)
+	r.Provide("reactions.self", m) // threads.go: whether a lid is a line of a channel
 }
 
 // chatLineIDLocked is the id a new chat line carries (0 when the server has no reactions module):
@@ -214,7 +216,7 @@ func (h *Hub) lineReactionsLocked(lid, viewer int64) []reaction {
 func (m *reacts) line(kind, where string, author int64, seen []int64) int64 {
 	m.seq++
 	l := &reactLine{kind: kind, where: where, author: author, at: m.h.Now()}
-	if kind != "channel" {
+	if kind != "channel" && kind != "thread" {
 		l.seen = make(map[int64]bool, len(seen)+1)
 		l.seen[author] = true
 		for _, id := range seen {
@@ -224,7 +226,11 @@ func (m *reacts) line(kind, where string, author int64, seen []int64) int64 {
 	m.lines[m.seq] = l
 	key := kind + ":" + where
 	ids := append(m.places[key], m.seq)
-	for len(ids) > reactKeep {
+	keep := reactKeep
+	if kind == "thread" {
+		keep = reactKeepThread // a channel's thread replies, all its threads together (threads.go)
+	}
+	for len(ids) > keep {
 		delete(m.lines, ids[0])
 		ids = ids[1:]
 	}
@@ -325,7 +331,7 @@ func (m *reacts) react(cl *Client, frame json.RawMessage) {
 	}
 	var to []int64
 	switch l.kind {
-	case "channel":
+	case "channel", "thread":
 		fn, ok := m.h.ProvidedLocked("channels.audience").(func(string, int64) ([]int64, string))
 		if !ok {
 			m.refuse(cl, "That chat is not open to you.")
@@ -357,7 +363,7 @@ func (m *reacts) react(cl *Client, frame json.RawMessage) {
 		return
 	}
 	l.r = next
-	if l.kind == "channel" {
+	if l.kind == "channel" || l.kind == "thread" {
 		// chatstore.go: a channel or group line's reactions are kept on the site with it.
 		m.h.storeChatLocked(chatEntry{K: "react", Lid: msg.Line, R: storeReactions(l.r)})
 	}
@@ -378,5 +384,14 @@ func (m *reacts) tell(lid int64, l *reactLine, to []int64) {
 			continue
 		}
 		m.h.SendLocked(cl, map[string]any{"t": "reacted", "line": lid, "r": l.r.shownTo(who, ign)})
+	}
+	if l.kind == "channel" || l.kind == "thread" {
+		// web.go: the website's readers of the channel, each as they may see it.
+		for _, cl := range m.h.webViewersLocked() {
+			if !cl.ww.readsRoom(l.where) || (cl.ID() != l.author && ign != nil && ign(cl.ID(), l.author)) {
+				continue
+			}
+			m.h.SendLocked(cl, map[string]any{"t": "reacted", "line": lid, "r": l.r.shownTo(cl.ID(), ign)})
+		}
 	}
 }

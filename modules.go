@@ -52,6 +52,10 @@ func (r *Registry) OnDisconnect(fn func(cl *Client)) {
 	r.h.onDisconnect = append(r.h.onDisconnect, fn)
 }
 
+// OnWeb runs when a website socket (web.go) connects ("connect"), sends its lists ("watch") or goes
+// ("disconnect"). Web sockets never run the game's hooks (OnConnect, OnDisconnect, …).
+func (r *Registry) OnWeb(fn func(cl *Client, event string)) { r.h.onWeb = append(r.h.onWeb, fn) }
+
 // OnChat runs after a character's street chat line is said (main.js 1766-1793 checks Charades after
 // pc_local_chat), under the hub lock, with the cleaned text.
 func (r *Registry) OnChat(fn func(cl *Client, text string)) { r.h.onChat = append(r.h.onChat, fn) }

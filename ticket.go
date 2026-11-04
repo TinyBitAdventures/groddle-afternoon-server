@@ -17,6 +17,11 @@ type Claims struct {
 	Iat  int64  `json:"iat"`
 	Exp  int64  `json:"exp"`
 	Jti  string `json:"jti"`
+	// Via is "web" for the website's /chat/ page (web.go): a light socket with no avatar and no street,
+	// beside the character's game socket, never replacing it. "" is the game.
+	Via string `json:"via,omitempty"`
+	// Off is the account's "Appear offline" setting when the ticket was made (presence.go).
+	Off bool `json:"off,omitempty"`
 }
 
 var (

@@ -27,6 +27,8 @@ package main
 // Client to server:
 //
 //	{"t":"im_send","to":9,"text":"hi"}   an IM to player 9 (the sender is this socket's character, never a field)
+//	{"t":"im_send","to":9,"text":"hi","parent":12}   a reply in line 12's thread (threads.go): kept and sent as
+//	                                     every line, with "parent"; the conversation's main lines leave it out
 //	{"t":"im_sync"}                      the conversations kept for you (sent once your buddy list is in)
 //	{"t":"im_read","with":9}             you have read the conversation with 9
 //	{"t":"im_close","with":9}            you closed it: it leaves your list until the next line in it
@@ -34,7 +36,7 @@ package main
 //
 // Server to client:
 //
-//	{"t":"im","with":{"id":9,"name":"Bo","online":true},"line":{"id":12,"from":7,"text":"hi","at":1730000000000,"r":[…]},"unread":1}
+//	{"t":"im","with":{"id":9,"name":"Bo","online":true},"line":{"id":12,"from":7,"text":"hi","at":1730000000000,"r":[…],"parent":3},"unread":1}
 //	        a line in the conversation with 9: to the recipient, and back to the sender (from is the sender;
 //	        online false on the sender's copy: Bo gets it when they are back)
 //	{"t":"im_state","convs":[{"with":{"id":9,"name":"Bo","online":false},"lines":[line…],"unread":2}]}
@@ -126,6 +128,8 @@ type imLine struct {
 	Text string    `json:"text"`
 	At   int64     `json:"at"`          // Unix ms
 	R    reactions `json:"r,omitempty"` // reactions.go: the two players' reactions on it
+	// Parent is the line whose thread this replies in (threads.go), 0 for a line of the conversation.
+	Parent int64 `json:"parent,omitempty"`
 }
 
 // imConv is the conversation between A and B (A < B); index 0 is A's side, 1 is B's.
@@ -338,7 +342,7 @@ func (m *ims) ready(id int64) *Client {
 // vouched is whether the server knows to IM id is to IM a real player: online, on from's signed
 // buddy list either way, or in a conversation with from already.
 func (m *ims) vouched(from, to int64) bool {
-	if m.h.ClientLocked(to) != nil || m.convs[pairOf(from, to)] != nil {
+	if (m.h.ClientLocked(to) != nil && !m.h.OffLocked(to)) || m.convs[pairOf(from, to)] != nil {
 		return true
 	}
 	fn, ok := m.h.ProvidedLocked("buddies.holds").(func(int64, int64) bool)
@@ -346,13 +350,17 @@ func (m *ims) vouched(from, to int64) bool {
 }
 
 func (m *ims) who(c *imConv, id int64) map[string]any {
-	return map[string]any{"id": id, "name": c.Names[c.side(id)], "online": m.h.ClientLocked(id) != nil}
+	// presence.go: someone with "Appear offline" on shows offline here too.
+	return map[string]any{"id": id, "name": c.Names[c.side(id)], "online": m.h.ClientLocked(id) != nil && !m.h.OffLocked(id)}
 }
 
 func lineMsg(l imLine) map[string]any {
 	msg := map[string]any{"id": l.ID, "from": l.From, "text": l.Text, "at": l.At}
 	if len(l.R) > 0 {
 		msg["r"] = l.R
+	}
+	if l.Parent > 0 {
+		msg["parent"] = l.Parent
 	}
 	return msg
 }
@@ -364,10 +372,11 @@ func (m *ims) no(cl *Client, with int64, reason, message string) {
 
 func (m *ims) send(cl *Client, frame json.RawMessage) {
 	var msg struct {
-		To   int64  `json:"to"`
-		Text string `json:"text"`
+		To     int64  `json:"to"`
+		Text   string `json:"text"`
+		Parent int64  `json:"parent"`
 	}
-	if json.Unmarshal(frame, &msg) != nil {
+	if json.Unmarshal(frame, &msg) != nil || msg.Parent < 0 {
 		return
 	}
 	from := cl.ID()
@@ -399,6 +408,11 @@ func (m *ims) send(cl *Client, frame json.RawMessage) {
 	}
 	k := pairOf(from, msg.To)
 	c := m.convs[k]
+	if msg.Parent > 0 && !c.threadable(msg.Parent) {
+		// threads.go: a reply goes under a line of this conversation, never under another reply.
+		m.no(cl, msg.To, "thread", "That line can't take a reply now.")
+		return
+	}
 	if c == nil {
 		if !m.allow("im_new", cl, imNewBurst, imNewEvery) {
 			m.no(cl, msg.To, "slow_down", "Slow down a little.")
@@ -426,7 +440,7 @@ func (m *ims) send(cl *Client, frame json.RawMessage) {
 	}
 	now := m.h.Now().UnixMilli()
 	c.Seq++
-	l := imLine{ID: c.Seq, From: from, Text: filterWords(text), At: now}
+	l := imLine{ID: c.Seq, From: from, Text: filterWords(text), At: now, Parent: msg.Parent}
 	c.Lines = append(c.Lines, l)
 	if len(c.Lines) > imKeep {
 		c.Lines = append([]imLine(nil), c.Lines[len(c.Lines)-imKeep:]...)
@@ -440,6 +454,20 @@ func (m *ims) send(cl *Client, frame json.RawMessage) {
 	if to := m.ready(msg.To); to != nil && m.sent[msg.To] == to {
 		m.h.SendLocked(to, map[string]any{"t": "im", "with": m.who(c, from), "line": lineMsg(l), "unread": c.unread(msg.To)})
 	}
+}
+
+// threadable is whether line id of c can take a thread reply: a line the conversation has had, not
+// itself a reply (a line kept no longer is taken as one of the conversation's: the site keeps them all).
+func (c *imConv) threadable(id int64) bool {
+	if c == nil || id <= 0 || id > c.Seq {
+		return false
+	}
+	for _, l := range c.Lines {
+		if l.ID == id {
+			return l.Parent == 0
+		}
+	}
+	return true
 }
 
 // state is the conversations for cl, newest first: not closed, not with a player either blocks.

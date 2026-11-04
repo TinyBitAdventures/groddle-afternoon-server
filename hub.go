@@ -102,6 +102,11 @@ type Client struct {
 	chatTokens float64
 	chatAt     time.Time
 	typingAt   time.Time
+
+	// web.go: a socket from the website's /chat/ (Claims.Via "web"), never in clients or on a street.
+	web     bool
+	ww      *webWatch
+	webRate bucket
 }
 
 // Hub holds every connected character and the street each stands on.
@@ -123,16 +128,27 @@ type Hub struct {
 	joinGates    []func(cl *Client, street string) (ok bool, code, message string)
 	afterFunc    func(d time.Duration, fn func()) func() bool
 	provided     map[string]any // hooks one module offers another (Registry.Provide)
+
+	// web.go: the website's sockets by character (any number of tabs), and presence.go's inputs:
+	// the account's "Appear offline" (from its last ticket or the site's presence_hide call) and when
+	// each character last did something on any of its sockets.
+	webs    map[int64]map[*Client]bool
+	onWeb   []func(cl *Client, event string)
+	off     map[int64]bool
+	inputAt map[int64]time.Time
 }
 
 func NewHub(now func() time.Time) *Hub {
 	if now == nil {
 		now = time.Now
 	}
-	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{}}
+	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{},
+		webs: map[int64]map[*Client]bool{}, off: map[int64]bool{}, inputAt: map[int64]time.Time{}}
 	for _, m := range modules {
 		m(h).Register(&Registry{h: h})
 	}
+	// After every module's own hook: a character with no socket left has no presence (web.go).
+	h.onDisconnect = append(h.onDisconnect, func(cl *Client) { h.forgetIdleLocked(cl.id) })
 	return h
 }
 
@@ -163,7 +179,9 @@ func (h *Hub) Connect(c Claims) *Client {
 		h.closeLocked(old, closeReplaced)
 	}
 	h.clients[c.Sub] = cl
-	h.queueLocked(cl, map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}})
+	h.off[c.Sub] = c.Off
+	h.inputAt[c.Sub] = h.now()
+	h.queueLocked(cl, map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "off": c.Off})
 	for _, fn := range h.onConnect {
 		fn(cl)
 	}
@@ -205,6 +223,13 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 	defer h.mu.Unlock()
 	if cl.closed {
 		return
+	}
+	if cl.web {
+		h.handleWebLocked(cl, m.T, frame) // web.go: the website's few kinds
+		return
+	}
+	if inputKinds[m.T] {
+		h.touchLocked(cl.id) // presence.go: not idle
 	}
 	switch m.T {
 	case "join":
@@ -359,6 +384,10 @@ func (h *Hub) pushLocked(cl *Client, b []byte) {
 	case cl.send <- b:
 	default:
 		h.closeLocked(cl, closeSlow)
+		if cl.web {
+			h.dropWebLocked(cl)
+			return
+		}
 		h.leaveLocked(cl)
 		if h.clients[cl.id] == cl {
 			delete(h.clients, cl.id)

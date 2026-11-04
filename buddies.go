@@ -130,6 +130,9 @@ func (m *buddies) Register(r *Registry) {
 	// For im.go: whose blocks are known (their signed list is in), and whom a player's list names.
 	r.Provide("buddies.watching", func(id int64) bool { return len(m.secret) == 0 || m.watch[id] != nil })
 	r.Provide("buddies.holds", m.holds)
+	r.Provide("buddies.self", m) // web.go checks a web socket's list with verify
+	// presence.go: "Appear offline" switched on or off: the buddies hear it as offline or online.
+	r.Provide("buddies.visibility", m.visibility)
 }
 
 // —— Tokens ——
@@ -210,7 +213,8 @@ func buddyIDs(s string) (map[int64]bool, bool) {
 
 func (m *buddies) ignores(ignorer, other int64) bool {
 	w := m.watch[ignorer]
-	return w != nil && w.ign[other]
+	// web.go: a player on the website alone has their blocks in their web socket's list.
+	return (w != nil && w.ign[other]) || m.h.webIgnores(ignorer, other)
 }
 
 // blocked is either one ignoring the other (inc_trading.js:125 buddies_is_ignored_by || buddies_is_ignoring).
@@ -223,8 +227,35 @@ func (m *buddies) holds(watcher, id int64) bool {
 }
 
 // tellable is whether watcher may hear about id's comings and goings now.
+// Someone with "Appear offline" on (presence.go) is never told online to anyone, buddies included.
 func (m *buddies) tellable(watcher, id int64) bool {
-	return watcher != id && m.h.ClientLocked(watcher) != nil && m.holds(watcher, id) && !m.blocked(watcher, id)
+	return watcher != id && !m.h.OffLocked(id) && m.h.ClientLocked(watcher) != nil && m.holds(watcher, id) && !m.blocked(watcher, id)
+}
+
+// visibility is presence.go's word that id's "Appear offline" changed: each watcher who holds them
+// (and no block between) hears them go offline, or come back online where they are.
+func (m *buddies) visibility(id int64) {
+	cl := m.h.ClientLocked(id)
+	street, on := m.live[id]
+	if cl == nil || !on {
+		return
+	}
+	ids := make([]int64, 0, len(m.watch))
+	for w := range m.watch {
+		ids = append(ids, w)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	off := m.h.OffLocked(id)
+	for _, w := range ids {
+		if w == id || m.h.ClientLocked(w) == nil || !m.holds(w, id) || m.blocked(w, id) {
+			continue
+		}
+		if off {
+			m.send(w, m.presence("buddy_offline", cl, ""))
+		} else {
+			m.send(w, m.presence("buddy_online", cl, street))
+		}
+	}
 }
 
 // shownStreet is where others are told a player is: "" in a private place (a race is one).
@@ -350,6 +381,10 @@ func (m *buddies) watchMsg(cl *Client, frame json.RawMessage) {
 		online = append(online, map[string]any{"id": o, "name": ocl.Name(), "street": m.live[o]})
 	}
 	m.send(id, map[string]any{"t": "buddies_status", "online": online})
+	// presence.go: blocks and buddies may have changed who sees whom.
+	if fn, ok := m.h.ProvidedLocked("presence.changed").(func()); ok {
+		fn()
+	}
 	// im.go: with the blocks known, the IMs kept for this player can go to them.
 	if fn, ok := m.h.ProvidedLocked("im.watched").(func(*Client)); ok {
 		fn(cl)

@@ -19,6 +19,7 @@ package main
 //	{"k":"line","seq":1,"room":"global","lid":1730000000123,"id":7,"name":"Ada","text":"hi","at":1730000000000,"web":true}
 //	{"k":"react","seq":2,"lid":1730000000123,"r":[{"e":"heart","by":[7,9]}]}          the line's reactions now (all of them)
 //	{"k":"im","seq":3,"a":7,"b":9,"line":12,"from":7,"text":"hi","at":1730000000000}  a and b the pair, a < b
+//	"parent": on a line or an im, the line it replies under in a thread (threads.go: a lid, an IM line id)
 //	{"k":"im_react","seq":4,"a":7,"b":9,"line":12,"at":1730000000000,"r":[…]}           the IM line's reactions now
 //
 // room: global, help, newbie, trade or group:<id> (channels.go rooms). Every
@@ -97,6 +98,9 @@ type chatEntry struct {
 	Line int64        `json:"line,omitempty"`
 	From int64        `json:"from,omitempty"`
 	R    []storeReact `json:"r,omitempty"`
+	// Parent is the line a thread reply is under (threads.go): its lid for a channel line, its line id
+	// for an IM line; 0 (left out) for a line of the channel or conversation itself.
+	Parent int64 `json:"parent,omitempty"`
 }
 
 // MarshalJSON writes a react's "r" even when it is empty (every reaction taken off).
@@ -312,7 +316,7 @@ func (m *chatStore) importOnce() {
 }
 
 func imEntry(c *imConv, l imLine) chatEntry {
-	return chatEntry{K: "im", A: c.A, B: c.B, Line: l.ID, From: l.From, Text: l.Text, At: l.At}
+	return chatEntry{K: "im", A: c.A, B: c.B, Line: l.ID, From: l.From, Text: l.Text, At: l.At, Parent: l.Parent}
 }
 
 func imReactEntry(c *imConv, l imLine) chatEntry {

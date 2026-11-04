@@ -113,6 +113,7 @@ type chanLine struct {
 	Lid  int64      `json:"lid,omitempty"` // reactions.go
 	R    []reaction `json:"r,omitempty"`   // in a history sent to one player: the reactions they may see
 	Web  bool       `json:"web,omitempty"` // said from the website's /chat/ (webchat.go)
+	Th   *threadSum `json:"th,omitempty"`  // in a history sent to one player: its thread's replies as they may see them (threads.go)
 }
 
 type chanRoom struct {
@@ -134,6 +135,8 @@ type channels struct {
 	rooms  map[string]*chanRoom
 	open   map[int64]map[string]string // player -> the chat as the game names it -> its room
 	rates  map[string]*bucket
+
+	rosterFor int64 // who a roster is being made for (names): you are in your own, hidden or not
 }
 
 func newChannels(h *Hub) Module {
@@ -350,7 +353,8 @@ func (m *channels) names(room string, skip int64) []string {
 		return out
 	}
 	for id := range r.members {
-		if id == skip {
+		// presence.go: someone with "Appear offline" on is in no roster but their own.
+		if id == skip || (m.h.OffLocked(id) && id != m.rosterFor) {
 			continue
 		}
 		if cl := m.h.ClientLocked(id); cl != nil {
@@ -534,7 +538,9 @@ func (m *channels) joinRoom(cl *Client, ch, room string) {
 	if isGroupRoom(room) {
 		// The one joining hears who is there; everyone there hears they joined.
 		m.send(id, map[string]any{"t": "channel_note", "channel": ch, "text": rosterText(m.names(room, id))})
-		m.broadcast(room, map[string]any{"t": "channel_note", "channel": ch, "text": cl.Name() + " has joined"}, id)
+		if !m.h.OffLocked(id) { // presence.go: nobody hears a hidden player come
+			m.broadcast(room, map[string]any{"t": "channel_note", "channel": ch, "text": cl.Name() + " has joined"}, id)
+		}
 	}
 	r.members[id] = true
 	if m.open[id] == nil {
@@ -548,7 +554,7 @@ func (m *channels) leaveRoom(cl *Client, ch, room string, tell bool) {
 	id := cl.ID()
 	if r := m.rooms[room]; r != nil && r.members[id] {
 		delete(r.members, id)
-		if isGroupRoom(room) {
+		if isGroupRoom(room) && !m.h.OffLocked(id) {
 			m.broadcast(room, map[string]any{"t": "channel_note", "channel": ch, "text": cl.Name() + " has left"}, id)
 		}
 	}
@@ -570,9 +576,13 @@ func (m *channels) history(room string, viewer int64) []chanLine {
 		return []chanLine{}
 	}
 	out := append([]chanLine{}, r.history...)
+	sum, _ := m.h.ProvidedLocked("threads.summary").(func(int64, int64) *threadSum)
 	for i := range out {
 		if out[i].Lid > 0 {
 			out[i].R = m.h.lineReactionsLocked(out[i].Lid, viewer)
+			if sum != nil {
+				out[i].Th = sum(out[i].Lid, viewer)
+			}
 		}
 	}
 	return out
@@ -631,6 +641,7 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 		said["lid"] = line.Lid
 	}
 	m.broadcast(room, said, 0)
+	m.h.webRoomLocked(room, said, id) // web.go: the website's /chat/ readers of this channel
 	m.h.logChatLocked("channel", room, cl, text, "", nil)
 	m.store(room, line, false) // chatstore.go: kept on the site
 }
@@ -652,7 +663,10 @@ func (m *channels) who(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, chanNotIn)
 		return
 	}
-	m.send(cl.ID(), map[string]any{"t": "channel_note", "channel": ch, "text": rosterText(m.names(room, 0))})
+	m.rosterFor = cl.ID()
+	text := rosterText(m.names(room, 0))
+	m.rosterFor = 0
+	m.send(cl.ID(), map[string]any{"t": "channel_note", "channel": ch, "text": text})
 }
 
 // —— Lifecycle ——

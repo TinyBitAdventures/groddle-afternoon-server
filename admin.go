@@ -254,6 +254,7 @@ func adminOnline(h *Hub, body []byte) (int, any) {
 		Name   string `json:"name"`
 		Street string `json:"street"`
 		Since  int64  `json:"since"`
+		Off    bool   `json:"off,omitempty"` // "Appear offline" (presence.go): the console sees them; buddy lists must not
 	}
 	players := make([]row, 0, len(h.clients))
 	for id, cl := range h.clients {
@@ -266,7 +267,7 @@ func adminOnline(h *Hub, body []byte) (int, any) {
 				since = t
 			}
 		}
-		players = append(players, row{ID: id, Name: cl.name, Street: cl.street, Since: since.Unix()})
+		players = append(players, row{ID: id, Name: cl.name, Street: cl.street, Since: since.Unix(), Off: h.off[id]})
 	}
 	sort.Slice(players, func(i, j int) bool {
 		a, b := strings.ToLower(players[i].Name), strings.ToLower(players[j].Name)
@@ -331,6 +332,7 @@ func adminBan(h *Hub, body []byte) (int, any) {
 		m.saveLocked()
 	}
 	delete(m.queued, c.Player)
+	h.closeWebLocked(c.Player, closeBanned) // web.go: the website's live chat closes too
 	if cl := h.clients[c.Player]; cl != nil && !cl.closed {
 		h.bootLocked(cl, cleanReason(c.Reason, adminMaxReason), true)
 		return http.StatusOK, statusOf("sent")

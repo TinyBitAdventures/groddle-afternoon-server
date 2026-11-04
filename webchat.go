@@ -10,6 +10,8 @@ package main
 //	        200 {"status":"sent","line":{"lid":…,"id":7,"name":"Ada","text":"hi","at":…,"web":true}}
 //	        403 {"status":"banned"} | {"status":"closed"} (not a channel this player may use) | {"status":"silenced","message":"…"}
 //	        429 {"status":"slow_down"}   400 {"status":"bad"}
+//	web_say {…,"parent":1730000000123}   a reply in that line's thread (threads.go), the same rules; the site
+//	        checked the parent is a line of that channel (its kept history), so an old line takes replies too
 //
 // channel: global, help or trade (the game's words; help is the newbie room
 // under level 11). Group chats are not offered on the web. rooms and silence
@@ -44,11 +46,12 @@ type webSayCall struct {
 	Rooms   string `json:"rooms"`
 	Silence string `json:"silence"`
 	Text    string `json:"text"`
+	Parent  int64  `json:"parent"`
 }
 
 func webSayService(h *Hub, body []byte) (int, any) {
 	var c webSayCall
-	if json.Unmarshal(body, &c) != nil || c.Player <= 0 || (c.Channel != "global" && c.Channel != "help" && c.Channel != "trade") {
+	if json.Unmarshal(body, &c) != nil || c.Player <= 0 || c.Parent < 0 || (c.Channel != "global" && c.Channel != "help" && c.Channel != "trade") {
 		return http.StatusBadRequest, map[string]string{"status": "bad"}
 	}
 	text := cleanChat(c.Text)
@@ -92,6 +95,17 @@ func webSayService(h *Hub, body []byte) (int, any) {
 		return http.StatusTooManyRequests, map[string]string{"status": "slow_down"}
 	}
 	line := chanLine{ID: c.Player, Name: name, Text: filterWords(text), At: h.Now().UnixMilli(), Web: true}
+	if c.Parent > 0 {
+		reply, ok := h.provided["threads.web"].(func(string, string, int64, chanLine) chanLine)
+		if !ok {
+			return http.StatusServiceUnavailable, map[string]string{"status": "bad"}
+		}
+		if line = reply(c.Channel, room, c.Parent, line); line.ID == 0 {
+			return http.StatusBadRequest, map[string]string{"status": "bad"} // a reply's reply
+		}
+		h.logChatAsLocked("channel", room, c.Player, name, text, "", nil)
+		return http.StatusOK, map[string]any{"status": "sent", "line": map[string]any{"lid": line.Lid, "id": line.ID, "name": line.Name, "text": line.Text, "at": line.At, "web": true, "parent": c.Parent}}
+	}
 	line.Lid = h.chatLineIDLocked("channel", room, c.Player, nil)
 	r := m.rooms[room]
 	if r == nil {
@@ -108,6 +122,7 @@ func webSayService(h *Hub, body []byte) (int, any) {
 	}
 	// The game names Live Help "help" whichever room it is (channels.go roomFor).
 	m.broadcast(room, said, 0)
+	h.webRoomLocked(room, said, c.Player) // web.go: the other tabs on /chat/
 	h.logChatAsLocked("channel", room, c.Player, name, text, "", nil)
 	m.store(room, line, true)
 	return http.StatusOK, map[string]any{"status": "sent", "line": map[string]any{"lid": line.Lid, "id": line.ID, "name": line.Name, "text": line.Text, "at": line.At, "web": true}}

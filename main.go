@@ -120,7 +120,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/healthz", "/ws/healthz":
 		players, streets := s.hub.Stats()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"players": players, "streets": streets, "version": version})
+		json.NewEncoder(w).Encode(map[string]any{"players": players, "streets": streets, "web": s.hub.WebCount(), "version": version})
 	default:
 		http.NotFound(w, r)
 	}
@@ -143,8 +143,15 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 		conn.Close(closeBanned, "this account is suspended")
 		return
 	}
-	cl := s.hub.Connect(claims)
-	defer s.hub.Disconnect(cl)
+	var cl *Client
+	if claims.Via == "web" {
+		// web.go: the website's /chat/ page, beside the game (never replacing it).
+		cl = s.hub.ConnectWeb(claims)
+		defer s.hub.DisconnectWeb(cl)
+	} else {
+		cl = s.hub.Connect(claims)
+		defer s.hub.Disconnect(cl)
+	}
 
 	go s.write(ctx, conn, cl)
 	for {
