@@ -18,12 +18,14 @@ package main
 //	{"t":"project_work","job":"62","req":"r138","option":"13"}          one unit of work, done now
 //	{"t":"project_ack","id":"…"}                                         you applied a project_given / project_reward and saved
 //	{"t":"project_sync"}                                                 after a join (and on connect): the world, this street, what you are owed
+//	{"t":"project_sync","mine":true}                                     the same, and every project you have put anything into (project_mine)
 //
 // Server to client:
 //
 //	{"t":"project_world","now":ms,"built":{"62":{"at":ms,"option":""}},"rest":{"GLI…":ms}}   answering a sync: every finished project
 //	{"t":"project_built","now":ms,"job":"62","at":ms,"option":"","rest":{…}}                   a project finished (everyone)
 //	{"t":"project_street","street":"GLI…","now":ms,"jobs":{"62":Row}}                          answering a sync: the street's projects
+//	{"t":"project_mine","now":ms,"jobs":{"62":Row}}                                            answering a sync with mine: your projects, anywhere
 //	{"t":"project_state","job":"62","now":ms,"row":Row}                                        a change (everyone on the board's street)
 //	{"t":"project_given","id":"…","job":"62","req":"r133","cls":"…","phase":0,"items":{"ginger":10},"currants":0,"cost":40}
 //	{"t":"project_worked","job":"62","req":"r138","cost":15,"left":5}                         your unit counted
@@ -34,6 +36,13 @@ package main
 // Row is {"phase","got":{rid:n},"held":{rid:n},"mine":{class:cost},"started","ready","done",
 // "option","votes":{option:cost},"top":[{"id","name","cost"}],"count"}: mine is the reader's own
 // contribution per phase class, top and count the current phase's (the last one once done).
+//
+// The Projects panel (ticket 81, Austin 2026-11-04): Glitch kept the projects each player joined
+// (players/inc_jobs.js 1-16 jobs.todo and jobs.done, jobs_accept 111-121) and showed no list of
+// them; the game's panel lists them, and asks for them with "mine" on a sync. The answer holds
+// only projects the asker put something into, and each row is the one the board's street sees
+// with the asker's own share. The flag rides on project_sync so a server without it simply
+// answers the sync, and a client that never sends it is answered as before.
 //
 // Trust. The server owns each project (phases, the requirement totals, who put
 // in how much, the delay and the rest) and never takes an amount from a
@@ -1345,8 +1354,13 @@ func (m *projects) broadcast(jobID string) {
 	}
 }
 
-// sync answers project_sync: the finished projects, this street's board and every message owed.
-func (m *projects) sync(cl *Client, _ json.RawMessage) {
+// sync answers project_sync: the finished projects, this street's board and every message owed,
+// and with "mine" the asker's own projects (project_mine, mine below).
+func (m *projects) sync(cl *Client, frame json.RawMessage) {
+	var ask struct {
+		Mine bool `json:"mine"`
+	}
+	_ = json.Unmarshal(frame, &ask)
 	m.expireHalls()
 	built := map[string]any{}
 	for id, r := range m.st.Jobs {
@@ -1371,6 +1385,38 @@ func (m *projects) sync(cl *Client, _ json.RawMessage) {
 	for _, o := range m.st.Owed[cl.ID()] {
 		m.h.SendLocked(cl, o.Msg)
 	}
+	if ask.Mine {
+		m.mine(cl)
+	}
+}
+
+// mine sends project_mine: every project the player has put anything into, on any street, each
+// row with the player's own share (rowJSON). A home's restoration is its home's (home_projects.go)
+// and stays out, as it does from project_world; a group hall that ran out of time has no row left.
+func (m *projects) mine(cl *Client) {
+	jobs := map[string]any{}
+	for id, r := range m.st.Jobs {
+		if _, home := m.st.Homes[id]; home || !contributedTo(r, cl.ID()) {
+			continue
+		}
+		jobs[id] = m.rowJSON(id, r, cl.ID())
+	}
+	m.h.SendLocked(cl, map[string]any{"t": "project_mine", "now": m.ms(), "jobs": jobs})
+}
+
+// contributedTo: did player put any base cost into any phase of the row?
+func contributedTo(r *projRow, player int64) bool {
+	if r == nil {
+		return false
+	}
+	for _, p := range r.Per {
+		for _, c := range p.Mine {
+			if c.ID == player && c.Cost > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // connected: asks from before a restart (or that got no answer) go again now that this player is here.

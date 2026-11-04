@@ -524,3 +524,96 @@ func TestProjectCooldownAfterAStreetIsBuilt(t *testing.T) {
 		t.Fatalf("open again after the rest: %v", got)
 	}
 }
+
+// Ticket 81: the Projects panel asks for its player's projects with "mine" on a sync. The answer
+// holds the projects that player put something into, on any street, each with the player's own
+// share and nobody else's; a plain sync (an older client) gets no project_mine.
+func TestProjectMineListsOnlyTheAskersProjects(t *testing.T) {
+	r := newProjRig(t, "", newFakeProjectLedger(), time.Unix(1_700_000_000, 0))
+	r.m.ledger = nil
+	r.m.trusted = true
+	a := r.player(1, "Ada", projBoard)
+	b := r.player(2, "Bo", projBoard)
+	c := r.player(3, "Cy", projBoard)
+	var item reqView
+	for _, v := range r.m.reqs(r.m.t.Jobs[projJobID], nil) {
+		if v.open && v.Type == "item" {
+			item = v
+			break
+		}
+	}
+	if item.ID == "" {
+		t.Fatal("job 62 has an open item requirement")
+	}
+	r.do(a, map[string]any{"t": "project_give", "job": projJobID, "req": item.ID, "n": 2})
+	r.now = r.now.Add(time.Second)
+	r.do(b, map[string]any{"t": "project_give", "job": projJobID, "req": item.ID, "n": 3})
+	r.settle()
+	// Ada walks off to another street: her project is still hers to see.
+	r.do(a, map[string]any{"t": "join", "street": "GOTHER"})
+	drain(a)
+	drain(b)
+	drain(c)
+
+	r.do(a, map[string]any{"t": "project_sync"})
+	if got := kinds(drain(a), "project_mine"); len(got) != 0 {
+		t.Fatalf("a plain sync answers as before: %v", got)
+	}
+	r.do(a, map[string]any{"t": "project_sync", "mine": true})
+	msgs := drain(a)
+	if len(kinds(msgs, "project_world")) != 1 {
+		t.Fatalf("the sync still answers the world: %v", msgs)
+	}
+	mine := kinds(msgs, "project_mine")
+	if len(mine) != 1 {
+		t.Fatalf("one project_mine: %v", msgs)
+	}
+	jobs := mine[0]["jobs"].(map[string]any)
+	if len(jobs) != 1 || jobs[projJobID] == nil {
+		t.Fatalf("Ada's one project: %v", jobs)
+	}
+	row := jobs[projJobID].(map[string]any)
+	cls := r.m.t.Jobs[projJobID].Phases[0].C
+	if got := num(row["mine"].(map[string]any)[cls]); got != float64(2*item.Cost) {
+		t.Fatalf("Ada's own share (2 x base cost %d): %v", item.Cost, row["mine"])
+	}
+	if num(row["got"].(map[string]any)[item.ID]) != 5 {
+		t.Fatalf("the project's progress counts everyone: %v", row["got"])
+	}
+	if num(mine[0]["now"]) <= 0 {
+		t.Fatalf("the server's clock: %v", mine[0])
+	}
+
+	// Cy put nothing in: an empty list.
+	r.do(c, map[string]any{"t": "project_sync", "mine": true})
+	got := kinds(drain(c), "project_mine")
+	if len(got) != 1 || len(got[0]["jobs"].(map[string]any)) != 0 {
+		t.Fatalf("nothing for Cy: %v", got)
+	}
+
+	// A finished project stays on the list, with when it finished.
+	r.m.row(projJobID).Done = r.m.ms()
+	r.do(b, map[string]any{"t": "project_sync", "mine": true})
+	got = kinds(drain(b), "project_mine")
+	done := got[0]["jobs"].(map[string]any)[projJobID].(map[string]any)
+	if num(done["done"]) != float64(r.m.ms()) || num(done["mine"].(map[string]any)[cls]) != float64(3*item.Cost) {
+		t.Fatalf("Bo's finished project: %v", done)
+	}
+}
+
+func TestProjectMineLeavesHomesOut(t *testing.T) {
+	r := newProjRig(t, "", newFakeProjectLedger(), time.Unix(1_700_000_000, 0))
+	row := r.m.row("home-proto-x")
+	row.Per = []projPhaseRec{{Mine: []projContrib{{ID: 1, Name: "Ada", Cost: 5}}}}
+	r.m.st.Homes["home-proto-x"] = &projJob{Kind: "restore", Owner: 9, Phases: []projPhaseDef{{C: "job_cult_x"}}}
+	a := r.player(1, "Ada", projBoard)
+	drain(a)
+	r.do(a, map[string]any{"t": "project_sync", "mine": true})
+	got := kinds(drain(a), "project_mine")
+	if len(got) != 1 || len(got[0]["jobs"].(map[string]any)) != 0 {
+		t.Fatalf("a home's restoration is its home's: %v", got)
+	}
+	if contributedTo(nil, 1) || !contributedTo(row, 1) || contributedTo(row, 2) {
+		t.Fatal("contributedTo")
+	}
+}
