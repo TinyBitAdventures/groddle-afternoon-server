@@ -22,7 +22,7 @@ package main
 //	{"t":"party_invited","from":{"id":7,"name":"Ada"},"text":"…","timeout":89}
 //	{"t":"party_uninvited","from":7}     that invite is gone (answered elsewhere, expired, party closed)
 //	{"t":"party_activity","text":"…"}    a line for the party chat pane
-//	{"t":"party_said","id":7,"name":"Ada","text":"hi","at":1730000000000}
+//	{"t":"party_said","id":7,"name":"Ada","text":"hi","at":1730000000000,"lid":1730000000123}   lid: the line's id for reactions (reactions.go)
 //
 // Member is {"id","name","leader","online","away","street"}: away while a
 // dropped socket has partyGrace to come back, street the tsid they stand on
@@ -639,8 +639,14 @@ func (m *parties) chatLine(cl *Client, frame json.RawMessage) {
 		if mem.id != cl.ID() && ign != nil && ign(mem.id, cl.ID()) {
 			continue
 		}
-		m.to(mem.id, out)
 		to = append(to, mem.id)
+	}
+	// reactions.go: the line's id; the members it goes to have it.
+	if lid := m.h.chatLineIDLocked("party", p.chatlogID(cl.ID(), m.h.Now()), cl.ID(), to); lid > 0 {
+		out["lid"] = lid
+	}
+	for _, id := range to {
+		m.to(id, out)
 	}
 	m.h.logChatLocked("party", p.chatlogID(cl.ID(), m.h.Now()), cl, text, "", to)
 }

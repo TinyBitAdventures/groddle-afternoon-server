@@ -8,7 +8,8 @@ package main
 // and "silenced" (a channel's cone of silence). A line nobody could hear (no
 // street, not in that chat, not in a party, a slash command in party chat) is
 // not a chat line and is not written. IMs (im.go) are private and are never
-// written here: the console's chat log has no IM text.
+// written here: the console's chat log has no IM text. Reactions on lines
+// (reactions.go) are not written either: they are one of a fixed few marks, not words.
 //
 // Where: one file a UTC day, <dir>/2026-10-31.jsonl, the directory -chatlog-dir
 // (default chatlog/ beside -secret-file; off: no log), mode 0700, the files

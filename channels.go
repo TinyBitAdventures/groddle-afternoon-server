@@ -26,9 +26,9 @@ package main
 // Server to client:
 //
 //	{"t":"groups_status","groups":[12],"channels":["global","help"],"newbie":true,"open":["global"]}   after each watch
-//	{"t":"channel_joined","channel":"global","history":[{"id":7,"name":"Ada","text":"hi","at":…}]}  the last chanHistory lines
+//	{"t":"channel_joined","channel":"global","history":[{"id":7,"name":"Ada","text":"hi","at":…,"lid":…,"r":[…]}]}  the last chanHistory lines, with their reactions as you may see them (reactions.go)
 //	{"t":"channel_left","channel":"group:12"}                                                      you left, or may no longer be there
-//	{"t":"channel_said","channel":"global","id":7,"name":"Ada","text":"hi","at":1730000000000}     to everyone in it, you too
+//	{"t":"channel_said","channel":"global","id":7,"name":"Ada","text":"hi","at":1730000000000,"lid":…}  to everyone in it, you too; lid the line's id for reactions
 //	{"t":"channel_note","channel":"group:12","text":"Ada has joined"}                              the source's lines from "God"
 //	{"t":"error","code":"channels","message":"…"}
 //
@@ -104,10 +104,12 @@ var chanSecretForTest []byte
 func init() { modules = append(modules, newChannels) }
 
 type chanLine struct {
-	ID   int64  `json:"id"`
-	Name string `json:"name"`
-	Text string `json:"text"`
-	At   int64  `json:"at"`
+	ID   int64      `json:"id"`
+	Name string     `json:"name"`
+	Text string     `json:"text"`
+	At   int64      `json:"at"`
+	Lid  int64      `json:"lid,omitempty"` // reactions.go
+	R    []reaction `json:"r,omitempty"`   // in a history sent to one player: the reactions they may see
 }
 
 type chanRoom struct {
@@ -152,6 +154,31 @@ func (m *channels) Register(r *Registry) {
 	r.Handle("channel_say", m.say)
 	r.Handle("channel_who", m.who)
 	r.OnDisconnect(m.disconnected)
+	// reactions.go: who has a channel line (everyone in the room now), and whether id may react there.
+	r.Provide("channels.audience", m.audience)
+}
+
+// audience is room's members when id may react to its lines there ("" why), else why not.
+func (m *channels) audience(room string, id int64) ([]int64, string) {
+	r := m.rooms[room]
+	w := m.watch[id]
+	open := false
+	for _, rm := range m.open[id] {
+		if rm == room {
+			open = true
+		}
+	}
+	if r == nil || !r.members[id] || !open || w == nil || w.exp.Before(m.h.Now()) {
+		return nil, chanNotIn
+	}
+	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) {
+		return nil, chanSuspended
+	}
+	ids := make([]int64, 0, len(r.members))
+	for who := range r.members {
+		ids = append(ids, who)
+	}
+	return ids, ""
 }
 
 // chanLog notes a refusal in the server log (quiet under go test).
@@ -482,7 +509,7 @@ func (m *channels) join(cl *Client, frame json.RawMessage) {
 	}
 	if m.open[cl.ID()][ch] == room {
 		// Open already (a reload, a second click): the history again, nobody told.
-		m.send(cl.ID(), map[string]any{"t": "channel_joined", "channel": ch, "history": m.history(room)})
+		m.send(cl.ID(), map[string]any{"t": "channel_joined", "channel": ch, "history": m.history(room, cl.ID())})
 		return
 	}
 	if was := m.open[cl.ID()][ch]; was != "" {
@@ -499,7 +526,7 @@ func (m *channels) joinRoom(cl *Client, ch, room string) {
 		r = &chanRoom{members: map[int64]bool{}}
 		m.rooms[room] = r
 	}
-	m.send(id, map[string]any{"t": "channel_joined", "channel": ch, "history": m.history(room)})
+	m.send(id, map[string]any{"t": "channel_joined", "channel": ch, "history": m.history(room, id)})
 	if isGroupRoom(room) {
 		// The one joining hears who is there; everyone there hears they joined.
 		m.send(id, map[string]any{"t": "channel_note", "channel": ch, "text": rosterText(m.names(room, id))})
@@ -532,12 +559,19 @@ func (m *channels) leaveRoom(cl *Client, ch, room string, tell bool) {
 	}
 }
 
-func (m *channels) history(room string) []chanLine {
+// history is room's kept lines as viewer gets them: each with its reactions viewer may see.
+func (m *channels) history(room string, viewer int64) []chanLine {
 	r := m.rooms[room]
 	if r == nil {
 		return []chanLine{}
 	}
-	return append([]chanLine{}, r.history...)
+	out := append([]chanLine{}, r.history...)
+	for i := range out {
+		if out[i].Lid > 0 {
+			out[i].R = m.h.lineReactionsLocked(out[i].Lid, viewer)
+		}
+	}
+	return out
 }
 
 func (m *channels) leave(cl *Client, frame json.RawMessage) {
@@ -581,13 +615,18 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 		return
 	}
 	line := chanLine{ID: id, Name: cl.Name(), Text: filterWords(text), At: m.h.Now().UnixMilli()} // wordfilter.go: heard and kept filtered, logged as typed
+	line.Lid = m.h.chatLineIDLocked("channel", room, id, nil)                                     // reactions.go
 	r := m.rooms[room]
 	r.history = append(r.history, line)
 	if over := len(r.history) - chanHistory; over > 0 {
 		r.history = append([]chanLine{}, r.history[over:]...)
 	}
 	// chat_send_msg: everyone in it, the speaker too.
-	m.broadcast(room, map[string]any{"t": "channel_said", "channel": ch, "id": id, "name": line.Name, "text": line.Text, "at": line.At}, 0)
+	said := map[string]any{"t": "channel_said", "channel": ch, "id": id, "name": line.Name, "text": line.Text, "at": line.At}
+	if line.Lid > 0 {
+		said["lid"] = line.Lid
+	}
+	m.broadcast(room, said, 0)
 	m.h.logChatLocked("channel", room, cl, text, "", nil)
 }
 

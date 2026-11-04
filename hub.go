@@ -30,7 +30,7 @@ import (
 //	{"t":"joined","player":Player}
 //	{"t":"left","id":7}
 //	{"t":"moved","id":7,"x":0,"y":0,"dir":1,"anim":"walk"}
-//	{"t":"said","id":7,"name":"Ada","text":"hi","at":1730000000000}  text through the word filter (wordfilter.go)
+//	{"t":"said","id":7,"name":"Ada","text":"hi","at":1730000000000,"lid":1730000000123}  text through the word filter (wordfilter.go); lid the line's id for reactions (reactions.go)
 //	{"t":"typing","id":7}                              Ada is typing a Local chat line: "…" over her for typingShow
 //	{"t":"emoted","id":7,"e":"wave"}
 //	{"t":"error","code":"…","message":"…"}
@@ -257,6 +257,14 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		}
 		shown := filterWords(text) // wordfilter.go (the remake's own addition): nobody hears a bad word, the log keeps it
 		msg := map[string]any{"t": "said", "id": cl.id, "name": cl.name, "text": shown, "at": h.now().UnixMilli()}
+		// reactions.go: the line's id, for reactions; everyone on the street now has the line.
+		here := make([]int64, 0, len(h.streets[cl.street]))
+		for id := range h.streets[cl.street] {
+			here = append(here, id)
+		}
+		if lid := h.chatLineIDLocked("local", cl.street, cl.id, here); lid > 0 {
+			msg["lid"] = lid
+		}
 		h.queueLocked(cl, msg)
 		h.broadcastLocked(cl, msg)
 		h.logChatLocked("local", cl.street, cl, text, "", nil)

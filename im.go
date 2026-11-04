@@ -28,14 +28,17 @@ package main
 //	{"t":"im_sync"}                      the conversations kept for you (sent once your buddy list is in)
 //	{"t":"im_read","with":9}             you have read the conversation with 9
 //	{"t":"im_close","with":9}            you closed it: it leaves your list until the next line in it
+//	{"t":"im_react","with":9,"line":12,"e":"heart","on":true}   a reaction on line 12 of the conversation with 9 (reactions.go; on left out toggles)
 //
 // Server to client:
 //
-//	{"t":"im","with":{"id":9,"name":"Bo","online":true},"line":{"id":12,"from":7,"text":"hi","at":1730000000000},"unread":1}
+//	{"t":"im","with":{"id":9,"name":"Bo","online":true},"line":{"id":12,"from":7,"text":"hi","at":1730000000000,"r":[…]},"unread":1}
 //	        a line in the conversation with 9: to the recipient, and back to the sender (from is the sender;
 //	        online false on the sender's copy: Bo gets it when they are back)
 //	{"t":"im_state","convs":[{"with":{"id":9,"name":"Bo","online":false},"lines":[line…],"unread":2}]}
 //	        your open conversations, newest first, after im_sync (and after a new socket's buddy list)
+//	{"t":"im_reacted","with":9,"line":12,"r":[{"e":"heart","by":[{"id":7,"name":"Ada"}]}]}   line 12's reactions now, to both
+//	        (a line's "r" is left out while it has none; refused: {"t":"error","code":"react",…} or slow_down)
 //	{"t":"im_no","reason":"…","with":9,"message":"…"}  an im_send refused: reason is the source's
 //	        ("self", "ignoring you", "on your ignore list", "offline") or ours ("full": imUnreadMax waiting
 //	        unread, "slow_down"); the client says "<Name> is <reason>" as the source's did (RightSideManager.as:600)
@@ -115,10 +118,11 @@ func stripMarkup(s string) string {
 func init() { modules = append(modules, newIMs) }
 
 type imLine struct {
-	ID   int64  `json:"id"`
-	From int64  `json:"from"`
-	Text string `json:"text"`
-	At   int64  `json:"at"` // Unix ms
+	ID   int64     `json:"id"`
+	From int64     `json:"from"`
+	Text string    `json:"text"`
+	At   int64     `json:"at"`          // Unix ms
+	R    reactions `json:"r,omitempty"` // reactions.go: the two players' reactions on it
 }
 
 // imConv is the conversation between A and B (A < B); index 0 is A's side, 1 is B's.
@@ -173,6 +177,7 @@ func (m *ims) Register(r *Registry) {
 	r.Handle("im_sync", m.sync)
 	r.Handle("im_read", m.read)
 	r.Handle("im_close", m.close)
+	r.Handle("im_react", m.react)
 	r.OnConnect(func(cl *Client) { delete(m.sent, cl.ID()); delete(m.want, cl.ID()) })
 	r.OnDisconnect(func(cl *Client) {
 		delete(m.sent, cl.ID())
@@ -341,7 +346,11 @@ func (m *ims) who(c *imConv, id int64) map[string]any {
 }
 
 func lineMsg(l imLine) map[string]any {
-	return map[string]any{"id": l.ID, "from": l.From, "text": l.Text, "at": l.At}
+	msg := map[string]any{"id": l.ID, "from": l.From, "text": l.Text, "at": l.At}
+	if len(l.R) > 0 {
+		msg["r"] = l.R
+	}
+	return msg
 }
 
 // no refuses an IM to with: the source's reason (or ours) for the client's "<Name> is <reason>".
@@ -504,6 +513,64 @@ func (m *ims) close(cl *Client, frame json.RawMessage) {
 			m.drop([2]int64{c.A, c.B}) // both closed it: nothing is kept
 		}
 		m.saveSoon()
+	}
+}
+
+// react is a reaction on an IM line (reactions.go): either side of the conversation, not while either
+// blocks the other; both are told.
+func (m *ims) react(cl *Client, frame json.RawMessage) {
+	var msg reactFrame
+	if json.Unmarshal(frame, &msg) != nil || msg.With <= 0 || msg.Line <= 0 {
+		return
+	}
+	if !validReaction(msg.E) {
+		m.h.ErrorLocked(cl, "react", "That is not a reaction the game has.")
+		return
+	}
+	if !m.allow("react", cl, reactBurst, reactEvery) {
+		m.h.ErrorLocked(cl, "slow_down", "Slow down a little.")
+		return
+	}
+	id := cl.ID()
+	c := m.convs[pairOf(id, msg.With)]
+	if c == nil || msg.With == id {
+		m.h.ErrorLocked(cl, "react", "That line is too old to react to now.")
+		return
+	}
+	if blockedBetween(m.h, id, msg.With) {
+		m.h.ErrorLocked(cl, "react", "You can't react to that player's lines.")
+		return
+	}
+	i := -1
+	for j := range c.Lines {
+		if c.Lines[j].ID == msg.Line {
+			i = j
+		}
+	}
+	if i < 0 {
+		m.h.ErrorLocked(cl, "react", "That line is too old to react to now.")
+		return
+	}
+	l := &c.Lines[i]
+	on := !l.R.has(msg.E, id)
+	if msg.On != nil {
+		on = *msg.On
+	}
+	next, changed := l.R.set(msg.E, id, cl.Name(), on)
+	if changed {
+		l.R = next
+		m.saveSoon()
+	}
+	r := []reaction(l.R)
+	if r == nil {
+		r = []reaction{}
+	}
+	m.h.SendLocked(cl, map[string]any{"t": "im_reacted", "with": msg.With, "line": l.ID, "r": r})
+	if !changed {
+		return
+	}
+	if to := m.ready(msg.With); to != nil && m.sent[msg.With] == to {
+		m.h.SendLocked(to, map[string]any{"t": "im_reacted", "with": id, "line": l.ID, "r": r})
 	}
 }
 
