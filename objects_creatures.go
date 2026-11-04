@@ -80,6 +80,7 @@ package main
 
 import (
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -214,6 +215,98 @@ func (o *objects) waitCreature(street string, spot *objSpot, at int64) {
 		o.broadcast(street, 0, ob)
 	}
 	o.forget(street, ob)
+}
+
+// rookedHold is how far ahead a rooked Chicken or Butterfly's hold runs: until it is revived, in
+// practice (rookHoldCreature renews it long before it ends).
+const rookedHold = 30 * 24 * time.Hour
+
+// rookCreatureKey is the Rook's key for a shared street animal (js/rook-attack.js rookKeyFor: the
+// class and the same spawn index), "" for an animal the Rook never rooks (a Batterfly).
+func rookCreatureKey(spot *objSpot) string {
+	switch spot.kind {
+	case "chicken", "butterfly":
+		_, n, _ := strings.Cut(spot.id, ":")
+		return "npc_" + spot.kind + ":" + n
+	}
+	return ""
+}
+
+// rookHoldCreature keeps a shared Chicken or Butterfly where the Rook struck it, for everyone, until
+// it is revived, and lets it go on from that same point when it is. In the source a rooked animal is
+// one item that stays where it is: include/rook.js rookAttack 53-63 fullStop, then the class's
+// onRooked drops it to the platform line under it (npc_butterfly.js 1395-1404, npc_chicken.js
+// 1397-1405 apiSetXY), and unRook 82-92 calls onRevived, which sets it off again from there
+// (npc_butterfly.js 1390-1393 flyAround, npc_chicken.js 1393-1395 startMoving). Here every page
+// draws the animal on its path from the server's clock, which ran on while the animal lay rooked,
+// so a revived one turned up wherever its path had got to (Austin 2026-11-04: "when reviving
+// animals, they seem to spawn randomly"). Now its path's clock stops when it is rooked (a hold
+// rookedHold long, renewed while it stays rooked) and runs on from there when it is revived (or
+// still holds for its egg). Asked of the Rook each time the object is read (get), so a restart, a
+// state file or an older server's rooked animal settles too. Returns whether its path changed.
+func (o *objects) rookHoldCreature(street string, ob *liveObj) bool {
+	key := rookCreatureKey(ob.spot)
+	if key == "" {
+		return false
+	}
+	rooked := false
+	if fn, ok := o.h.ProvidedLocked("rook.thingRooked").(func(string, string) bool); ok {
+		rooked = fn(street, key)
+	}
+	now := o.h.Now()
+	held := ob.holdEnd.Sub(now) > rookedHold/2
+	if rooked == held {
+		return false
+	}
+	// The path's clock now (server ms minus lag, frozen while held), kept across the change.
+	at := now
+	if ob.holdEnd.After(now) {
+		at = ob.holdEnd
+	}
+	clock := at.UnixMilli() - ob.lag
+	if rooked {
+		ob.holdEnd = now.Add(rookedHold)
+	} else {
+		ob.holdEnd = now
+		if ob.incEgg != "" && ob.incEnd.After(now) {
+			ob.holdEnd = ob.incEnd
+		}
+	}
+	ob.lag = max(0, ob.holdEnd.UnixMilli()-clock)
+	return true
+}
+
+// rookCreature is the Rook's word that a shared animal was rooked or revived (rook.go wingBeat,
+// revive): its path stops or runs on (rookHoldCreature) and everyone on the street is told. False
+// when the id names no Chicken or Butterfly there.
+func (o *objects) rookCreature(street, id string) bool {
+	o.resume()
+	spot := o.w.streets[street][id]
+	if spot == nil || rookCreatureKey(spot) == "" {
+		return false
+	}
+	ob := o.get(street, spot) // settles the hold (rookHoldCreature)
+	o.broadcast(street, 0, ob)
+	o.forget(street, ob)
+	o.saveSoon()
+	return true
+}
+
+// rookedCreatures is the street's rooked Chickens and Butterflies that nobody has touched yet (not in
+// o.streets), sorted: a snapshot carries their stopped paths too.
+func (o *objects) rookedCreatures(street string, spots map[string]*objSpot) []string {
+	fn, ok := o.h.ProvidedLocked("rook.thingRooked").(func(string, string) bool)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for id, spot := range spots {
+		if key := rookCreatureKey(spot); key != "" && o.streets[street][id] == nil && fn(street, key) {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (o *objects) creatureFresh(ob *liveObj) bool {

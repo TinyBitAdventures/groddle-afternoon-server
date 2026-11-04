@@ -419,6 +419,7 @@ func (m *rook) Register(r *Registry) {
 	r.OnDisconnect(func(cl *Client) { delete(m.limits, cl.ID()); delete(m.arrived, cl.ID()) })
 	r.OnShutdown(func() { m.save() }) // rook_persist.go
 	r.Provide("rook.treeRooked", m.treeRooked)
+	r.Provide("rook.thingRooked", m.thingRooked)
 	r.Provide("rook.self", m) // the console's calls (rook_admin.go)
 }
 
@@ -434,6 +435,25 @@ func (m *rook) treeRooked(street, id string) bool {
 		}
 	}
 	return false
+}
+
+// thingRooked is whether the thing a key names on a street is rooked now (objects.go asks for a shared
+// Chicken or Butterfly, whose path stops while it is: objects_creatures.go rookHoldCreature).
+func (m *rook) thingRooked(street, key string) bool {
+	s := m.streets[street]
+	return s != nil && s.rooked[key] != nil
+}
+
+// rookCreature tells the shared street objects a Chicken or Butterfly was rooked or revived, so it
+// lies where it was struck for everyone and goes on from there (objects_creatures.go rookCreature).
+func (m *rook) rookCreature(street, key string) {
+	sm := rookKeyRe.FindStringSubmatch(key)
+	if sm == nil || (sm[1] != "npc_chicken" && sm[1] != "npc_butterfly") {
+		return
+	}
+	if fn, ok := m.h.ProvidedLocked("objects.rookCreature").(func(string, string) bool); ok {
+		fn(street, strings.TrimPrefix(sm[1], "npc_")+":"+sm[2])
+	}
 }
 
 func (m *rook) allow(cl *Client) bool {
@@ -814,6 +834,8 @@ func (m *rook) wingBeat(a *rookAttack) {
 					strip(a.street, id)
 				}
 			}
+			// A rooked Chicken or Butterfly lies where it was struck, for everyone.
+			m.rookCreature(a.street, key)
 		}
 	}
 	if len(hit) > 0 {
@@ -1379,6 +1401,10 @@ func (m *rook) revive(cl *Client, street string, s *rookStreet, key string, balm
 		doses = rookHealers
 	}
 	m.save()
+	if done {
+		// It goes on from where it lay (unRook 82-92, onRevived), for everyone.
+		m.rookCreature(street, key)
+	}
 	you := map[string]any{"xp": xp, "energy": -rookReviveEnergy, "mood": -rookReviveMood, "favor": favor, "key": key, "doses": doses, "done": done, "balm": balm, "class": r.class}
 	if use != nil {
 		you["use"] = use

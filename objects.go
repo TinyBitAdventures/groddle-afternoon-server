@@ -534,6 +534,7 @@ func (o *objects) Register(r *Registry) {
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
+	r.Provide("objects.rookCreature", o.rookCreature)
 	r.Provide("objects.pigFood", o.pigFood)
 }
 
@@ -716,6 +717,10 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 			o.armRookFruit(street, ob, rookFruitEvery)
 		}
 	}
+	if spot.kind == "chicken" || spot.kind == "butterfly" {
+		// Rooked: it lies where the Rook struck it until it is revived (objects_creatures.go rookHoldCreature).
+		o.rookHoldCreature(street, ob)
+	}
 	if spot.kind == "wood" && ob.day < o.today() {
 		// A new game day: everyone may harvest it again (canHarvest by intervals[today]).
 		ob.day, ob.woodBy = o.today(), nil
@@ -818,6 +823,10 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	for _, id := range ids {
 		ob := o.get(street, spots[id])
 		list = append(list, o.state(ob))
+	}
+	// A rooked animal nobody has touched lies where the Rook struck it too (rookHoldCreature).
+	for _, id := range o.rookedCreatures(street, spots) {
+		list = append(list, o.state(o.get(street, spots[id])))
 	}
 	// The street animals this server shares here (objects_creatures.go): the client shares only these.
 	// A Batterfly's place comes from the server ("spots"), as its planner group follows groups a
