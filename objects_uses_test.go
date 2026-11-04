@@ -15,6 +15,8 @@ type fakeUseLedger struct {
 	calls []string                 // op id c
 	ops   map[string]ledgerAnswer
 	down  bool
+	// copies: the copies a use named (class #k), in order.
+	copies []string
 }
 
 func newFakeUseLedger() *fakeUseLedger {
@@ -26,6 +28,12 @@ func (f *fakeUseLedger) give(id int64, class string, n int) {
 		f.held[id], f.left[id] = map[string]int{}, map[string]int{}
 	}
 	f.held[id][class] += n
+}
+
+// useCopy is the site's ledger/use with "k": one copy's charge (the fake counts it as use does).
+func (f *fakeUseLedger) useCopy(op string, id int64, class string, k int) ledgerAnswer {
+	f.copies = append(f.copies, fmt.Sprintf("%s #%d", class, k))
+	return f.use(op, id, class, 0)
 }
 
 func (f *fakeUseLedger) use(op string, id int64, class string, n int) ledgerAnswer {
@@ -412,5 +420,35 @@ func TestConnectedTimeIsSentOnShutdownAndKeptInTheJournal(t *testing.T) {
 	// The module's add never sends an online event of its own making.
 	if r.mod.add(7, "online", tradeGoods{Currants: 1}) != "" {
 		t.Fatal("online went through add")
+	}
+}
+
+// 2026-11-04: a jar keeps its own charges; the one the player used is named to the ledger ("k"),
+// and a use that names none (an older client, a tree pour) leaves the site to use the one in use.
+func TestADustNamesTheJarUsedToTheLedger(t *testing.T) {
+	r, l := usesRig(t)
+	spots := sharedWorld.streets[defaultStreet]
+	t3 := spots["tree:3"]
+	a := r.player(1, "Ada", defaultStreet, t3.x, t3.y)
+	r.drain(a)
+	l.give(1, useFertilidust, 2)
+	r.send(a, map[string]any{"t": "obj_dust", "req": 1, "k": 1})
+	r.advance(0)
+	if used := r.only(a, "obj_dust_used"); used["use"] == nil {
+		t.Fatalf("the jar answered %v", used)
+	}
+	r.advance(dustLand)
+	r.now = r.now.Add(5 * time.Second)
+	r.send(a, map[string]any{"t": "obj_dust", "req": 2})
+	r.advance(0)
+	r.advance(dustLand)
+	r.now = r.now.Add(5 * time.Second)
+	r.send(a, map[string]any{"t": "obj_dust", "req": 3, "k": 999})
+	r.advance(0)
+	if len(l.copies) != 1 || l.copies[0] != "fertilidust #1" {
+		t.Fatalf("the copies named were %v (want only the first dust's jar 1; none or out of range names none)", l.copies)
+	}
+	if len(l.calls) != 3 {
+		t.Fatalf("the ledger was asked %v", l.calls)
 	}
 }

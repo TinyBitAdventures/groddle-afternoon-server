@@ -1712,6 +1712,7 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 	var m struct {
 		Req int64  `json:"req"`
 		ID  string `json:"id"`
+		K   *int   `json:"k"` // the jar used: its place among the class's jars in the pack (objects_uses.go copyOf)
 	}
 	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.ID) > 40 {
 		o.h.ErrorLocked(cl, "bad_obj", "That object message did not check out.")
@@ -1752,7 +1753,7 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 	if m.ID != "" {
 		class = useFertilidustLite
 	}
-	o.askUse(cl, class, func(use map[string]any, code, message string) {
+	o.askUseCopy(cl, class, copyOf(m.K), func(use map[string]any, code, message string) {
 		if code != "" {
 			if cl.Online() {
 				no(code, message)

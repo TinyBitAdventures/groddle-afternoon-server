@@ -904,6 +904,7 @@ func (m *hiModule) record(cl *Client, street string, secs int) (string, string) 
 func (m *hiModule) powder(cl *Client, frame json.RawMessage) {
 	var msg struct {
 		Cls string `json:"cls"`
+		K   *int   `json:"k"` // the jar used: its place among the class's jars in the pack (objects_uses.go copyOf)
 	}
 	if json.Unmarshal(frame, &msg) != nil || (msg.Cls != "sneezing_powder" && msg.Cls != "sparkle_powder") {
 		return
@@ -933,7 +934,7 @@ func (m *hiModule) powder(cl *Client, frame json.RawMessage) {
 		m.h.SendLocked(cl, map[string]any{"t": "powder_spread", "cls": msg.Cls, "ok": false, "why": "crowd"})
 		return
 	}
-	m.uses.ask(cl, msg.Cls, 0, func(use map[string]any, code, message string) {
+	m.uses.askCopy(cl, msg.Cls, 0, copyOf(msg.K), func(use map[string]any, code, message string) {
 		if code != "" {
 			m.h.SendLocked(cl, map[string]any{"t": "powder_spread", "cls": msg.Cls, "ok": false, "why": code, "message": message})
 			return

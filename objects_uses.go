@@ -125,6 +125,36 @@ func (l *httpLedger) use(op string, id int64, class string, n int) ledgerAnswer 
 	return a
 }
 
+// copyLedger is a ledger that uses one copy's charge (2026-11-04): each jar or bottle keeps its own,
+// as Glitch kept them per item, and "k" names which (its place among the class's copies in the
+// player's pack; the site's LedgerUse.php). Without k the site uses the one in use, the first.
+type copyLedger interface {
+	useCopy(op string, id int64, class string, k int) ledgerAnswer
+}
+
+func (l *httpLedger) useCopy(op string, id int64, class string, k int) ledgerAnswer {
+	j := l.useJournal()
+	j.asking(op, id)
+	a := l.call(ledgerRouteUse, map[string]any{"op": op, "id": id, "c": class, "k": k})
+	if a.Status == "" {
+		j.lost(op, id)
+	} else {
+		j.answered(op)
+	}
+	return a
+}
+
+// useCopyMax is the most copies a use may name (the site's LedgerUse::K_MAX).
+const useCopyMax = 255
+
+// copyOf is a client's k when it names a copy (nil or out of range: none, the one in use).
+func copyOf(k *int) int {
+	if k == nil || *k < 0 || *k > useCopyMax {
+		return -1
+	}
+	return *k
+}
+
 func (l *httpLedger) has(id int64, classes []string) (map[string]bool, bool) {
 	a := l.call(ledgerRouteHas, map[string]any{"id": id, "c": classes})
 	if a.Status != "settled" {
@@ -306,6 +336,11 @@ func useLine(class string) string {
 // ask uses one charge of class (or n whole items, n > 0) for cl through the ledger, off the hub
 // lock, then runs then under it: the use (nil without a ledger) or a refusal (code and line).
 func (a *useAsker) ask(cl *Client, class string, n int, then func(use map[string]any, code, message string)) {
+	a.askCopy(cl, class, n, -1, then)
+}
+
+// askCopy is ask for one copy's charge: k its place among the class's copies in the pack (-1: the one in use).
+func (a *useAsker) askCopy(cl *Client, class string, n, k int, then func(use map[string]any, code, message string)) {
 	site := a.ledger
 	if site == nil {
 		then(nil, "", "")
@@ -319,7 +354,12 @@ func (a *useAsker) ask(cl *Client, class string, n int, then func(use map[string
 	a.asking[id] = true
 	op := a.newOp()
 	a.spawn(func() {
-		ans := site.use(op, id, class, n)
+		var ans ledgerAnswer
+		if cu, ok := site.(copyLedger); ok && k >= 0 && n == 0 {
+			ans = cu.useCopy(op, id, class, k)
+		} else {
+			ans = site.use(op, id, class, n)
+		}
 		a.h.After(0, func() {
 			delete(a.asking, id)
 			switch ans.Status {
@@ -344,6 +384,11 @@ func (a *useAsker) ask(cl *Client, class string, n int, then func(use map[string
 // askUse is the objects module's ask for one charge.
 func (o *objects) askUse(cl *Client, class string, then func(use map[string]any, code, message string)) {
 	o.uses.ask(cl, class, 0, then)
+}
+
+// askUseCopy is askUse for the copy the player used (k, -1: the one in use).
+func (o *objects) askUseCopy(cl *Client, class string, k int, then func(use map[string]any, code, message string)) {
+	o.uses.askCopy(cl, class, 0, k, then)
 }
 
 // pourRefusal is the pour's own refusal before anything is used (pour decides the rest).
