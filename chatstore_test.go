@@ -362,3 +362,16 @@ func TestWebSayRefusesWhatTheGameWould(t *testing.T) {
 		t.Fatalf("banned: %d %v", code, out)
 	}
 }
+
+func TestChatStoreImportWaitsForTheIMModule(t *testing.T) {
+	r := &storeRig{reactRig: &reactRig{t: t, now: time.Unix(1_700_000_000, 0)}, sink: &fakeChatSink{}}
+	savedS, saved := chatStoreSinkForTest, modules
+	chatStoreSinkForTest = r.sink
+	modules = []moduleFactory{func(h *Hub) Module { r.cs = newChatStore(h).(*chatStore); return r.cs }}
+	r.hub = NewHub(func() time.Time { return r.now })
+	chatStoreSinkForTest, modules = savedS, saved
+	r.cs.importOnce()
+	if r.cs.imported {
+		t.Fatal("marked imported with no IM module to read")
+	}
+}

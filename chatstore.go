@@ -274,7 +274,13 @@ func (m *chatStore) importOnce() {
 	}
 	m.h.mu.Lock()
 	var lines []chatEntry
-	if im, ok := m.h.provided["ims.self"].(*ims); ok && im != nil {
+	im, ok := m.h.provided["ims.self"].(*ims)
+	if !ok || im == nil {
+		// No IM module (yet): nothing is marked, so a later run still brings them.
+		m.h.mu.Unlock()
+		return
+	}
+	{
 		keys := make([][2]int64, 0, len(im.convs))
 		for k := range im.convs {
 			keys = append(keys, k)
@@ -316,8 +322,8 @@ func imReactEntry(c *imConv, l imLine) chatEntry {
 // run sends what waits, a batch at a time, until shutdown.
 func (m *chatStore) run() {
 	defer close(m.done)
-	m.importOnce()
 	wait := chatStoreEvery
+	imported := false
 	timer := time.NewTimer(chatStoreEvery)
 	defer timer.Stop()
 	for {
@@ -329,6 +335,11 @@ func (m *chatStore) run() {
 		case <-m.wake:
 			// A new line: wait out the gap anyway, so lines go in batches.
 			continue
+		}
+		if !imported {
+			// After the first wait: every module has registered by then (the IM module's lines are read here).
+			m.importOnce()
+			imported = true
 		}
 		if m.flush(0) {
 			wait = chatStoreEvery
