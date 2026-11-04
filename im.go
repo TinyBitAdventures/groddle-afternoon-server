@@ -308,7 +308,12 @@ func (m *ims) makeRoom(k [2]int64) {
 }
 
 func (m *ims) allow(kind string, cl *Client, burst float64, every time.Duration) bool {
-	key := kind + ":" + strconv.FormatInt(cl.ID(), 10)
+	return m.allowID(kind, cl.ID(), burst, every)
+}
+
+// allowID is a player's bucket, whichever socket (or the site's call) the act came by.
+func (m *ims) allowID(kind string, id int64, burst float64, every time.Duration) bool {
+	key := kind + ":" + strconv.FormatInt(id, 10)
 	b := m.rates[key]
 	if b == nil {
 		b = &bucket{}
@@ -346,7 +351,7 @@ func (m *ims) vouched(from, to int64) bool {
 		return true
 	}
 	fn, ok := m.h.ProvidedLocked("buddies.holds").(func(int64, int64) bool)
-	return ok && fn(from, to)
+	return (ok && fn(from, to)) || m.h.webHolds(from, to) // web.go: a sender on the website alone
 }
 
 func (m *ims) who(c *imConv, id int64) map[string]any {
@@ -379,68 +384,73 @@ func (m *ims) send(cl *Client, frame json.RawMessage) {
 	if json.Unmarshal(frame, &msg) != nil || msg.Parent < 0 {
 		return
 	}
-	from := cl.ID()
-	text := strings.TrimSpace(cleanChat(stripMarkup(cleanChat(msg.Text))))
-	if text == "" || msg.To <= 0 {
-		return
+	if reason, message := m.sendAs(cl.ID(), cl.Name(), msg.To, msg.Text, msg.Parent); reason != "" && reason != "bad" {
+		with := msg.To
+		if reason == "self" {
+			with = cl.ID()
+		}
+		m.no(cl, with, reason, message)
 	}
-	if msg.To == from {
-		m.no(cl, from, "self", "You can't IM yourself.")
-		return
+}
+
+// sendAs is an IM from a player, said in their game (send) or on the website (web.go web_im): the
+// refusal's reason and words, or "" once it went. Delivery is deliver's.
+func (m *ims) sendAs(from int64, name string, to int64, raw string, parent int64) (reason, message string) {
+	text := strings.TrimSpace(cleanChat(stripMarkup(cleanChat(raw))))
+	if text == "" || to <= 0 || parent < 0 {
+		return "bad", "Write something first."
 	}
-	if !m.allow("im", cl, imBurst, imEvery) {
-		m.no(cl, msg.To, "slow_down", "Slow down a little.")
-		return
+	if to == from {
+		return "self", "You can't IM yourself."
+	}
+	if !m.allowID("im", from, imBurst, imEvery) {
+		return "slow_down", "Slow down a little."
 	}
 	if ign, ok := m.h.ProvidedLocked("buddies.ignoring").(func(int64, int64) bool); ok {
-		if ign(msg.To, from) {
-			m.no(cl, msg.To, "ignoring you", "That player is ignoring you.")
-			return
+		if ign(to, from) {
+			return "ignoring you", "That player is ignoring you."
 		}
-		if ign(from, msg.To) {
-			m.no(cl, msg.To, "on your ignore list", "That player is on your ignore list.")
-			return
+		if ign(from, to) {
+			return "on your ignore list", "That player is on your ignore list."
 		}
 	}
-	if !m.vouched(from, msg.To) {
-		m.no(cl, msg.To, "offline", "That player is offline.")
-		return
+	if !m.vouched(from, to) {
+		return "offline", "That player is offline."
 	}
-	k := pairOf(from, msg.To)
+	k := pairOf(from, to)
 	c := m.convs[k]
-	if msg.Parent > 0 && !c.threadable(msg.Parent) {
+	if parent > 0 && !c.threadable(parent) {
 		// threads.go: a reply goes under a line of this conversation, never under another reply.
-		m.no(cl, msg.To, "thread", "That line can't take a reply now.")
-		return
+		return "thread", "That line can't take a reply now."
 	}
 	if c == nil {
-		if !m.allow("im_new", cl, imNewBurst, imNewEvery) {
-			m.no(cl, msg.To, "slow_down", "Slow down a little.")
-			return
+		if !m.allowID("im_new", from, imNewBurst, imNewEvery) {
+			return "slow_down", "Slow down a little."
 		}
 		c = &imConv{A: k[0], B: k[1]}
 		m.put(c)
 		m.makeRoom(k)
 	} else {
 		waiting := 0
-		mark := c.Read[c.side(msg.To)]
+		mark := c.Read[c.side(to)]
 		for _, l := range c.Lines {
 			if l.From == from && l.ID > mark {
 				waiting++
 			}
 		}
 		if waiting >= imUnreadMax {
-			m.no(cl, msg.To, "full", "They have "+strconv.Itoa(waiting)+" of your IMs to read already.")
-			return
+			return "full", "They have " + strconv.Itoa(waiting) + " of your IMs to read already."
 		}
 	}
-	c.Names[c.side(from)] = cl.Name()
-	if to := m.h.ClientLocked(msg.To); to != nil {
-		c.Names[c.side(msg.To)] = to.Name()
+	c.Names[c.side(from)] = name
+	if tcl := m.h.ClientLocked(to); tcl != nil {
+		c.Names[c.side(to)] = tcl.Name()
+	} else if tabs := m.h.WebLocked(to); len(tabs) > 0 {
+		c.Names[c.side(to)] = tabs[0].Name()
 	}
 	now := m.h.Now().UnixMilli()
 	c.Seq++
-	l := imLine{ID: c.Seq, From: from, Text: filterWords(text), At: now, Parent: msg.Parent}
+	l := imLine{ID: c.Seq, From: from, Text: filterWords(text), At: now, Parent: parent}
 	c.Lines = append(c.Lines, l)
 	if len(c.Lines) > imKeep {
 		c.Lines = append([]imLine(nil), c.Lines[len(c.Lines)-imKeep:]...)
@@ -450,9 +460,40 @@ func (m *ims) send(cl *Client, frame json.RawMessage) {
 	c.Read[c.side(from)] = c.Seq // your own line is read
 	m.saveSoon()
 	m.h.storeChatLocked(imEntry(c, l)) // chatstore.go: kept on the site, for the two of them only
-	m.h.SendLocked(cl, map[string]any{"t": "im", "with": m.who(c, msg.To), "line": lineMsg(l), "unread": c.unread(from)})
-	if to := m.ready(msg.To); to != nil && m.sent[msg.To] == to {
-		m.h.SendLocked(to, map[string]any{"t": "im", "with": m.who(c, from), "line": lineMsg(l), "unread": c.unread(msg.To)})
+	m.deliver(c, l, from, to)
+	return "", ""
+}
+
+// deliver sends a new line to both sides: the sender's game and the recipient's (once their list is
+// in), and every website socket of either (web.go) that has its lists, never across a block.
+func (m *ims) deliver(c *imConv, l imLine, from, to int64) {
+	if cl := m.h.ClientLocked(from); cl != nil {
+		m.h.SendLocked(cl, map[string]any{"t": "im", "with": m.who(c, to), "line": lineMsg(l), "unread": c.unread(from)})
+	}
+	if tcl := m.ready(to); tcl != nil && m.sent[to] == tcl {
+		m.h.SendLocked(tcl, map[string]any{"t": "im", "with": m.who(c, from), "line": lineMsg(l), "unread": c.unread(to)})
+	}
+	m.webIM(c, from, to, map[string]any{"t": "im", "line": lineMsg(l)}, true)
+}
+
+// webIM sends msg (with "with" set for each side) to the website sockets of both players in c.
+func (m *ims) webIM(c *imConv, a, b int64, msg map[string]any, unread bool) {
+	for _, side := range [][2]int64{{a, b}, {b, a}} {
+		me, other := side[0], side[1]
+		for _, w := range m.h.WebLocked(me) {
+			if w.ww == nil || blockedBetween(m.h, me, other) {
+				continue
+			}
+			out := make(map[string]any, len(msg)+2)
+			for k, v := range msg {
+				out[k] = v
+			}
+			out["with"] = m.who(c, other)
+			if unread {
+				out["unread"] = c.unread(me)
+			}
+			m.h.SendLocked(w, out)
+		}
 	}
 }
 
@@ -605,6 +646,14 @@ func (m *ims) react(cl *Client, frame json.RawMessage) {
 	}
 	if to := m.ready(msg.With); to != nil && m.sent[msg.With] == to {
 		m.h.SendLocked(to, map[string]any{"t": "im_reacted", "with": id, "line": l.ID, "r": r})
+	}
+	// web.go: both players' website sockets (the reactor's own tab already has it).
+	for _, side := range [][2]int64{{id, msg.With}, {msg.With, id}} {
+		for _, w := range m.h.WebLocked(side[0]) {
+			if w != cl && w.ww != nil {
+				m.h.SendLocked(w, map[string]any{"t": "im_reacted", "with": side[1], "line": l.ID, "r": r})
+			}
+		}
 	}
 }
 

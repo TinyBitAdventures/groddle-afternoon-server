@@ -19,6 +19,8 @@ package main
 //	{"t":"web_watch","buddies":"…","groups":"…"}     the two lists the site signed (buddies.go, channels.go tokens),
 //	                                                 in the ticket's answer; again before they expire
 //	{"t":"active"}                                   the reader did something (presence.go idle)
+//	{"t":"react",…} {"t":"im_react",…} {"t":"im_read","with":9}   as the game's (reactions.go, im.go), after web_watch:
+//	                                                 a channel line the lists let it read; its own IMs
 //	{"t":"ping"}
 //
 // Server to client:
@@ -29,6 +31,7 @@ package main
 //	                                                 the reader may read (the groups token), never a line by a
 //	                                                 player the reader blocks
 //	{"t":"presence",…}  {"t":"presence_up",…}  {"t":"presence_gone",…}   presence.go
+//	{"t":"im","with":{…},"line":{…},"unread":n} {"t":"im_reacted",…}  the reader's own IMs, either side (im.go deliver)
 //	{"t":"board_post","board":"general","thread":12,"post":34,"kind":"reply"}  a new Community post (the page
 //	                                                 asks the site for it, which applies blocks again)
 //	{"t":"error","code":"web","message":"…"}
@@ -36,6 +39,8 @@ package main
 // The site's signed calls (teleport.go's POST /ws?call=…):
 //
 //	community_note {"board":"general","thread":12,"post":34,"author":7,"kind":"thread"|"reply"}   200 {"status":"ok","told":n}
+//	web_im         {"player":7,"name":"Ada","to":9,"text":"hi","parent":0}  an IM written on the website (im.go sendAs):
+//	               200 {"status":"sent"} | 403/429 {"status":"no","reason":"…","message":"…"}
 //	presence_hide  {"player":7,"off":true}                                                          200 {"status":"ok"}  (presence.go)
 //
 // Who gets what: only a signed-in player's socket exists at all (the site
@@ -65,6 +70,46 @@ const (
 
 func init() {
 	serviceHandlers["community_note"] = communityNoteService
+	serviceHandlers["web_im"] = webIMService
+}
+
+type webIMCall struct {
+	Player int64  `json:"player"`
+	Name   string `json:"name"`
+	To     int64  `json:"to"`
+	Text   string `json:"text"`
+	Parent int64  `json:"parent"`
+}
+
+// webIMService is an IM written on the website: the same rules as one typed in the game (im.go).
+func webIMService(h *Hub, body []byte) (int, any) {
+	var c webIMCall
+	if json.Unmarshal(body, &c) != nil || c.Player <= 0 || c.To <= 0 || c.Parent < 0 {
+		return http.StatusBadRequest, map[string]string{"status": "bad"}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if a := h.adminOf(); a != nil && a.bans[c.Player] {
+		return http.StatusForbidden, map[string]string{"status": "banned"}
+	}
+	m, _ := h.provided["ims.self"].(*ims)
+	if m == nil {
+		return http.StatusServiceUnavailable, map[string]string{"status": "bad"}
+	}
+	name := cleanName(c.Name)
+	if cl := h.clients[c.Player]; cl != nil {
+		name = cl.Name()
+	}
+	reason, message := m.sendAs(c.Player, name, c.To, c.Text, c.Parent)
+	switch reason {
+	case "":
+		return http.StatusOK, map[string]string{"status": "sent"}
+	case "bad":
+		return http.StatusBadRequest, map[string]string{"status": "bad"}
+	case "slow_down":
+		return http.StatusTooManyRequests, map[string]string{"status": "no", "reason": reason, "message": message}
+	}
+	return http.StatusForbidden, map[string]string{"status": "no", "reason": reason, "message": message}
 }
 
 // webWatch is what a web socket's two signed lists say.
@@ -255,6 +300,16 @@ func (h *Hub) handleWebLocked(cl *Client, kind string, frame []byte) {
 		h.touchLocked(cl.id)
 	case "web_watch":
 		h.webWatchLocked(cl, frame)
+	case "react", "im_react", "im_read":
+		// The reactions and read marks of the lines this socket has (reactions.go, im.go), after its lists.
+		if cl.ww == nil {
+			h.queueLocked(cl, map[string]any{"t": "error", "code": "web", "message": "Your lists are not checked yet."})
+			return
+		}
+		h.touchLocked(cl.id)
+		if fn := h.handlers[kind]; fn != nil {
+			fn(cl, frame)
+		}
 	default:
 		h.queueLocked(cl, map[string]any{"t": "error", "code": "web", "message": "That message kind is not one the website's socket uses."})
 	}

@@ -330,8 +330,23 @@ func (m *reacts) react(cl *Client, frame json.RawMessage) {
 		return
 	}
 	var to []int64
-	switch l.kind {
-	case "channel", "thread":
+	switch {
+	case cl.web:
+		// web.go: a reader on the website reacts to the lines of the channels their list lets them read.
+		if (l.kind != "channel" && l.kind != "thread") || !cl.ww.readsRoom(l.where) {
+			m.refuse(cl, "That line is not one you have.")
+			return
+		}
+		if ((l.where == "global" || l.where == "trade") && cl.ww.silence["chat"]) || ((l.where == "help" || l.where == "newbie") && cl.ww.silence["help"]) {
+			m.refuse(cl, chanSuspended)
+			return
+		}
+		if c, ok := m.h.provided["channels.self"].(*channels); ok && c.rooms[l.where] != nil {
+			for who := range c.rooms[l.where].members {
+				to = append(to, who)
+			}
+		}
+	case l.kind == "channel" || l.kind == "thread":
 		fn, ok := m.h.ProvidedLocked("channels.audience").(func(string, int64) ([]int64, string))
 		if !ok {
 			m.refuse(cl, "That chat is not open to you.")

@@ -564,3 +564,73 @@ func startServerWith(t *testing.T, s *Server) string {
 	t.Cleanup(ts.Close)
 	return "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
 }
+
+func TestIMsFromTheWebsiteAndOnItsSockets(t *testing.T) {
+	r := newLiveRig(t)
+	bo := r.game(9, "Bo", lists{rev: []int64{7}})
+	ada := r.web(7, "Ada", lists{bud: []int64{9}})
+	drain(ada)
+	code, out := webIMService(r.hub, []byte(`{"player":7,"name":"Ada","to":9,"text":"hi from the web"}`))
+	if code != http.StatusOK {
+		t.Fatalf("%d %v", code, out)
+	}
+	got := one(t, drain(bo), "im")
+	if got["line"].(map[string]any)["text"] != "hi from the web" || got["with"].(map[string]any)["id"].(float64) != 7 {
+		t.Fatalf("game got %v", got)
+	}
+	mine := one(t, drain(ada), "im")
+	if mine["with"].(map[string]any)["id"].(float64) != 9 || mine["with"].(map[string]any)["online"] != true {
+		t.Fatalf("web copy %v", mine)
+	}
+	// Bo answers in the game: Ada's tab hears it; she reacts and reads from the tab.
+	r.now = r.now.Add(time.Second)
+	r.do(bo, map[string]any{"t": "im_send", "to": 7, "text": "hey"})
+	if m := one(t, drain(ada), "im"); m["line"].(map[string]any)["text"] != "hey" {
+		t.Fatalf("%v", m)
+	}
+	drain(bo)
+	r.do(ada, map[string]any{"t": "im_react", "with": 9, "line": 2, "e": "heart"})
+	if m := one(t, drain(bo), "im_reacted"); reactedText(m) != "heart:7" {
+		t.Fatalf("%v", m)
+	}
+	r.do(ada, map[string]any{"t": "im_read", "with": 9})
+	// Refusals in the game's words; a ban refuses.
+	code, out = webIMService(r.hub, []byte(`{"player":7,"name":"Ada","to":7,"text":"me"}`))
+	if code != http.StatusForbidden || out.(map[string]string)["reason"] != "self" {
+		t.Fatalf("%d %v", code, out)
+	}
+	adminBan(r.hub, []byte(`{"player":7}`))
+	if code, _ := webIMService(r.hub, []byte(`{"player":7,"name":"Ada","to":9,"text":"x"}`)); code != http.StatusForbidden {
+		t.Fatal("a banned account sent an IM")
+	}
+}
+
+func TestReactionsFromTheWebsiteSocket(t *testing.T) {
+	r := newLiveRig(t)
+	ada := r.game(7, "Ada", lists{})
+	web := r.web(9, "Bo", lists{chans: "global,newbie"})
+	drain(web)
+	r.do(ada, map[string]any{"t": "channel_say", "channel": "global", "text": "react to me"})
+	lid := lidOf(t, drain(web), "channel_said")
+	drain(ada)
+	r.do(web, map[string]any{"t": "react", "line": lid, "e": "tada"})
+	if m := one(t, drain(ada), "reacted"); reactedText(m) != "tada:9" {
+		t.Fatalf("%v", m)
+	}
+	if m := one(t, drain(web), "reacted"); reactedText(m) != "tada:9" {
+		t.Fatalf("%v", m)
+	}
+	// A trade line the web list does not read: refused.
+	r2 := newLiveRig(t)
+	cy := r2.game(11, "Cy", lists{chans: "global,newbie,trade"})
+	r2.do(cy, map[string]any{"t": "channel_join", "channel": "trade"})
+	drain(cy)
+	r2.do(cy, map[string]any{"t": "channel_say", "channel": "trade", "text": "wares"})
+	tl := lidOf(t, drain(cy), "channel_said")
+	w2 := r2.web(9, "Bo", lists{})
+	drain(w2)
+	r2.do(w2, map[string]any{"t": "react", "line": tl, "e": "like"})
+	if e := one(t, drain(w2), "error"); e["code"] != "react" {
+		t.Fatalf("%v", e)
+	}
+}
