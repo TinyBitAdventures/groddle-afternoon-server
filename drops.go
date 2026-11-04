@@ -127,6 +127,7 @@ type groundStack struct {
 	C      string
 	N      int
 	R      *int
+	T      json.RawMessage // one copy's own words (copytags.go), as the dropper's game sent them, checked
 	X, Y   float64
 	By     int64
 	ByName string
@@ -142,23 +143,27 @@ func (s *groundStack) view() map[string]any {
 	if s.R != nil {
 		out["r"] = *s.R
 	}
+	if len(s.T) > 0 {
+		out["t"] = s.T
+	}
 	return out
 }
 
-func (s *groundStack) item() tradeItem { return tradeItem{C: s.C, N: s.N, R: s.R} }
+func (s *groundStack) item() tradeItem { return tradeItem{C: s.C, N: s.N, R: s.R, T: s.T} }
 
 // dropRow is a stack as the site sends it.
 type dropRow struct {
-	ID     string  `json:"id"`
-	By     int64   `json:"by"`
-	Name   string  `json:"name"`
-	Street string  `json:"street"`
-	X      float64 `json:"x"`
-	Y      float64 `json:"y"`
-	C      string  `json:"c"`
-	N      int     `json:"n"`
-	R      *int    `json:"r,omitempty"`
-	At     int64   `json:"at"` // unix seconds
+	ID     string          `json:"id"`
+	By     int64           `json:"by"`
+	Name   string          `json:"name"`
+	Street string          `json:"street"`
+	X      float64         `json:"x"`
+	Y      float64         `json:"y"`
+	C      string          `json:"c"`
+	N      int             `json:"n"`
+	R      *int            `json:"r,omitempty"`
+	T      json.RawMessage `json:"t,omitempty"`
+	At     int64           `json:"at"` // unix seconds
 }
 
 // dropCall is one drop as the site is asked it.
@@ -409,6 +414,12 @@ func (m *drops) addRow(row dropRow) *groundStack {
 		return m.stacks[row.ID]
 	}
 	s := &groundStack{ID: row.ID, Street: row.Street, C: row.C, N: row.N, R: row.R, X: row.X, Y: row.Y, By: row.By, ByName: row.Name, At: time.Unix(row.At, 0)}
+	if len(row.T) > 0 {
+		// The site's stored words, checked again as any are (a stack that lay through a rules change).
+		it := tradeItem{C: row.C, N: row.N, T: row.T}
+		m.table.cleanTag(&it, m.h.Now())
+		s.T = it.T
+	}
 	if s.ByName == "" {
 		s.ByName = "Someone"
 	}
@@ -518,6 +529,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 			it.R = &r
 		}
 	}
+	m.table.cleanTag(&it, m.h.Now()) // the dropper's own copy: its words, checked (copytags.go)
 	if m.site == nil || !m.loaded {
 		m.refuseDrop(cl, ref, "off", dropTextOff)
 		if m.site != nil {
@@ -557,7 +569,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 			out := map[string]any{"t": "ground_dropped", "op": call.Op, "ref": ref, "status": a.Status, "why": a.Why, "text": a.Text, "stack": nil}
 			var s *groundStack
 			if a.Status == "settled" {
-				s = m.addRow(dropRow{ID: call.Op, By: from, Name: name, Street: call.Street, X: float64(call.X), Y: float64(call.Y), C: it.C, N: it.N, R: it.R, At: m.h.Now().Unix()})
+				s = m.addRow(dropRow{ID: call.Op, By: from, Name: name, Street: call.Street, X: float64(call.X), Y: float64(call.Y), C: it.C, N: it.N, R: it.R, T: it.T, At: m.h.Now().Unix()})
 				if s != nil {
 					out["stack"] = s.view()
 				}
@@ -656,10 +668,7 @@ func (m *drops) take(s *groundStack, id int64, name, why string) {
 			if why == "pickup" {
 				out := map[string]any{"t": "ground_taken", "op": a.Op, "id": s.ID, "status": a.Status, "why": a.Why, "text": a.Text, "item": nil}
 				if a.Status == "settled" {
-					it := s.item()
-					if a.Item != nil {
-						it = *a.Item
-					}
+					it := m.takenItem(s, a.Item)
 					out["item"] = it
 				} else if a.Text == "" {
 					out["text"] = pickTextGone
@@ -684,15 +693,26 @@ func (m *drops) take(s *groundStack, id int64, name, why string) {
 			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_gone", "id": s.ID, "by": by, "why": kind}, 0)
 			if a.Status == "settled" && why == "return" {
 				if c := m.h.ClientLocked(id); c != nil {
-					it := s.item()
-					if a.Item != nil {
-						it = *a.Item
-					}
+					it := m.takenItem(s, a.Item)
 					m.h.SendLocked(c, map[string]any{"t": "ground_back", "op": a.Op, "id": s.ID, "item": it})
 				}
 			}
 		})
 	})
+}
+
+// takenItem is what a take gave: the site's word on it (its own stored wear and words), else the
+// stack as held here; words a site from before did not send are the stack's own.
+func (m *drops) takenItem(s *groundStack, site *tradeItem) tradeItem {
+	it := s.item()
+	if site != nil {
+		it = *site
+		if len(it.T) == 0 && it.C == s.C {
+			it.T = s.T
+		}
+	}
+	m.table.cleanTag(&it, m.h.Now())
+	return it
 }
 
 // sweepSoon starts the hourly-ish look for stacks left too long, while any lie on the ground.

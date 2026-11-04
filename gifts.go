@@ -242,6 +242,7 @@ func (m *gifts) stack(it *tradeItem) string {
 			it.R = &r
 		}
 	}
+	m.table.cleanTag(it, m.h.Now()) // the giver's own copy: its words, checked (copytags.go)
 	return ""
 }
 
@@ -321,7 +322,7 @@ func (m *gifts) give(cl *Client, frame json.RawMessage) {
 					call.Note = &n
 				}
 			}
-			it.N, it.R = 1, nil
+			it.N, it.R, it.T = 1, nil, nil
 		} else if msg.Note != nil {
 			m.refuse(cl, ref, to, toName, "bad", giftTextBad)
 			return

@@ -1,0 +1,189 @@
+package main
+
+// A copy's own words on the way between players (2026-11-04): a Cubimal's name, a Draught of Giant
+// Amicability's Giant, a Still's hopper and Hooch, a lit pumpkin's phrases. The game keeps them beside
+// each copy (js/tools.js row.tags) and sends them as an item's "t", beside its wear "r", on a
+// one-copy stack: trades, gifts (a Gift Box's contents too) and shared ground drops. Each is checked
+// here before it is kept or passed on, by the rules the game writes into data/trade.json ("tags", and
+// each class's "tag" kind), the same rules as the game's js/copy-tags.js and the site's
+// src/CopyTags.php (the three agree on tests/fixtures/copy-tag-vectors.json in the game repo):
+//
+//   - name: the characters a Cubimal name keeps (letters, digits, spaces and the word filter's
+//     symbols), at most max of them, the word filter, spaces trimmed (npc_cubimal_chick.js
+//     onInputBoxResponse 41).
+//   - phrases: at most max; each one line with no control characters or angle brackets, spaces
+//     trimmed, at most len characters, the word filter, trimmed; empty ones dropped (lit_pumpkin_base).
+//     U+FFFD (what an invalid character becomes) is dropped too.
+//   - giant: one of the giants (potion_favor.js config.giants).
+//   - still: {"hopper","hooch","workingSince"} whole numbers, at most hopper and hooch, and a start
+//     no later than now (still.js 30-31).
+//
+// Words a class does not keep, words on a stack of more than one, or words that come out empty are
+// dropped: the copy goes without them, as before. Only the side giving a copy sends its words; a
+// pickup takes the stack's own (drops.go), never a client's.
+
+import (
+	"encoding/json"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+// copyTagMax is the most bytes one copy's words may take once checked.
+const copyTagMax = 2048
+
+type copyTagRules struct {
+	Name struct {
+		Max int `json:"max"`
+	} `json:"name"`
+	Phrases struct {
+		Max int `json:"max"`
+		Len int `json:"len"`
+	} `json:"phrases"`
+	Giant struct {
+		Giants []string `json:"giants"`
+	} `json:"giant"`
+	Still struct {
+		Hopper int64 `json:"hopper"`
+		Hooch  int64 `json:"hooch"`
+	} `json:"still"`
+}
+
+type stillTag struct {
+	Hopper       int64 `json:"hopper"`
+	Hooch        int64 `json:"hooch"`
+	WorkingSince int64 `json:"workingSince"`
+}
+
+// cleanTag checks an item's words in place: kept in their checked form, or dropped.
+func (t *tradeTable) cleanTag(it *tradeItem, now time.Time) {
+	if len(it.T) == 0 {
+		it.T = nil
+		return
+	}
+	kind := t.Items[it.C].Tag
+	if kind == "" || it.N != 1 {
+		it.T = nil
+		return
+	}
+	it.T = t.Tags.clean(kind, it.T, now)
+}
+
+// clean is the checked words of kind, as JSON, or nil.
+func (r *copyTagRules) clean(kind string, raw json.RawMessage, now time.Time) json.RawMessage {
+	var out any
+	switch kind {
+	case "name":
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return nil
+		}
+		if v := cleanCopyName(s, r.Name.Max); v != "" {
+			out = v
+		}
+	case "phrases":
+		var list []json.RawMessage
+		if json.Unmarshal(raw, &list) != nil {
+			return nil
+		}
+		if len(list) > r.Phrases.Max {
+			list = list[:r.Phrases.Max]
+		}
+		var kept []string
+		for _, p := range list {
+			var s string
+			if json.Unmarshal(p, &s) != nil {
+				continue
+			}
+			if v := cleanCopyPhrase(s, r.Phrases.Len); v != "" {
+				kept = append(kept, v)
+			}
+		}
+		if len(kept) > 0 {
+			out = kept
+		}
+	case "giant":
+		var s string
+		if json.Unmarshal(raw, &s) != nil {
+			return nil
+		}
+		for _, g := range r.Giant.Giants {
+			if g == s {
+				out = s
+			}
+		}
+	case "still":
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil || m == nil {
+			return nil
+		}
+		v := stillTag{
+			Hopper:       copyTagWhole(m["hopper"], r.Still.Hopper),
+			Hooch:        copyTagWhole(m["hooch"], r.Still.Hooch),
+			WorkingSince: copyTagWhole(m["workingSince"], now.UnixMilli()),
+		}
+		if v.Hopper > 0 || v.Hooch > 0 || v.WorkingSince > 0 {
+			out = v
+		}
+	}
+	if out == nil {
+		return nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil || len(b) > copyTagMax {
+		return nil
+	}
+	return b
+}
+
+// copyTagWhole is a JSON number as a whole number from 0 to max (anything else is 0).
+func copyTagWhole(raw json.RawMessage, max int64) int64 {
+	var f float64
+	if len(raw) == 0 || json.Unmarshal(raw, &f) != nil || f != f || f <= 0 {
+		return 0
+	}
+	if f >= float64(max) {
+		return max
+	}
+	n := int64(f)
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// cleanCopyName keeps a Cubimal name's characters, at most max of them, then the word filter.
+func cleanCopyName(s string, max int) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ' ' || isWordLetter(c) || isWordDigit(c) || strings.IndexByte(wordFilterSymbols, c) >= 0 {
+			b.WriteByte(c)
+		}
+	}
+	out := b.String()
+	if len(out) > max {
+		out = out[:max]
+	}
+	return strings.Trim(filterWords(out), " ")
+}
+
+// cleanCopyPhrase is one pumpkin phrase: one line, no control characters or angle brackets, at most n characters.
+func cleanCopyPhrase(s string, n int) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == utf8.RuneError || r == '<' || r == '>':
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20 || (r >= 0x7f && r < 0xa0) || r == 0x2028 || r == 0x2029:
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.Trim(b.String(), " ")
+	if utf8.RuneCountInString(out) > n {
+		out = string([]rune(out)[:n])
+	}
+	return strings.Trim(filterWords(out), " ")
+}

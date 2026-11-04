@@ -1,0 +1,340 @@
+{
+ "_doc": "A copy's words as they may travel (js/copy-tags.js, the server's copytags.go, the site's CopyTags.php): each in, of kind, checked at now (ms), is out (null: none). Written by hand from js/copy-tags.js; the three must agree.",
+ "now": 1762000000000,
+ "vectors": [
+  {
+   "kind": "name",
+   "in": "Bob",
+   "out": "Bob"
+  },
+  {
+   "kind": "name",
+   "in": "  Mister  Fuzz  ",
+   "out": "Mister  Fuzz"
+  },
+  {
+   "kind": "name",
+   "in": "Bad fuck name",
+   "out": "Bad #!@$ name"
+  },
+  {
+   "kind": "name",
+   "in": "<b>hi</b> & \"x\"",
+   "out": "bhib & x"
+  },
+  {
+   "kind": "name",
+   "in": "Ünïcödé Nämé",
+   "out": "ncd Nm"
+  },
+  {
+   "kind": "name",
+   "in": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "out": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+   "kind": "name",
+   "in": "abc#!@$%&*xyz",
+   "out": "abc#!@$%&*xyz"
+  },
+  {
+   "kind": "name",
+   "in": "",
+   "out": null
+  },
+  {
+   "kind": "name",
+   "in": "   ",
+   "out": null
+  },
+  {
+   "kind": "name",
+   "in": 7,
+   "out": null
+  },
+  {
+   "kind": "name",
+   "in": [
+    "Bob"
+   ],
+   "out": null
+  },
+  {
+   "kind": "name",
+   "in": null,
+   "out": null
+  },
+  {
+   "kind": "name",
+   "in": "shit happens",
+   "out": "#!@$ happens"
+  },
+  {
+   "kind": "name",
+   "in": "f.u.c.k",
+   "out": "#!@$"
+  },
+  {
+   "kind": "name",
+   "in": "Tab\there",
+   "out": "Tabhere"
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "Hello",
+    "Boo!"
+   ],
+   "out": [
+    "Hello",
+    "Boo!"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "one",
+    "two",
+    "three",
+    "four"
+   ],
+   "out": [
+    "one",
+    "two",
+    "three"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "  spaced  ",
+    "",
+    "   ",
+    7,
+    null,
+    "ok"
+   ],
+   "out": [
+    "spaced"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "line\nbreak\ttab\rret"
+   ],
+   "out": [
+    "line break tab ret"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "<script>alert(1)</script>"
+   ],
+   "out": [
+    "scriptalert(1)/script"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "fuck you pumpkin"
+   ],
+   "out": [
+    "#!@$ you pumpkin"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ],
+   "out": [
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "üüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüü"
+   ],
+   "out": [
+    "üüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüüü"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "emoji 🎃 ok"
+   ],
+   "out": [
+    "emoji 🎃 ok"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "ctl\u0001 end"
+   ],
+   "out": [
+    "ctlend"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "rep�lace"
+   ],
+   "out": [
+    "replace"
+   ]
+  },
+  {
+   "kind": "phrases",
+   "in": [],
+   "out": null
+  },
+  {
+   "kind": "phrases",
+   "in": "Hello",
+   "out": null
+  },
+  {
+   "kind": "phrases",
+   "in": {
+    "a": "x"
+   },
+   "out": null
+  },
+  {
+   "kind": "phrases",
+   "in": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa fuck"
+   ],
+   "out": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ]
+  },
+  {
+   "kind": "giant",
+   "in": "cosma",
+   "out": "cosma"
+  },
+  {
+   "kind": "giant",
+   "in": "Cosma",
+   "out": null
+  },
+  {
+   "kind": "giant",
+   "in": "tii",
+   "out": null
+  },
+  {
+   "kind": "giant",
+   "in": 3,
+   "out": null
+  },
+  {
+   "kind": "giant",
+   "in": "",
+   "out": null
+  },
+  {
+   "kind": "still",
+   "in": {
+    "hopper": 120,
+    "hooch": 3,
+    "workingSince": 1761999999000
+   },
+   "out": {
+    "hopper": 120,
+    "hooch": 3,
+    "workingSince": 1761999999000
+   }
+  },
+  {
+   "kind": "still",
+   "in": {
+    "hopper": 9999,
+    "hooch": 99,
+    "workingSince": 1762000999999
+   },
+   "out": {
+    "hopper": 600,
+    "hooch": 50,
+    "workingSince": 1762000000000
+   }
+  },
+  {
+   "kind": "still",
+   "in": {
+    "hopper": -5,
+    "hooch": 2.9,
+    "workingSince": 0
+   },
+   "out": {
+    "hopper": 0,
+    "hooch": 2,
+    "workingSince": 0
+   }
+  },
+  {
+   "kind": "still",
+   "in": {
+    "hopper": "50",
+    "hooch": 1
+   },
+   "out": {
+    "hopper": 0,
+    "hooch": 1,
+    "workingSince": 0
+   }
+  },
+  {
+   "kind": "still",
+   "in": {
+    "hopper": 0,
+    "hooch": 0,
+    "workingSince": 0
+   },
+   "out": null
+  },
+  {
+   "kind": "still",
+   "in": {},
+   "out": null
+  },
+  {
+   "kind": "still",
+   "in": [
+    1,
+    2
+   ],
+   "out": null
+  },
+  {
+   "kind": "still",
+   "in": "full",
+   "out": null
+  },
+  {
+   "kind": "still",
+   "in": {
+    "hooch": 50,
+    "extra": "x"
+   },
+   "out": {
+    "hopper": 0,
+    "hooch": 50,
+    "workingSince": 0
+   }
+  },
+  {
+   "kind": "other",
+   "in": "Bob",
+   "out": null
+  }
+ ]
+}

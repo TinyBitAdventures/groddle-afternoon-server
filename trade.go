@@ -97,6 +97,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -172,18 +173,21 @@ type tradeClass struct {
 	Food   bool   `json:"food,omitempty"`  // include/food.js is_food: a street Piggy eats it off the ground (drops.go)
 	Sates  bool   `json:"sates,omitempty"` // food of base cost 5 or more: feeding it sates a hungry Piggy (npc_piggy.js 672-676)
 	Cost   int    `json:"cost,omitempty"`  // a food's base_cost: what it adds to a Batterfly's food counter (npc_batterfly.js 796-797)
+	Tag    string `json:"tag,omitempty"`   // the kind of words a copy carries as t (copytags.go): name, phrases, giant, still
 }
 
 type tradeTable struct {
 	Slots       int                   `json:"slots"`
+	Tags        copyTagRules          `json:"tags"`
 	Items       map[string]tradeClass `json:"items"`
 	Untradeable map[string]string     `json:"untradeable"`
 }
 
 type tradeItem struct {
-	C string `json:"c"`
-	N int    `json:"n"`
-	R *int   `json:"r,omitempty"`
+	C string          `json:"c"`
+	N int             `json:"n"`
+	R *int            `json:"r,omitempty"`
+	T json.RawMessage `json:"t,omitempty"` // a one-copy stack's own words (copytags.go), checked before it goes anywhere
 }
 
 // tradeGoods is what one side puts in: items and currants.
@@ -200,7 +204,7 @@ func (g tradeGoods) same(o tradeGoods) bool {
 	}
 	for i := range g.Items {
 		a, b := g.Items[i], o.Items[i]
-		if a.C != b.C || a.N != b.N || (a.R == nil) != (b.R == nil) || (a.R != nil && *a.R != *b.R) {
+		if a.C != b.C || a.N != b.N || (a.R == nil) != (b.R == nil) || (a.R != nil && *a.R != *b.R) || !bytes.Equal(a.T, b.T) {
 			return false
 		}
 	}
@@ -612,6 +616,7 @@ func (m *trades) checkGoods(g *tradeGoods) string {
 			r := cls.Pts // a tool never holds more than its capacity (tools.js capacity)
 			it.R = &r
 		}
+		m.table.cleanTag(it, m.h.Now()) // the offering side's own copy: its words, checked (copytags.go)
 	}
 	if g.Currants < 0 || g.Currants > tradeMaxCurrants {
 		return tradeTextCurrants
