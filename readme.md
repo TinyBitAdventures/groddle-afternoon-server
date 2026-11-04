@@ -119,6 +119,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `wordfilter.go` | The word filter (the remake's own addition; Glitch had none): a bad word in street, channel, party and Butler chat, a Butler message or a gift note becomes a grawlix of the same length (`fuck` to `#!@$`) before anyone gets it; a bad Charades word is refused. The list is `data/word-filter.json` from the game repo |
 | `chatlog.go` | The chat log for moderation: every street, channel and party line as typed (a filtered one marked `filtered`, with what was `shown`), refused ones marked (`slow_down`, `silenced`), one JSON line each in a file a UTC day (`-chatlog-dir`, default `chatlog/` beside `-secret-file`), kept `-chatlog-days` (30; 0 turns it off); the console reads it through the signed `chatlog` call |
 | `rook.go` | Rook attacks fought by everyone on the street |
+| `rook_admin.go` | The console's Rook calls: `rooks` lists every attack now, `rook_end` sends a Rook off its street as after its last wing beat, paying nothing |
 | `races.go` | Grab 'Em Good and the finish-line races between real players; the dead (a player on a Naraka street) cannot challenge and are left out of a starting game |
 | `hoghaul.go` | The Great Hog Haul between real players on races.go's challenge: sacks, hogties, the pen and three wins decided from `data/hoghaul.json`; the winner credited through credits.go |
 | `trade.go` | Trading items and currants |

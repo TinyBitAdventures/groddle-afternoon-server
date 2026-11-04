@@ -73,6 +73,8 @@ package main
 //     there the source rules stand.
 //   - After three wing beats the Rook flies off, and a recovery from a stun re-arms the 10-minute
 //     wing beat (rook_attack.js stunRecovery 466-473 leaves none), so an abandoned fight still ends.
+//   - An administrator can send the Rook off from the console (rook_admin.go rook_end): the same
+//     departure, nothing paid (Glitch's /kill_rook was a defeat with its rewards).
 //   - Attacks come to a street with someone on it (newLocation 30-66 picks any rookable street of
 //     the hub), and a street rests an hour after one before the Rook can come back (the source only
 //     skips the last location, line 50).
@@ -381,6 +383,7 @@ func (m *rook) Register(r *Registry) {
 	r.OnDisconnect(func(cl *Client) { delete(m.limits, cl.ID()) })
 	r.OnShutdown(func() { m.save() }) // rook_persist.go
 	r.Provide("rook.treeRooked", m.treeRooked)
+	r.Provide("rook.self", m) // the console's calls (rook_admin.go)
 }
 
 // treeRooked is whether the shared tree id on a street is rooked now (objects.go asks before a harvest).
@@ -788,12 +791,20 @@ func (m *rook) wingBeat(a *rookAttack) {
 		m.cancelWingBeat(a)
 		a.phase = "departed"
 		a.clockAt = m.h.Now().Add(rookDepartClear)
-		m.after(a, "clear", rookDepartClear, func() { m.clear(a) })
 		m.broadcast(a.street, ev)
-		m.broadcast(a.street, map[string]any{"type": "depart"})
+		m.departLocked(a, map[string]any{"type": "depart"})
 		return
 	}
 	a.clockAt = a.wingAt
+	m.broadcast(a.street, ev)
+}
+
+// departLocked is the Rook flying off (ours, header): departed, then the clear in rookDepartClear.
+// The third wing beat ends a fight this way, and so does an administrator (rook_admin.go).
+func (m *rook) departLocked(a *rookAttack, ev map[string]any) {
+	a.phase = "departed"
+	a.clockAt = m.h.Now().Add(rookDepartClear)
+	m.after(a, "clear", rookDepartClear, func() { m.clear(a) })
 	m.broadcast(a.street, ev)
 }
 
