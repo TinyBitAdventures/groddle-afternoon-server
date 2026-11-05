@@ -230,6 +230,11 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 	}
 	if inputKinds[m.T] {
 		h.touchLocked(cl.id) // presence.go: not idle
+		// playtime.go: the game's inputs only (web sockets returned above). A move that changes only the
+		// animation is the standing avatar's own idle animations (the game sends them for minutes), not the player.
+		if m.T != "move" || cl.street == "" || coord(m.X) != cl.player.X || coord(m.Y) != cl.player.Y || sign(m.Dir) != cl.player.Dir {
+			h.playInputLocked(cl)
+		}
 	}
 	switch m.T {
 	case "join":
