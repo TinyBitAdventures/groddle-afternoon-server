@@ -56,7 +56,7 @@ func loadTradeTable(t *testing.T) tradeTable {
 	if err := json.Unmarshal(tradeJSON, &table); err != nil {
 		t.Fatal(err)
 	}
-	if table.Tags.Name.Max != 32 || table.Tags.Phrases.Max != 3 || table.Items["npc_cubimal_chick"].Tag != "name" || table.Items["potion_favor"].Tag != "giant" || table.Items["still"].Tag != "still" || table.Items["pumpkin_lit_1"].Tag != "phrases" {
+	if table.Tags.Name.Max != 32 || table.Tags.Phrases.Max != 3 || table.Items["npc_cubimal_chick"].Tag != "name" || table.Items["potion_favor"].Tag != "giant" || table.Items["still"].Tag != "still" || table.Items["pumpkin_lit_1"].Tag != "phrases" || table.Items["teleportation_script"].Tag != "script" || table.Tags.Script.ID != 32 {
 		t.Fatalf("the trade table's tag rules: %+v", table.Tags)
 	}
 	return table

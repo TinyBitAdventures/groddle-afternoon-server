@@ -1,7 +1,8 @@
 package main
 
 // A copy's own words on the way between players (2026-11-04): a Cubimal's name, a Draught of Giant
-// Amicability's Giant, a Still's hopper and Hooch, a lit pumpkin's phrases. The game keeps them beside
+// Amicability's Giant, a Still's hopper and Hooch, a lit pumpkin's phrases, a Teleportation Script's
+// destination. The game keeps them beside
 // each copy (js/tools.js row.tags) and sends them as an item's "t", beside its wear "r", on a
 // one-copy stack: trades, gifts (a Gift Box's contents too) and shared ground drops. Each is checked
 // here before it is kept or passed on, by the rules the game writes into data/trade.json ("tags", and
@@ -17,6 +18,10 @@ package main
 //   - giant: one of the giants (potion_favor.js config.giants).
 //   - still: {"hopper","hooch","workingSince"} whole numbers, at most hopper and hooch, and a start
 //     no later than now (still.js 30-31).
+//   - script: a Teleportation Script's {"tsid","x","y","label","hubId","hubName","imbued"}
+//     (teleportation_script.js 298-319): tsid and hubId letters, digits, _ and -, at most id; x and y
+//     whole numbers within coord (null when not known); label and hubName as one phrase of len. No
+//     tsid is no words.
 //
 // Words a class does not keep, words on a stack of more than one, or words that come out empty are
 // dropped: the copy goes without them, as before. Only the side giving a copy sends its words; a
@@ -47,12 +52,27 @@ type copyTagRules struct {
 		Hopper int64 `json:"hopper"`
 		Hooch  int64 `json:"hooch"`
 	} `json:"still"`
+	Script struct {
+		ID    int   `json:"id"`
+		Len   int   `json:"len"`
+		Coord int64 `json:"coord"`
+	} `json:"script"`
 }
 
 type stillTag struct {
 	Hopper       int64 `json:"hopper"`
 	Hooch        int64 `json:"hooch"`
 	WorkingSince int64 `json:"workingSince"`
+}
+
+type scriptTag struct {
+	Tsid    string `json:"tsid"`
+	X       *int64 `json:"x"`
+	Y       *int64 `json:"y"`
+	Label   string `json:"label"`
+	HubID   string `json:"hubId"`
+	HubName string `json:"hubName"`
+	Imbued  bool   `json:"imbued"`
 }
 
 // cleanTag checks an item's words in place: kept in their checked form, or dropped.
@@ -125,6 +145,28 @@ func (r *copyTagRules) clean(kind string, raw json.RawMessage, now time.Time) js
 		if v.Hopper > 0 || v.Hooch > 0 || v.WorkingSince > 0 {
 			out = v
 		}
+	case "script":
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil || m == nil {
+			return nil
+		}
+		tsid := scriptID(m["tsid"], r.Script.ID)
+		if tsid == "" {
+			return nil
+		}
+		var imbued bool
+		if json.Unmarshal(m["imbued"], &imbued) != nil {
+			imbued = false
+		}
+		out = scriptTag{
+			Tsid:    tsid,
+			X:       scriptCoord(m["x"], r.Script.Coord),
+			Y:       scriptCoord(m["y"], r.Script.Coord),
+			Label:   scriptText(m["label"], r.Script.Len),
+			HubID:   scriptID(m["hubId"], r.Script.ID),
+			HubName: scriptText(m["hubName"], r.Script.Len),
+			Imbued:  imbued,
+		}
 	}
 	if out == nil {
 		return nil
@@ -150,6 +192,48 @@ func copyTagWhole(raw json.RawMessage, max int64) int64 {
 		return 0
 	}
 	return n
+}
+
+// scriptID is a JSON string of letters, digits, _ and -, at most max ("" for anything else).
+func scriptID(raw json.RawMessage, max int) string {
+	var s string
+	if len(raw) == 0 || json.Unmarshal(raw, &s) != nil || s == "" || len(s) > max {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c == '_' || c == '-' || isWordLetter(c) || isWordDigit(c)) {
+			return ""
+		}
+	}
+	return s
+}
+
+// scriptCoord is a JSON number as a whole number within max, toward zero (nil for anything else).
+func scriptCoord(raw json.RawMessage, max int64) *int64 {
+	var f *float64
+	if len(raw) == 0 || json.Unmarshal(raw, &f) != nil || f == nil || *f != *f {
+		return nil
+	}
+	var n int64
+	switch {
+	case *f >= float64(max):
+		n = max
+	case *f <= -float64(max):
+		n = -max
+	default:
+		n = int64(*f)
+	}
+	return &n
+}
+
+// scriptText is a JSON string as one phrase ("" for anything else).
+func scriptText(raw json.RawMessage, n int) string {
+	var s string
+	if len(raw) == 0 || json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return cleanCopyPhrase(s, n)
 }
 
 // cleanCopyName keeps a Cubimal name's characters, at most max of them, then the word filter.
