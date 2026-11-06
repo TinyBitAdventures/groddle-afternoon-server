@@ -290,3 +290,127 @@ func TestAHouseWithFourPlayersAndItsOwnerCountsAHostedParty(t *testing.T) {
 		t.Fatalf("owner out: %s", got)
 	}
 }
+
+// fakeVisits stands in for the site's groddle/v1/ledger/butler/visit.
+type fakeVisits struct {
+	calls  []map[string]any
+	answer func(op string, owner, visitor int64) butlerVisitAnswer
+}
+
+func (f *fakeVisits) butlerVisit(op string, owner, visitor int64) butlerVisitAnswer {
+	f.calls = append(f.calls, map[string]any{"op": op, "owner": owner, "visitor": visitor})
+	if f.answer == nil {
+		return butlerVisitAnswer{Status: "visited"}
+	}
+	return f.answer(op, owner, visitor)
+}
+
+// withVisits gives the help rig a site that notes visits; the first visitor to come gets an apple.
+func (r *helpRig) withVisits() *fakeVisits {
+	given := map[int64]bool{}
+	f := &fakeVisits{answer: func(op string, owner, visitor int64) butlerVisitAnswer {
+		if given[visitor] {
+			return butlerVisitAnswer{Status: "visited"}
+		}
+		given[visitor] = true
+		return butlerVisitAnswer{Status: "visited", Gift: &tradeItem{C: "apple", N: 1}, Credit: op}
+	}}
+	r.help.visits = f
+	return f
+}
+
+func TestTheButlerHandsAVisitorTheOwnersGiftAndTellsTheOwner(t *testing.T) {
+	r := newHelpRig(t)
+	site := r.withVisits()
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.join(ada, home(7))
+	r.pass(bo, 7, "Ada", false)
+	drain(ada)
+	drain(bo)
+	r.join(bo, home(7))
+	if len(r.pending) != 1 || len(site.calls) != 0 {
+		t.Fatalf("one call waiting, off the hub lock: %d %v", len(r.pending), site.calls)
+	}
+	r.settle()
+	if len(site.calls) != 1 || site.calls[0]["op"] != "bvisit-0000000000000001" || site.calls[0]["owner"] != int64(7) || site.calls[0]["visitor"] != int64(9) {
+		t.Fatalf("the call: %v", site.calls)
+	}
+	g := only(t, kinds(drain(bo), "butler_gift"), "butler_gift")
+	if g["owner"] != float64(7) || g["op"] != "bvisit-0000000000000001" || g["item"].(map[string]any)["c"] != "apple" || g["item"].(map[string]any)["n"] != float64(1) {
+		t.Fatalf("Bo gets the gift: %v", g)
+	}
+	v := only(t, kinds(drain(ada), "butler_visit"), "butler_visit")
+	if v["from"].(map[string]any)["name"] != "Bo" || v["gift"] != true {
+		t.Fatalf("Ada, online, hears of it: %v", v)
+	}
+	// Into the house and out again at once: not asked again; after the gap it is, and gives nothing twice.
+	r.join(bo, house(7))
+	r.join(bo, home(7))
+	if len(r.pending) != 0 {
+		t.Fatalf("the house is not the Butler's street, and the gap holds: %d", len(r.pending))
+	}
+	r.now = r.now.Add(butlerVisitGap)
+	r.join(bo, "GA5101HF7F429V5")
+	r.join(bo, home(7))
+	r.settle()
+	if len(site.calls) != 2 {
+		t.Fatalf("a second visit is noted: %v", site.calls)
+	}
+	if got := kinds(drain(bo), "butler_gift"); len(got) != 0 {
+		t.Fatalf("no second gift: %v", got)
+	}
+	if v := only(t, kinds(drain(ada), "butler_visit"), "butler_visit"); v["gift"] != false {
+		t.Fatalf("the owner hears of the visit without a gift: %v", v)
+	}
+}
+
+func TestTheButlerGivesWhileTheOwnerIsAwayButNeverToTheOwnerOrTheBlocked(t *testing.T) {
+	r := newHelpRig(t)
+	site := r.withVisits()
+	ada := r.connect(7, "Ada")
+	r.join(ada, home(7))
+	r.settle()
+	if len(site.calls) != 0 {
+		t.Fatalf("the owner is no visitor: %v", site.calls)
+	}
+	r.do(ada, map[string]any{"t": "leave"})
+	r.hub.Disconnect(ada)
+	bo := r.connect(9, "Bo")
+	r.pass(bo, 7, "Ada", false)
+	drain(bo)
+	r.join(bo, home(7))
+	r.settle()
+	if g := only(t, kinds(drain(bo), "butler_gift"), "butler_gift"); g["item"].(map[string]any)["c"] != "apple" {
+		t.Fatalf("Ada offline, Bo still gets it: %v", g)
+	}
+	cy := r.connect(11, "Cy")
+	r.pass(cy, 7, "Ada", false)
+	drain(cy)
+	r.ign.ign[[2]int64{7, 11}] = true
+	r.join(cy, home(7))
+	r.settle()
+	if len(site.calls) != 1 {
+		t.Fatalf("a blocked visitor is not asked about: %v", site.calls)
+	}
+	// The site refusing (no Butler) sends nothing.
+	site.answer = func(string, int64, int64) butlerVisitAnswer { return butlerVisitAnswer{Status: "refused", Why: "no_butler"} }
+	di := r.connect(12, "Di")
+	r.pass(di, 7, "Ada", false)
+	drain(di)
+	r.join(di, home(7))
+	r.settle()
+	if got := kinds(drain(di), "butler_gift"); len(got) != 0 || len(site.calls) != 2 {
+		t.Fatalf("refused: %v %v", got, site.calls)
+	}
+}
+
+func TestNoVisitsWithoutTheSite(t *testing.T) {
+	r := newHelpRig(t)
+	_, bo := r.visiting()
+	if len(r.pending) != 0 {
+		t.Fatalf("no site, no call: %d", len(r.pending))
+	}
+	if got := kinds(drain(bo), "butler_gift"); len(got) != 0 {
+		t.Fatalf("no gift: %v", got)
+	}
+}

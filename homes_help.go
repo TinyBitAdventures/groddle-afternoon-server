@@ -15,6 +15,16 @@ package main
 //     visitor's ledger at once and waits with the Butler for the owner, who
 //     is told now if online (the source's Butler IMed an owner away from
 //     home, bag_butler.js sendIM).
+//   - The owner's gift for visitors and the visit log (bag_butler.js giveGift
+//     2482-2540 from greetPlayer 2841/2867/2898; onPlayerEnter 4119-4166;
+//     include/butler_data.js getVisitors 927-1025): when a visitor comes onto
+//     the owner's home street (not the house), the site
+//     (groddle-afternoon-site src/ButlerGifts.php, POST
+//     groddle/v1/ledger/butler/visit, signed) notes the visit and hands the
+//     visitor one of the gift the owner left with the Butler, once per
+//     visitor while the gift is that class, owner online or not. The visitor
+//     is told what came (a ledger credit, applied once), the owner, online,
+//     that someone came, so "who visited?" is current.
 //   - A key-holder's tending of the owner's gardens is the site's to check
 //     and keep (src/HomeTending.php); its signed proof brings the owner and
 //     everyone else on that street the change at once (home_tend_tell).
@@ -32,6 +42,8 @@ package main
 //
 //	{"t":"butler_left","owner":7,"op":"butler-…","status":"settled|refused","why":"busy|full|type|blocked|no_butler|short|off","text":"…","item":{…}|null,"message":true}
 //	{"t":"butler_parcel","from":{"id":9,"name":"Bo"},"item":true,"message":true}   to the owner, online
+//	{"t":"butler_gift","owner":7,"op":"bvisit-…","item":{"c":"apple","n":1}}       to a visitor the Butler gave the owner's gift
+//	{"t":"butler_visit","from":{"id":9,"name":"Bo"},"gift":true}                   to the owner, online: a visit noted
 //	{"t":"home_tended","owner":7,"from":{"id":9,"name":"Bo"},"acts":[{"y":"street","g":"…","p":"1-2","a":"water","s":"","at":…}]}
 //	{"t":"home_hosted","guests":3}                                        to the owner in the house
 //
@@ -42,7 +54,10 @@ package main
 // Ours: a visitor may leave a parcel only from the owner's home street (the
 // source's Butler stood there and took drops in reach, proximity_override
 // 550); a parcel the site has not answered in time is refused, so nothing
-// moves twice (the site's op is idempotent).
+// moves twice (the site's op is idempotent). A visit is asked about at most
+// once per visitor and home in butlerVisitGap (walking in and out of the
+// house comes back onto the street each time; the site keeps 5 of a
+// visitor's visits anyway), one at a time.
 
 import (
 	"bytes"
@@ -65,6 +80,8 @@ import (
 
 const (
 	ledgerRouteButler = "/groddle/v1/ledger/butler"
+	ledgerRouteVisit  = "/groddle/v1/ledger/butler/visit"
+	butlerVisitGap    = 20 * time.Second
 	butlerMessageMax  = 431  // bag_butler.js:3762 input_max_chars, 5850 slice(0, 431)
 	butlerCountMax    = 9999 // a stack
 	butlerBurst       = 4
@@ -95,6 +112,56 @@ type butlerAnswer struct {
 // butlerSite is the site's Butler (httpLedger). Calls block; the module makes them off the hub lock.
 type butlerSite interface {
 	butler(op string, from, to int64, gave tradeGoods, text string) butlerAnswer
+}
+
+// butlerVisitAnswer is the site's word on a visit. Status "" means no answer came.
+type butlerVisitAnswer struct {
+	Status string     `json:"status"` // visited | refused
+	Why    string     `json:"why,omitempty"`
+	Gift   *tradeItem `json:"gift,omitempty"`
+	Credit string     `json:"credit,omitempty"`
+}
+
+// butlerVisitSite notes a visit and hands out the owner's gift (httpLedger). Calls block.
+type butlerVisitSite interface {
+	butlerVisit(op string, owner, visitor int64) butlerVisitAnswer
+}
+
+func (l *httpLedger) butlerVisit(op string, owner, visitor int64) butlerVisitAnswer {
+	body, _ := json.Marshal(map[string]any{"op": op, "owner": owner, "visitor": visitor})
+	for try := 0; try < ledgerTries; try++ {
+		if try > 0 {
+			l.pause(time.Duration(try) * 400 * time.Millisecond)
+		}
+		a, err := l.butlerVisitOnce(body)
+		if err == nil {
+			return a
+		}
+		log.Printf("butler: %s: %v", ledgerRouteVisit, err)
+	}
+	return butlerVisitAnswer{}
+}
+
+func (l *httpLedger) butlerVisitOnce(body []byte) (butlerVisitAnswer, error) {
+	var nb [8]byte
+	rand.Read(nb[:])
+	req, err := http.NewRequest(http.MethodPost, l.base+"/wp-json"+ledgerRouteVisit, bytes.NewReader(body))
+	if err != nil {
+		return butlerVisitAnswer{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Groddle-Service", signService(l.secret, http.MethodPost, ledgerRouteVisit, l.now().Unix(), hex.EncodeToString(nb[:]), body))
+	res, err := l.client.Do(req)
+	if err != nil {
+		return butlerVisitAnswer{}, err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<16))
+	var a butlerVisitAnswer
+	if (res.StatusCode == http.StatusOK || res.StatusCode == http.StatusConflict) && json.Unmarshal(raw, &a) == nil && (a.Status == "visited" || a.Status == "refused") {
+		return a, nil
+	}
+	return butlerVisitAnswer{}, fmt.Errorf("HTTP %d: %.200s", res.StatusCode, raw)
 }
 
 func (l *httpLedger) butler(op string, from, to int64, gave tradeGoods, text string) butlerAnswer {
@@ -140,7 +207,10 @@ var homeHelpSecretForTest []byte
 type homeHelp struct {
 	h      *Hub
 	secret []byte
-	site   butlerSite // nil: the Butler takes nothing (no -ledger-url, or -trade-ledger off)
+	site   butlerSite             // nil: the Butler takes nothing (no -ledger-url, or -trade-ledger off)
+	visits butlerVisitSite        // nil: no visits noted, no gifts handed out (as site)
+	seen   map[[2]int64]time.Time // [owner, visitor] -> when the site was last asked about a visit
+	asking map[[2]int64]bool      // a visit the site is weighing
 	spawn  func(func())
 	newID  func() string
 	busy   map[int64]int64 // owner -> the visitor whose parcel the site is weighing
@@ -149,7 +219,7 @@ type homeHelp struct {
 }
 
 func newHomeHelp(h *Hub) Module {
-	m := &homeHelp{h: h, secret: homeHelpSecretForTest, spawn: func(fn func()) { go fn() }, busy: map[int64]int64{}, spent: sharedProofs(), rates: map[string]*bucket{},
+	m := &homeHelp{h: h, secret: homeHelpSecretForTest, spawn: func(fn func()) { go fn() }, busy: map[int64]int64{}, seen: map[[2]int64]time.Time{}, asking: map[[2]int64]bool{}, spent: sharedProofs(), rates: map[string]*bucket{},
 		newID: func() string {
 			b := make([]byte, 8)
 			rand.Read(b)
@@ -164,6 +234,7 @@ func newHomeHelp(h *Hub) Module {
 		if site, _ := newLedgerFromFlags(); site != nil {
 			if l, ok := site.(*httpLedger); ok {
 				m.site = l
+				m.visits = l
 			}
 		}
 	}
@@ -381,6 +452,7 @@ func (m *homeHelp) tendTell(cl *Client, frame json.RawMessage) {
 
 // joined is locations/home.js:55-66: someone came into a house with its owner in it.
 func (m *homeHelp) joined(cl *Client) {
+	m.visited(cl)
 	owner, inside := homeOwner(cl.Street())
 	if !inside {
 		return
@@ -392,6 +464,50 @@ func (m *homeHelp) joined(cl *Client) {
 	if n := len(m.h.StreetLocked(cl.Street())); n >= hostedThree {
 		m.h.SendLocked(o, map[string]any{"t": "home_hosted", "guests": n - 1, "three": true, "seventeen": n >= hostedSeventeen})
 	}
+}
+
+// visited is onPlayerEnter and greetPlayer's giveGift for a visitor on the owner's home street:
+// the site notes the visit and may hand over one of the owner's gift.
+func (m *homeHelp) visited(cl *Client) {
+	owner, inside := homeOwner(cl.Street())
+	visitor := cl.ID()
+	if m.visits == nil || owner == 0 || inside || owner == visitor || m.blocked(owner, visitor) {
+		return
+	}
+	key := [2]int64{owner, visitor}
+	now := m.h.Now()
+	if m.asking[key] || (!m.seen[key].IsZero() && now.Sub(m.seen[key]) < butlerVisitGap) {
+		return
+	}
+	m.asking[key] = true
+	m.seen[key] = now
+	for k, at := range m.seen {
+		if now.Sub(at) >= butlerVisitGap && !m.asking[k] {
+			delete(m.seen, k)
+		}
+	}
+	op := "bvisit-" + m.newID()
+	site := m.visits
+	name := cl.Name()
+	m.spawn(func() {
+		a := site.butlerVisit(op, owner, visitor)
+		m.h.After(0, func() {
+			delete(m.asking, key)
+			if a.Status != "visited" {
+				return
+			}
+			given := a.Gift != nil && a.Credit != "" && butlerClassRe.MatchString(a.Gift.C) && a.Gift.N > 0
+			if given {
+				log.Printf("butler: %d's Butler gave %d one %s (%s)", owner, visitor, a.Gift.C, a.Credit)
+				if c := m.h.ClientLocked(visitor); c != nil {
+					m.h.SendLocked(c, map[string]any{"t": "butler_gift", "owner": owner, "op": a.Credit, "item": map[string]any{"c": a.Gift.C, "n": a.Gift.N}})
+				}
+			}
+			if o := m.h.ClientLocked(owner); o != nil {
+				m.h.SendLocked(o, map[string]any{"t": "butler_visit", "from": map[string]any{"id": visitor, "name": name}, "gift": given})
+			}
+		})
+	})
 }
 
 func (m *homeHelp) disconnected(cl *Client) {
