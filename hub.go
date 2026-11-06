@@ -323,6 +323,8 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		h.leaveLocked(cl)
 	case "ping":
 		h.queueLocked(cl, map[string]any{"t": "pong"})
+	case "active":
+		// A key or a click in the game: all it does is count as an input, which inputKinds did above.
 	default:
 		if fn := h.handlers[m.T]; fn != nil {
 			fn(cl, frame)

@@ -209,6 +209,24 @@ func TestPlayTimeCountsSeveralGameSocketsOnce(t *testing.T) {
 	}
 }
 
+// G526: the game's "active" keeps a player from going idle and gets no answer; it used to get bad_frame,
+// which the game's street objects read as a server without them when a street's snapshot was still to come.
+func TestActiveOnAGameSocketCountsAsAnInputAndAnswersNothing(t *testing.T) {
+	r := newPlayRig(t, "", &fakePlaySite{}, false)
+	cl := r.game(7)
+	drain(cl)
+	r.advance(4 * time.Minute)
+	r.do(cl, "active")
+	r.advance(4 * time.Minute)
+	if e := kinds(drain(cl), "error"); len(e) != 0 {
+		t.Fatalf("active answered %v", e)
+	}
+	r.hub.Disconnect(cl)
+	if got := r.waiting(7); got != 8*60 {
+		t.Fatalf("waiting %d s, want %d: without the input only 5 minutes count", got, 8*60)
+	}
+}
+
 func TestPlayTimeIgnoresWebSockets(t *testing.T) {
 	r := newPlayRig(t, "", &fakePlaySite{}, false)
 	web := r.hub.ConnectWeb(Claims{Sub: 9, Name: "Bo", Via: "web"})
