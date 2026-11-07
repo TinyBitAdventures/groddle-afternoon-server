@@ -17,6 +17,9 @@ package main
 //	{"t":"garden_act","req":8,"id":"default:1-2","verb":"water"}       (also "clear", "fertilize")
 //	{"t":"garden_act","req":9,"id":"default:1-2","verb":"harvest","perks":["full"]}
 //	{"t":"garden_act","req":10,"bed":"herb","verb":"water_all","ids":["herb:1-1","herb:2-1"]}
+//	{"t":"garden_act",…,"verb":"water","tool":"irrigator_9000","ms":2000}  the can or hoe used, for the others' overlay
+//	{"t":"garden_potion","req":11,"bed":"default","c":"potion_garden_plant","k":0,"seed":"seed_spinach","n":8}
+//	                                                                    a Master Gardener pour (gardens_potions.go)
 //	{"t":"garden_ack","id":"gg-…"}                                     a pick's crop is in the saved pack
 //	{"t":"garden_dev","lock":5000,"water":20000}                       QA only, GRODDLE_GARDENS_DEV=1
 //
@@ -30,7 +33,9 @@ package main
 //	{"t":"garden_ok",…,"verb":"harvest","grant":{"id":"gg-…","c":"spinach","n":3}}
 //	{"t":"garden_no","req":7,"id":"default:1-2","verb":"harvest","code":"locked","message":"…","now":ms,"plots":{…}}
 //	{"t":"garden_grant","id":"gg-…","c":"spinach","n":3}                    a pick not acknowledged yet (on connect)
-//	{"t":"garden_ev","street":"GCR…","by":7,"verb":"water","ids":["default:1-2"]}  someone else tended (to the others)
+//	{"t":"garden_ev","street":"GCR…","by":7,"verb":"water","ids":["default:1-2"],"tool":"watering_can","ms":2000}
+//	                                                    someone else tended (to the others); "tool": what the
+//	                                                    original showed over their head (include/garden.js 708-722)
 //
 // Plot: {"state":"seeds","seed":"seed_spinach","wet":true,"wetAt":ms,"stageAt":ms,"banked":ms,"mod":0.9,
 // "fert":true,"ripeAt":ms,"planter":7,"lock":ms}, times the server's Unix ms. A plot nobody touched is
@@ -144,22 +149,30 @@ type gardenWorld struct {
 	fertilize       float64
 	seeds           map[string]gardenSeed
 	streets         map[string]map[string]*gardenBed
+	potions         map[string]gardenPotion // gardens_potions.go
 }
 
 func loadGardenWorld(raw []byte) (*gardenWorld, error) {
 	var file struct {
 		Rules struct {
-			WaterMs   int64            `json:"waterMs"`
-			LockMs    int64            `json:"lockMs"`
-			Fertilize float64          `json:"fertilize"`
-			Seeds     map[string][]any `json:"seeds"`
+			WaterMs   int64               `json:"waterMs"`
+			LockMs    int64               `json:"lockMs"`
+			Fertilize float64             `json:"fertilize"`
+			Seeds     map[string][]any    `json:"seeds"`
+			Potions   map[string][]string `json:"potions"`
 		} `json:"rules"`
 		Streets map[string][][]any `json:"streets"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	w := &gardenWorld{waterMs: file.Rules.WaterMs, lockMs: file.Rules.LockMs, fertilize: file.Rules.Fertilize, seeds: map[string]gardenSeed{}, streets: map[string]map[string]*gardenBed{}}
+	w := &gardenWorld{waterMs: file.Rules.WaterMs, lockMs: file.Rules.LockMs, fertilize: file.Rules.Fertilize, seeds: map[string]gardenSeed{}, streets: map[string]map[string]*gardenBed{}, potions: map[string]gardenPotion{}}
+	for id, r := range file.Rules.Potions {
+		if len(r) != 2 || !potionActions[r[0]] || r[1] == "" {
+			return nil, fmt.Errorf("bad potion %s %v", id, r)
+		}
+		w.potions[id] = gardenPotion{action: r[0], noTarget: r[1]}
+	}
 	if w.waterMs <= 0 || w.lockMs <= 0 || w.fertilize <= 0 {
 		return nil, fmt.Errorf("bad rules %+v", file.Rules)
 	}
@@ -425,6 +438,7 @@ func (g *gardens) Register(r *Registry) {
 	r.Handle("garden_act", g.handleAct)
 	r.Handle("garden_ack", g.handleAck)
 	r.Handle("garden_dev", g.handleDev)
+	r.Handle("garden_potion", g.handlePotion)
 	r.OnConnect(func(cl *Client) {
 		g.resume()
 		g.resendGrants(cl)
@@ -607,6 +621,8 @@ type gardenAct struct {
 	Mod   float64  `json:"mod"`
 	Perks []string `json:"perks"`
 	IDs   []string `json:"ids"`
+	Tool  string   `json:"tool"` // water, clear: the can or hoe the page used, seen over its head by the others
+	Ms    int64    `json:"ms"`   // how long that overlay lasts
 }
 
 // gardenReply answers one act.
@@ -648,7 +664,11 @@ func (rp *gardenReply) ok(changed []string, extra map[string]any, now bool) {
 	}
 	g.broadcast(rp.street, changed, rp.cl.ID())
 	// The others see who tended (include/garden.js 708-722: the tool over the tender's head).
-	g.h.BroadcastStreetLocked(rp.street, map[string]any{"t": "garden_ev", "street": rp.street, "by": rp.cl.ID(), "verb": rp.m.Verb, "ids": changed}, rp.cl.ID())
+	ev := map[string]any{"t": "garden_ev", "street": rp.street, "by": rp.cl.ID(), "verb": rp.m.Verb, "ids": changed}
+	if tool := overlayTool(rp.m); tool != "" {
+		ev["tool"], ev["ms"] = tool, overlayMs(rp.m.Ms)
+	}
+	g.h.BroadcastStreetLocked(rp.street, ev, rp.cl.ID())
 	g.forget(rp.street)
 	if now {
 		g.save()
@@ -677,6 +697,10 @@ func (g *gardens) handleAct(cl *Client, frame json.RawMessage) {
 	g.resume()
 	rp.street = street
 	now := g.nowMs()
+	if g.bedHeld(street, m) {
+		rp.no("busy", gardenBusy)
+		return
+	}
 	var bed *gardenBed
 	if m.Verb == "water_all" {
 		bed = g.w.streets[street][m.Bed]
