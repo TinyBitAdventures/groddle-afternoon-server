@@ -166,6 +166,7 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 			ob.woodBy[id] = true
 		}
 	case "pig":
+		ob.lag, ob.holdEnd = max(0, r.Lag), timeOf(r.HoldEnd) // its shared path (G334)
 		ob.mood = clamp(r.Mood, 0, pigMoodMax)
 		ob.hunger = clamp(r.Hunger, 0, pigHungerMax)
 		ob.petted, ob.daily, ob.croak = r.Petted, r.Daily, r.Croak

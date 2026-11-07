@@ -322,3 +322,24 @@ func TestTheOldFallbackObjectsOnGentleIslandExitAreDropped(t *testing.T) {
 		t.Fatalf("Hechey Track's dead tree went too: %+v", ob)
 	}
 }
+
+// G334: a street Piggy's path is where it was after a restart.
+func TestAStreetPiggysPathOutlivesARestart(t *testing.T) {
+	path := t.TempDir() + "/objects.json"
+	start := time.UnixMilli(gameEpochMs + 1000*gameDayMs + 3_600_000)
+	r := newObjRigAt(t, path, start)
+	pig := sharedWorld.streets[defaultStreet]["pig:1"]
+	a := r.player(1, "Ada", defaultStreet, pig.x, pig.y)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	r.drain(a)
+	r.act(a, 1, "pig:1", "wait", map[string]any{})
+	r.drain(a)
+	lag := r.mod.streets[defaultStreet]["pig:1"].lag
+	if lag <= 0 {
+		t.Fatalf("no hold kept: %d", lag)
+	}
+	r2 := r.restart(path, start.Add(10*time.Second))
+	if got := r2.mod.streets[defaultStreet]["pig:1"]; got == nil || got.lag != lag {
+		t.Fatalf("after a restart: %+v, want lag %d", got, lag)
+	}
+}

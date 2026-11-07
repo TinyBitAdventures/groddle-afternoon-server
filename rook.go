@@ -444,15 +444,19 @@ func (m *rook) thingRooked(street, key string) bool {
 	return s != nil && s.rooked[key] != nil
 }
 
-// rookCreature tells the shared street objects a Chicken or Butterfly was rooked or revived, so it
+// rookCreature tells the shared street objects a Chicken, Butterfly or Piggy was rooked or revived, so it
 // lies where it was struck for everyone and goes on from there (objects_creatures.go rookCreature).
 func (m *rook) rookCreature(street, key string) {
 	sm := rookKeyRe.FindStringSubmatch(key)
-	if sm == nil || (sm[1] != "npc_chicken" && sm[1] != "npc_butterfly") {
+	if sm == nil || (sm[1] != "npc_chicken" && sm[1] != "npc_butterfly" && sm[1] != "npc_piggy") {
 		return
 	}
+	kind := strings.TrimPrefix(sm[1], "npc_")
+	if kind == "piggy" {
+		kind = "pig" // the street objects' id for it (js/street-objects.js pigId)
+	}
 	if fn, ok := m.h.ProvidedLocked("objects.rookCreature").(func(string, string) bool); ok {
-		fn(street, strings.TrimPrefix(sm[1], "npc_")+":"+sm[2])
+		fn(street, kind+":"+sm[2])
 	}
 }
 

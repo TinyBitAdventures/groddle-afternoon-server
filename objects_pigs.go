@@ -49,6 +49,16 @@ package main
 //     public street is dropped for everyone and eaten through drops.go (pigFood), which can. The
 //     game's shared Piggies leave such stacks alone.
 // Chickens, Butterflies and Batterflies are street animals the server shares too (objects_creatures.go).
+//
+// Where a street Piggy walks (G334, Austin 2026-11-07; before it was each page's own): one npc_piggy
+// item was the same animal for everyone, so every page now draws it on one path from the server's
+// clock, as Chickens and Butterflies (objects_creatures.go): to and fro round its spot with the
+// original's rooting stops (npc_piggy.js startMoving 1226-1245, onRooting 1131-1160), rolled from a
+// seed every page shares (the game's js/street-creatures.js piggyWalkAt). The server never moves it:
+// what it keeps is "lag" and "hold", so an untouched Piggy costs nothing more. A player at it holds it
+// for everyone ("wait", onInteractionStarting), a landed pet, nibble or feed holds it too and the
+// street sees it (obj_ev "pet", "nibble", "feed"), and the Rook stops its path (rookHoldCreature).
+// A walk to food stays each page's own from the same event ("ate"), and then it walks back on.
 // A nibble is held to each player's daily limit of this Piggy (ak_piggy_nibble interval_limit) and
 // its Meat is credited to the ledger (credits.go "take").
 // A street Piggy outlives a restart of the server (objects_persist.go, -objects-file): its mood,
@@ -383,6 +393,8 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 				ob.petters = map[int64]int64{}
 			}
 			ob.petters[user] = today
+			o.hold(ob, creatureHold)
+			return verdict{ok: true, extra: map[string]any{"roll": roll, "success": success}, ev: "pet"}
 		}
 		return verdict{ok: true, extra: map[string]any{"roll": roll, "success": success}}
 	case "nibble":
@@ -404,6 +416,8 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 		if roll*100 < rate {
 			ob.use(user, "nibble")
 			v.got = creditItem(creatureItem["nibble"], amount)
+			o.hold(ob, creatureHold)
+			v.ev = "nibble"
 		}
 		return v
 	case "feed":
@@ -411,7 +425,8 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 		if perks["sate"] && ob.hunger != 0 {
 			ob.hunger, ob.croak = 0, false
 		}
-		return verdict{ok: true}
+		o.hold(ob, creatureHold)
+		return verdict{ok: true, ev: "feed"}
 	case "eat":
 		if ob.hunger <= 0 {
 			return refuse("not_hungry", pigNotHungry)
@@ -470,8 +485,9 @@ func (o *objects) askFeed(cl *Client, m objAct, street string, spot *objSpot, pe
 		o.finishAct(cl, m, street, ob, before, refuse("not_food", "That Piggy doesn't want to eat that."))
 		return
 	case !food.Sates || ob.hunger == 0:
-		// Nothing anyone else sees changes: the food is the player's own to lose.
-		o.finishAct(cl, m, street, ob, before, verdict{ok: true})
+		// Nothing but the feed itself changes: the food is the player's own to lose.
+		o.hold(ob, creatureHold)
+		o.finishAct(cl, m, street, ob, before, verdict{ok: true, ev: "feed"})
 		return
 	}
 	o.uses.ask(cl, m.C, m.N, func(use map[string]any, code, message string) {
@@ -484,7 +500,8 @@ func (o *objects) askFeed(cl *Client, m objAct, street string, spot *objSpot, pe
 		if ob.hunger != 0 {
 			ob.hunger, ob.croak = 0, false
 		}
-		v := verdict{ok: true}
+		o.hold(ob, creatureHold)
+		v := verdict{ok: true, ev: "feed"}
 		if use != nil {
 			v.extra = map[string]any{"use": use}
 		}

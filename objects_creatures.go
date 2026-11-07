@@ -63,6 +63,8 @@ package main
 //
 // A street Piggy's nibble (objects_pigs.go) is held to the same per player daily limit
 // (ak_piggy_nibble) and credits its Meat the same way.
+// A street Piggy walks a shared path the same way (objects_pigs.go, G334): "lag" and "hold" on its
+// state, "wait" while a player is at it, a landed verb holds it.
 //
 // Client to server (obj_act, as objects.go): verbs squeeze (chicken), massage, milk (butterfly),
 // incubate with "c":"chicken_egg" (chicken), feed with "c" and "n" (batterfly, perks "guano1" /
@@ -189,7 +191,7 @@ func (o *objects) hold(ob *liveObj, d time.Duration) {
 }
 
 // waitCreature is npc.js onInteractionStarting 1981-1990 and checkWaiting 1878-1900 for a shared
-// Chicken or Butterfly: while any player has it open (its menu, a verb on it) it stands still for
+// Chicken, Butterfly or Piggy: while any player has it open (its menu, a verb on it) it stands still for
 // everyone (npc_chicken.js onWaitStart 1630-1639 apiStopMoving; npc_butterfly.js onWaitStart
 // 1513-1531), not only on that player's screen. Each "wait" holds it creatureWait from now and the
 // street hears the new hold. A Batterfly does not stop for a menu (its page never held it).
@@ -228,6 +230,9 @@ func rookCreatureKey(spot *objSpot) string {
 	case "chicken", "butterfly":
 		_, n, _ := strings.Cut(spot.id, ":")
 		return "npc_" + spot.kind + ":" + n
+	case "pig":
+		_, n, _ := strings.Cut(spot.id, ":")
+		return "npc_piggy:" + n
 	}
 	return ""
 }

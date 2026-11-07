@@ -551,3 +551,72 @@ func fruitTreeFor(t *testing.T, r *objRig, street string, pig *objSpot) string {
 	}
 	return tree.spot.id
 }
+
+// G334: a street Piggy walks one path for everyone: the server keeps "lag" and "hold", as for a Chicken.
+func TestStreetPiggiesWalkAPath(t *testing.T) {
+	r := newObjRig(t)
+	pig := sharedWorld.streets[defaultStreet]["pig:2"]
+	a := r.player(1, "Ada", defaultStreet, pig.x, pig.y)
+	b := r.player(2, "Bo", defaultStreet, pig.x, pig.y)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	snap := r.only(a, "objs")
+	if snap["pigpaths"] != true {
+		t.Fatalf("the snapshot says Piggies walk paths: %v", snap["pigpaths"])
+	}
+	if p := objOf(snap, "pig:2"); num(p["lag"]) != 0 || num(p["hold"]) != 0 {
+		t.Fatalf("untouched: %v", p)
+	}
+	r.drain(b)
+	// A player at it holds it for everyone, and the hold starts where their screen stopped it.
+	clock := r.now.UnixMilli() - 500
+	r.act(a, 1, "pig:2", "wait", map[string]any{"at": clock})
+	p := objOf(r.only(b, "objs"), "pig:2")
+	if num(p["hold"]) != float64(creatureWait.Milliseconds()) || num(p["lag"]) != float64(500+creatureWait.Milliseconds()) {
+		t.Fatalf("a wait: %v", p)
+	}
+	r.drain(a)
+	// A second wait inside the hold renews it without moving the clock back again.
+	r.advance(600 * time.Millisecond)
+	r.act(a, 2, "pig:2", "wait", map[string]any{"at": r.now.UnixMilli() - 1500})
+	p = objOf(r.only(b, "objs"), "pig:2")
+	if num(p["hold"]) != float64(creatureWait.Milliseconds()) {
+		t.Fatalf("renewed: %v", p)
+	}
+	r.drain(a)
+	// A landed pet holds it and the street sees it; the verb is still the server's roll.
+	r.advance(time.Minute)
+	r.drain(a)
+	r.drain(b)
+	r.mod.roll = func() float64 { return 0 }
+	r.act(a, 3, "pig:2", "pet", nil)
+	ok := r.only(a, "obj_ok")
+	if p := objOf(ok, "pig:2"); num(p["hold"]) != float64(creatureHold.Milliseconds()) {
+		t.Fatalf("a pet holds it: %v", ok)
+	}
+	got := r.drain(b)
+	ev := kinds(got, "obj_ev")
+	if len(ev) != 1 || ev[0]["ev"] != "pet" || ev[0]["id"] != "pig:2" || num(ev[0]["by"]) != 1 {
+		t.Fatalf("the street sees the pet: %v", ev)
+	}
+	if objs := kinds(got, "objs"); len(objs) != 1 || num(objOf(objs[0], "pig:2")["hold"]) <= 0 {
+		t.Fatalf("the street hears the hold: %v", objs)
+	}
+	// A missed roll holds nothing.
+	r.advance(time.Minute)
+	r.drain(a)
+	r.drain(b)
+	r.mod.roll = func() float64 { return 0.9999 }
+	r.act(a, 4, "pig:2", "pet", nil)
+	if p := objOf(r.only(a, "obj_ok"), "pig:2"); num(p["hold"]) != 0 {
+		t.Fatalf("a missed pet: %v", p)
+	}
+	// Someone far away can't hold it.
+	cy := r.player(3, "Cy", defaultStreet, pig.x+pigReachX+50, pig.y)
+	r.drain(cy)
+	r.drain(a)
+	r.drain(b)
+	r.act(cy, 1, "pig:2", "wait", map[string]any{})
+	if no := r.only(cy, "obj_no"); no["code"] != "far" {
+		t.Fatalf("far: %v", no)
+	}
+}

@@ -131,7 +131,7 @@ func TestTheRookAndTheAnimalsFindEachOthersHooks(t *testing.T) {
 		{id: "chicken:3", kind: "chicken"}:      "npc_chicken:3",
 		{id: "butterfly:12", kind: "butterfly"}: "npc_butterfly:12",
 		{id: "batterfly:0", kind: "batterfly"}:  "",
-		{id: "pig:0", kind: "pig"}:              "",
+		{id: "pig:0", kind: "pig"}:              "npc_piggy:0",
 	} {
 		if got := rookCreatureKey(spot); got != want {
 			t.Fatalf("rookCreatureKey(%s) = %q, want %q", spot.id, got, want)

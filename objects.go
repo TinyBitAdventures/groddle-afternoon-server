@@ -86,7 +86,8 @@ package main
 // {"id":"node:peat_1:0","units":3,"in":120000} (in: ms to the next +1; a Paper
 // Tree adds "petted","watered","reset"; a Dirt Pile "diggers"), {"id":"tree:1","fruit":40,"cap":98,
 // "health":8,"maturity":7,"petted":true,"watered":false}, {"id":"pig:0","mood":1,"hunger":3,
-// "petted":false,"daily":true,"croak":false,"in":3600000} (in: ms to its next twice-daily tick),
+// "petted":false,"daily":true,"croak":false,"in":3600000,"lag":0,"hold":0} (in: ms to its next
+// twice-daily tick; lag and hold: its shared path, as a Chicken's),
 // {"id":"chicken:0","lag":2500,"hold":0,"sq":1,"inc":{…}} (objects_creatures.go).
 //
 // Ids are the client's own (js/street-objects.js): rock:<i>, tree:<i>,
@@ -719,7 +720,7 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 			o.armRookFruit(street, ob, rookFruitEvery)
 		}
 	}
-	if spot.kind == "chicken" || spot.kind == "butterfly" {
+	if spot.kind == "chicken" || spot.kind == "butterfly" || spot.kind == "pig" {
 		// Rooked: it lies where the Rook struck it until it is revived (objects_creatures.go rookHoldCreature).
 		o.rookHoldCreature(street, ob)
 	}
@@ -768,7 +769,11 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		}
 		return m
 	case "pig":
-		return map[string]any{"id": s.id, "mood": ob.mood, "hunger": ob.hunger, "petted": ob.petted, "daily": ob.daily, "croak": ob.croak, "in": left(ob.tickAt)}
+		hold := int64(0)
+		if now := o.h.Now(); ob.holdEnd.After(now) {
+			hold = ob.holdEnd.Sub(now).Milliseconds()
+		}
+		return map[string]any{"id": s.id, "mood": ob.mood, "hunger": ob.hunger, "petted": ob.petted, "daily": ob.daily, "croak": ob.croak, "in": left(ob.tickAt), "lag": ob.lag, "hold": hold}
 	case "wood":
 		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
 	case "chicken", "butterfly", "batterfly":
@@ -844,7 +849,8 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 		}
 	}
 	sort.Strings(animals)
-	msg := map[string]any{"t": "objs", "street": street, "snap": true, "creatures": true, "animals": animals, "now": o.h.Now().UnixMilli(), "objs": list}
+	// "pigpaths": this server keeps street Piggies' paths (lag, hold in their state), so the page walks them on the shared clock (G334).
+	msg := map[string]any{"t": "objs", "street": street, "snap": true, "creatures": true, "pigpaths": true, "animals": animals, "now": o.h.Now().UnixMilli(), "objs": list}
 	if len(places) > 0 {
 		msg["spots"] = places
 	}
@@ -933,7 +939,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	}
 	if m.Verb == "wait" {
 		// A player at a street animal (its menu open, a verb on it): it stands for everyone, no answer.
-		if !isCreature(spot.kind) || spot.kind == "batterfly" {
+		if (!isCreature(spot.kind) && spot.kind != "pig") || spot.kind == "batterfly" {
 			no("bad_verb", "That is not something here.", nil)
 			return
 		}
