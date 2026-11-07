@@ -173,11 +173,20 @@ func TestGardenDungKickerAndTheBedHeld(t *testing.T) {
 	later()
 	r.advance(0)
 	ok := r.only(a, "garden_ok")
-	if ok["count"] != float64(2) || plotOf(t, ok, "default:1-1")["state"] != "shoots" || plotOf(t, ok, "default:2-1")["fert"] != true || plotOf(t, ok, "default:3-1")["state"] != "seeds" {
+	// Every seeded plot, the dry 3-1 too (master_garden.js 692-694), once one is wet.
+	if ok["count"] != float64(3) || plotOf(t, ok, "default:1-1")["state"] != "shoots" || plotOf(t, ok, "default:2-1")["fert"] != true || plotOf(t, ok, "default:3-1")["state"] != "shoots" {
 		t.Fatalf("a Dung-Kicker answered %v", ok)
 	}
 	r.gact(b, 2, "default:3-1", "water", nil)
 	r.only(b, "garden_ok")
+	// No wet seeded plot: refused with the potion's line.
+	r2 := newGardenRig(t, false)
+	c := r2.gardener(3, "Cy")
+	r2.g.plots[gardenStreet] = map[string]*gPlot{"default:1-1": {state: "seeds", seed: "seed_potato", mod: 1}}
+	r2.pour(c, 1, "potion_garden_fertilize", nil)
+	if no := r2.only(c, "garden_no"); no["message"] != "Only wet garden plots with seeds or seedlings can be fertilized." {
+		t.Fatalf("a Dung-Kicker on dry seeds answered %v", no)
+	}
 }
 
 func TestGardenOverlayToolsAreTheOriginals(t *testing.T) {

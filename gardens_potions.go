@@ -9,7 +9,7 @@ package main
 //	Manyharvest Cordial   (potion_garden_harvest)   picks every ripe plot, the planter's 60 seconds or not
 //	                                                (only master_garden.js 423 touches the planter, and 477
 //	                                                never checks it: Austin 2026-11-07, as the original)
-//	Dung-Kicker Drops     (potion_garden_fertilize) fertilizes every wet seeded plot not yet fertilized
+//	Dung-Kicker Drops     (potion_garden_fertilize) fertilizes every seeded plot not yet fertilized, once one is wet
 //
 //	{"t":"garden_potion","req":3,"bed":"default","c":"potion_garden_plant","k":0,"seed":"seed_spinach","n":8}
 //	   -> garden_ok {"verb":"potion","bed","c","count","before","plots","use":{…},"seeds":{…},"grants":[{id,c,n}]}
@@ -131,7 +131,8 @@ func (g *gardens) potionTargets(street string, b *gardenBed, action string, now 
 		case "pick":
 			ok = p.state == "crop" && known
 		case "fertilize":
-			ok = known && !p.fert && p.wet && p.state != "crop" && p.growing()
+			// master_garden.js 692-694 (js/master-garden.js): every seeded plot not yet fertilized, wet or not.
+			ok = known && !p.fert && p.growing()
 		}
 		if ok {
 			out = append(out, id)
@@ -177,13 +178,15 @@ func (g *gardens) handlePotion(cl *Client, frame json.RawMessage) {
 	}
 	now := g.nowMs()
 	targets := g.potionTargets(street, bed, potion.action, now)
-	if potion.action == "water" {
-		// canPour (js/master-garden.js plotsFor): a Soak-All needs a dry plot, then waters them all.
-		dry := false
+	if potion.action == "water" || potion.action == "fertilize" {
+		// canPour (js/master-garden.js plotsFor, getValidTargets): a Soak-All needs a dry plot and a
+		// Dung-Kicker a wet seeded one; then each works every plot its act takes.
+		want := false
 		for _, id := range targets {
-			dry = dry || !g.plots[street][id].wet
+			p := g.plots[street][id]
+			want = want || (potion.action == "water" && !p.wet) || (potion.action == "fertilize" && p.wet)
 		}
-		if !dry {
+		if !want {
 			targets = nil
 		}
 	}
