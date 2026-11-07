@@ -503,12 +503,13 @@ type objects struct {
 
 	// The state file (objects_persist.go): "" keeps everything in memory only.
 	path    string
-	saveAt  bool // a save is due
-	resumed bool // the file's timers are armed
+	saveAt  bool              // a save is due
+	resumed bool              // the file's timers are armed
+	bogs    map[int64]*bogRun // Peter out Peat's nine seconds, by player (objects_peat.go)
 }
 
 func newObjects(h *Hub) Module {
-	o := &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{},
+	o := &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{}, bogs: map[int64]*bogRun{},
 		dev: os.Getenv("GRODDLE_TREES_DEV") == "1", resumed: true}
 	o.initUses()
 	if o.path = statePath(objectsFileForTest, objectsFileFlag, "realtime-objects.json"); o.path != "" {
@@ -531,6 +532,7 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_dev", o.kept(o.pigDev))
 	r.Handle("obj_dust", o.kept(o.handleDust))
 	r.Handle("obj_day_dev", o.kept(o.dayDev))
+	r.Handle("bog_start", o.kept(o.handleBogStart))
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
