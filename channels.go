@@ -163,7 +163,7 @@ func (m *channels) Register(r *Registry) {
 	r.OnDisconnect(m.disconnected)
 	// reactions.go: who has a channel line (everyone in the room now), and whether id may react there.
 	r.Provide("channels.audience", m.audience)
-	r.Provide("channels.self", m) // webchat.go
+	r.Provide("channels.self", m) // webchat.go, chatdelete.go
 }
 
 // audience is room's members when id may react to its lines there ("" why), else why not.
@@ -647,7 +647,8 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 	}
 	m.broadcast(room, said, 0)
 	m.h.webRoomLocked(room, said, id) // web.go: the website's /chat/ readers of this channel
-	m.h.logChatLocked("channel", room, cl, text, "", nil)
+	// chatlog.go, with its lid, so a deletion finds it (chatdelete.go).
+	m.h.logChatLineLocked("channel", room, id, cl.Name(), text, "", nil, line.Lid)
 	m.store(room, line, false) // chatstore.go: kept on the site
 }
 

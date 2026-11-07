@@ -47,6 +47,21 @@ package main
 // removed once every line in it is more than that many days old, checked at
 // start and whenever the UTC day changes (the writer looks each minute).
 //
+// A channel or thread line (kind channel, delivered) carries "lid", the line's
+// id (reactions.go), since 2026-11-07. An administrator may delete such a line
+// for everyone (chatdelete.go, Austin 2026-11-07); the line stays in its day's
+// file as it was written, and the deletion is one line of deleted.jsonl in the
+// same directory (same modes, the same retention by the day it was made):
+//
+//	{"at":"…","where":"newbie","lid":1730000000123,"id":7,"line_at":1730000000000,"text":"d/leave","by":1,"by_name":"Austin"}
+//
+// id, line_at and text are the deleted line's (who said it, when, what was
+// shown) as far as the site or this server knew them. A search marks each line
+// it answers that was deleted: by its lid, or, for a line written before lines
+// carried one, by room, speaker, time (within chatlogDeleteSlack) and words:
+//
+//	{…,"lid":1730000000123,"deleted":{"at":"…","by":1,"by_name":"Austin"}}
+//
 // The administrators read it through the site's signed call (admin.go's
 // console, teleport.go's signing), POST /ws?call=chatlog:
 //
@@ -85,6 +100,8 @@ const (
 	chatlogPageBytes    = 192 << 10 // the site reads at most 256 KiB of an answer (src/RealtimeCall.php)
 	chatlogFlushWait    = 2 * time.Second
 	chatlogStopWait     = 5 * time.Second
+	chatlogDeletedFile  = "deleted.jsonl"
+	chatlogDeleteSlack  = 2 * time.Second // a line before lids: how far its time may be from the deleted line's
 )
 
 var (
@@ -108,20 +125,42 @@ func init() {
 
 // chatLine is one line of the log.
 type chatLine struct {
-	At        string  `json:"at"`
-	Kind      string  `json:"kind"`
-	Where     string  `json:"where"`
-	ID        int64   `json:"id"`
-	Name      string  `json:"name"`
-	Text      string  `json:"text"`
-	Delivered bool    `json:"delivered"`
-	Why       string  `json:"why,omitempty"`
-	Skipped   int     `json:"skipped,omitempty"`
-	To        []int64 `json:"to,omitempty"`
-	Filtered  bool    `json:"filtered,omitempty"`
-	Shown     string  `json:"shown,omitempty"`
+	At        string          `json:"at"`
+	Kind      string          `json:"kind"`
+	Where     string          `json:"where"`
+	ID        int64           `json:"id"`
+	Name      string          `json:"name"`
+	Text      string          `json:"text"`
+	Delivered bool            `json:"delivered"`
+	Why       string          `json:"why,omitempty"`
+	Skipped   int             `json:"skipped,omitempty"`
+	To        []int64         `json:"to,omitempty"`
+	Filtered  bool            `json:"filtered,omitempty"`
+	Shown     string          `json:"shown,omitempty"`
+	Lid       int64           `json:"lid,omitempty"`     // a delivered channel or thread line's id (reactions.go)
+	Deleted   *chatlogDeleted `json:"deleted,omitempty"` // in a search's answer: an administrator deleted it
 
-	t time.Time // when, for the day's file
+	t   time.Time     // when, for the day's file
+	del *chatDeletion // set: this is a deletion, written to deleted.jsonl
+}
+
+// chatlogDeleted is how a search marks a deleted line.
+type chatlogDeleted struct {
+	At     string `json:"at"`
+	By     int64  `json:"by"`
+	ByName string `json:"by_name"`
+}
+
+// chatDeletion is one line of deleted.jsonl (chatdelete.go writes it).
+type chatDeletion struct {
+	At     string `json:"at"`
+	Where  string `json:"where"`
+	Lid    int64  `json:"lid"`
+	ID     int64  `json:"id,omitempty"`
+	LineAt int64  `json:"line_at,omitempty"`
+	Text   string `json:"text,omitempty"`
+	By     int64  `json:"by"`
+	ByName string `json:"by_name"`
 }
 
 type chatLog struct {
@@ -201,17 +240,33 @@ func (h *Hub) logChatLocked(kind, where string, cl *Client, text, why string, to
 
 // logChatAsLocked is logChatLocked for a player with no socket here (a line said from the website, webchat.go).
 func (h *Hub) logChatAsLocked(kind, where string, id int64, name, text, why string, to []int64) {
+	h.logChatLineLocked(kind, where, id, name, text, why, to, 0)
+}
+
+// logChatLineLocked writes a line with its id (a delivered channel or thread line), so a deletion finds it.
+func (h *Hub) logChatLineLocked(kind, where string, id int64, name, text, why string, to []int64, lid int64) {
 	c := h.chatlogOf()
 	if c == nil {
 		return
 	}
 	at := h.now()
 	l := chatLine{At: at.UTC().Format("2006-01-02T15:04:05.000Z"), Kind: kind, Where: where, ID: id, Name: name,
-		Text: text, Delivered: why == "", Why: why, To: to, t: at}
+		Text: text, Delivered: why == "", Why: why, To: to, Lid: lid, t: at}
 	if shown := filterWords(text); shown != text {
 		l.Filtered, l.Shown = true, shown
 	}
 	c.addLocked(l)
+}
+
+// logDeletionLocked writes an administrator's deletion of a line (chatdelete.go). Under the hub lock; never waits.
+func (h *Hub) logDeletionLocked(d chatDeletion) {
+	c := h.chatlogOf()
+	if c == nil {
+		return
+	}
+	at := h.now()
+	d.At = at.UTC().Format("2006-01-02T15:04:05.000Z")
+	c.addLocked(chatLine{Delivered: true, t: at, del: &d})
 }
 
 func (c *chatLog) addLocked(l chatLine) {
@@ -304,6 +359,10 @@ func (c *chatLog) run() {
 		}
 	}
 	write := func(l chatLine) {
+		if l.del != nil {
+			c.writeDeletion(*l.del)
+			return
+		}
 		d := l.t.UTC().Format("2006-01-02")
 		if d != day {
 			closeFile()
@@ -365,9 +424,106 @@ func (c *chatLog) run() {
 	}
 }
 
+// writeDeletion appends one deletion to deleted.jsonl (the writer's goroutine only).
+func (c *chatLog) writeDeletion(d chatDeletion) {
+	path := filepath.Join(c.dir, chatlogDeletedFile)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		log.Printf("chatlog %s: %v", path, err)
+		c.dropped.Add(1)
+		return
+	}
+	f.Chmod(0o600)
+	b, _ := json.Marshal(d)
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		log.Printf("chatlog %s: %v", path, err)
+	}
+	f.Sync()
+	f.Close()
+}
+
+// deletions reads deleted.jsonl (a line not finished or not parsed is passed over).
+func (c *chatLog) deletions() []chatDeletion {
+	b, err := os.ReadFile(filepath.Join(c.dir, chatlogDeletedFile))
+	if err != nil {
+		return nil
+	}
+	rows := strings.Split(string(b), "\n")
+	var out []chatDeletion
+	for _, row := range rows[:len(rows)-1] {
+		var d chatDeletion
+		if json.Unmarshal([]byte(row), &d) == nil && d.Lid > 0 {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// pruneDeletions keeps the deletions made on or after cutoff's day, as the days' files are kept.
+func (c *chatLog) pruneDeletions(cutoff time.Time) {
+	path := filepath.Join(c.dir, chatlogDeletedFile)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	rows := strings.Split(string(b), "\n")
+	var keep []byte
+	gone := 0
+	for _, row := range rows[:len(rows)-1] {
+		var d chatDeletion
+		if json.Unmarshal([]byte(row), &d) == nil {
+			if at, err := time.Parse(time.RFC3339Nano, d.At); err == nil && at.UTC().Truncate(24*time.Hour).Before(cutoff) {
+				gone++
+				continue
+			}
+		}
+		keep = append(append(keep, row...), '\n')
+	}
+	if gone == 0 {
+		return
+	}
+	if len(keep) == 0 {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			log.Printf("chatlog: %v", err)
+		}
+		return
+	}
+	// A search reading it meanwhile sees the old file or the new one, never half of one.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, keep, 0o600); err != nil {
+		log.Printf("chatlog %s: %v", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("chatlog %s: %v", path, err)
+	}
+}
+
+// deletedMark is how a search marks l when one of dels deleted it, nil otherwise.
+func deletedMark(l chatLine, at time.Time, dels []chatDeletion) *chatlogDeleted {
+	if l.Kind != "channel" || !l.Delivered {
+		return nil
+	}
+	for _, d := range dels {
+		if d.Where != l.Where {
+			continue
+		}
+		hit := l.Lid > 0 && d.Lid == l.Lid
+		if l.Lid == 0 && d.ID == l.ID && d.LineAt > 0 && d.Text != "" {
+			gap := at.Sub(time.UnixMilli(d.LineAt))
+			hit = gap <= chatlogDeleteSlack && gap >= -chatlogDeleteSlack && (d.Text == l.Text || d.Text == l.Shown)
+		}
+		if hit {
+			return &chatlogDeleted{At: d.At, By: d.By, ByName: d.ByName}
+		}
+	}
+	return nil
+}
+
 // prune removes each day's file whose every line is more than c.days days old.
 func (c *chatLog) prune() {
 	cutoff := c.now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -c.days)
+	c.pruneDeletions(cutoff)
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
 		log.Printf("chatlog %s: %v", c.dir, err)
@@ -458,6 +614,7 @@ func (c *chatLog) search(q chatQuery) (lines []chatLine, next string) {
 		upTo, _ = strconv.Atoi(m[2])
 	}
 	lines = []chatLine{}
+	dels := c.deletions()
 	size := 0
 	for _, d := range days {
 		if (toDay != "" && d > toDay) || (fromDay != "" && d < fromDay) || (cursorDay != "" && d > cursorDay) {
@@ -485,6 +642,7 @@ func (c *chatLog) search(q chatQuery) (lines []chatLine, next string) {
 			if len(lines) >= q.Limit || size+len(rows[i]) > chatlogPageBytes {
 				return lines, fmt.Sprintf("%s:%d", d, i+1)
 			}
+			l.Deleted = deletedMark(l, at, dels)
 			lines = append(lines, l)
 			size += len(rows[i]) + 1
 		}

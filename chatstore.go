@@ -21,6 +21,8 @@ package main
 //	{"k":"im","seq":3,"a":7,"b":9,"line":12,"from":7,"text":"hi","at":1730000000000}  a and b the pair, a < b
 //	"parent": on a line or an im, the line it replies under in a thread (threads.go: a lid, an IM line id)
 //	{"k":"im_react","seq":4,"a":7,"b":9,"line":12,"at":1730000000000,"r":[…]}           the IM line's reactions now
+//	{"k":"delete","seq":5,"lid":1730000000123,"by":1,"at":1730000000000}             an administrator deleted that channel
+//	        or thread line for everyone (chatdelete.go); at is when, by who
 //
 // room: global, help, newbie, trade or group:<id> (channels.go rooms). Every
 // entry is idempotent at the site: a line by its lid (an IM line by its pair,
@@ -101,6 +103,8 @@ type chatEntry struct {
 	// Parent is the line a thread reply is under (threads.go): its lid for a channel line, its line id
 	// for an IM line; 0 (left out) for a line of the channel or conversation itself.
 	Parent int64 `json:"parent,omitempty"`
+	// By is the administrator who deleted a line (a "delete").
+	By int64 `json:"by,omitempty"`
 }
 
 // MarshalJSON writes a react's "r" even when it is empty (every reaction taken off).

@@ -86,6 +86,7 @@ func (m *threads) Register(r *Registry) {
 	r.Handle("thread_get", m.get)
 	r.Provide("threads.summary", m.summary)
 	r.Provide("threads.web", m.webReply) // webchat.go
+	r.Provide("threads.self", m)         // chatdelete.go
 }
 
 func (m *threads) refuse(cl *Client, message string) {
@@ -191,8 +192,8 @@ func (m *threads) say(cl *Client, frame json.RawMessage) {
 		return
 	}
 	line := chanLine{ID: id, Name: cl.Name(), Text: filterWords(text), At: m.h.Now().UnixMilli()}
-	m.add(ch, room, parent, line)
-	m.h.logChatLocked("channel", room, cl, text, "", nil)
+	line = m.add(ch, room, parent, line)
+	m.h.logChatLineLocked("channel", room, id, cl.Name(), text, "", nil, line.Lid)
 }
 
 // webReply is webchat.go's: a reply written on the website, under a line the server has for that

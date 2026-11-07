@@ -104,7 +104,7 @@ func webSayService(h *Hub, body []byte) (int, any) {
 		if line = reply(c.Channel, room, c.Parent, c.Kept, line); line.ID == 0 {
 			return http.StatusNotFound, map[string]string{"status": "no_line"} // a reply's reply, or no such line
 		}
-		h.logChatAsLocked("channel", room, c.Player, name, text, "", nil)
+		h.logChatLineLocked("channel", room, c.Player, name, text, "", nil, line.Lid)
 		return http.StatusOK, map[string]any{"status": "sent", "line": map[string]any{"lid": line.Lid, "id": line.ID, "name": line.Name, "text": line.Text, "at": line.At, "web": true, "parent": c.Parent}}
 	}
 	line.Lid = h.chatLineIDLocked("channel", room, c.Player, nil)
@@ -124,7 +124,7 @@ func webSayService(h *Hub, body []byte) (int, any) {
 	// The game names Live Help "help" whichever room it is (channels.go roomFor).
 	m.broadcast(room, said, 0)
 	h.webRoomLocked(room, said, c.Player) // web.go: the other tabs on /chat/
-	h.logChatAsLocked("channel", room, c.Player, name, text, "", nil)
+	h.logChatLineLocked("channel", room, c.Player, name, text, "", nil, line.Lid)
 	m.store(room, line, true)
 	return http.StatusOK, map[string]any{"status": "sent", "line": map[string]any{"lid": line.Lid, "id": line.ID, "name": line.Name, "text": line.Text, "at": line.At, "web": true}}
 }
