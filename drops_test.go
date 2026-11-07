@@ -3,7 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,9 +19,12 @@ type fakeDropSite struct {
 	eats   []string
 	ground []dropRow
 	err    error
-	answer dropAnswer      // for drops
-	took   map[string]bool // stacks the site has given to someone
-	silent bool            // no answer at all
+	answer dropAnswer       // for drops
+	took   map[string]bool  // stacks the site has given to someone
+	silent bool             // no answer at all
+	lose   bool             // a part settles at the site but its answer never comes back
+	count  map[string]int   // a stack's count at the site, once a part was asked of it
+	parts  map[string]int64 // <op>-t<from> -> who took that part
 }
 
 func (f *fakeDropSite) drop(c dropCall) dropAnswer {
@@ -28,7 +35,10 @@ func (f *fakeDropSite) drop(c dropCall) dropAnswer {
 	return f.answer
 }
 
-func (f *fakeDropSite) dropTake(op string, id int64, why string) dropAnswer {
+func (f *fakeDropSite) dropTake(op string, id int64, why string, n, from int) dropAnswer {
+	if n > 0 {
+		return f.dropTakePart(op, id, n, from)
+	}
 	f.takes = append(f.takes, fmt.Sprintf("%s:%d:%s", op, id, why))
 	if f.silent {
 		return dropAnswer{}
@@ -38,6 +48,40 @@ func (f *fakeDropSite) dropTake(op string, id int64, why string) dropAnswer {
 	}
 	f.took[op] = true
 	return dropAnswer{Status: "settled", Op: op + "-t"}
+}
+
+// dropTakePart is LedgerDrop::takePart: each part recorded once as <op>-t<from>.
+func (f *fakeDropSite) dropTakePart(op string, id int64, n, from int) dropAnswer {
+	f.takes = append(f.takes, fmt.Sprintf("%s:%d:pickup:%d/%d", op, id, n, from))
+	if f.silent {
+		return dropAnswer{}
+	}
+	if f.count == nil {
+		f.count, f.parts = map[string]int{}, map[string]int64{}
+	}
+	if _, ok := f.count[op]; !ok {
+		f.count[op] = from
+	}
+	left := f.count[op]
+	credit := fmt.Sprintf("%s-t%d", op, from)
+	if who, ok := f.parts[credit]; ok {
+		if who == id {
+			return dropAnswer{Status: "settled", Op: credit, N: &left}
+		}
+		return dropAnswer{Status: "refused", Why: "stale", N: &left}
+	}
+	if f.took[op] {
+		return dropAnswer{Status: "refused", Why: "gone"}
+	}
+	if left != from {
+		return dropAnswer{Status: "refused", Why: "stale", N: &left}
+	}
+	left -= n
+	f.count[op], f.parts[credit] = left, id
+	if f.lose {
+		return dropAnswer{}
+	}
+	return dropAnswer{Status: "settled", Op: credit, N: &left}
 }
 
 func (f *fakeDropSite) dropsOnGround() ([]dropRow, error) { return f.ground, f.err }
@@ -450,6 +494,211 @@ func TestAStackNobodyPicksUpGoesHomeToItsDropper(t *testing.T) {
 	if strings.Contains(fmt.Sprint(r.m.stacks), op) {
 		t.Fatalf("gone from the ground")
 	}
+}
+
+// dropTen: Ada drops 10 apples and walks off, so the others may pick them up.
+func (r *dropRig) dropTen(ada *Client) string {
+	r.do(ada, map[string]any{"t": "ground_drop", "ref": "d1", "item": map[string]any{"c": "apple", "n": 10}, "x": 1050, "y": -120})
+	r.settle()
+	r.move(ada, 3000, -100)
+	return r.site.drops[len(r.site.drops)-1].Op
+}
+
+func TestPickUpHowManyTakesAPartAndTheRestStaysForEveryone(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, cy := r.trio()
+	op := r.dropTen(ada)
+	drain(ada)
+	drain(bo)
+	drain(cy)
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 0})
+	if f := only(t, drain(bo), "ground_taken"); f["why"] != "bad" || len(r.site.takes) != 0 {
+		t.Fatalf("none is not a count: %v", f)
+	}
+	// Bo asks for 4 of the 10 (main.js 3227-3240: the stack splits, the rest stays down).
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 4})
+	// Cy asks while the site weighs Bo's part: one at a time on a stack.
+	r.do(cy, map[string]any{"t": "ground_pickup", "id": op, "n": 2})
+	if f := only(t, drain(cy), "ground_taken"); f["why"] != "busy" {
+		t.Fatalf("Cy while Bo's part is weighed: %v", f)
+	}
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != op+":9:pickup:4/10" {
+		t.Fatalf("the part asked of the site: %v", r.site.takes)
+	}
+	var got, left map[string]any
+	for _, f := range drain(bo) {
+		switch f["t"] {
+		case "ground_taken":
+			got = f
+		case "ground_left":
+			left = f
+		}
+	}
+	if got["status"] != "settled" || got["op"] != op+"-t10" || got["item"].(map[string]any)["c"] != "apple" || got["item"].(map[string]any)["n"] != float64(4) {
+		t.Fatalf("Bo is told: %v", got)
+	}
+	if left == nil || left["n"] != float64(6) {
+		t.Fatalf("Bo sees what is left too: %v", left)
+	}
+	for _, cl := range []*Client{ada, cy} {
+		f := only(t, drain(cl), "ground_left")
+		if f["id"] != op || f["n"] != float64(6) || f["street"] != dropStreet || f["by"].(map[string]any)["name"] != "Bo" {
+			t.Fatalf("the street hears the new count: %v", f)
+		}
+	}
+	if s := r.m.stacks[op]; s == nil || s.N != 6 {
+		t.Fatalf("the stack holds 6: %+v", s)
+	}
+	// Someone arriving sees 6 lying there.
+	dee := r.connect(13, "Dee")
+	r.at(dee, dropStreet, 0, 0)
+	if st := pick(t, drain(dee), "ground_state"); st["stacks"].([]any)[0].(map[string]any)["n"] != float64(6) {
+		t.Fatalf("Dee sees: %v", st)
+	}
+	// Cy asks for more than lies there: the whole stack, as before (<id>-t).
+	r.do(cy, map[string]any{"t": "ground_pickup", "id": op, "n": 9})
+	r.settle()
+	if r.site.takes[1] != op+":11:pickup" {
+		t.Fatalf("the rest goes whole: %v", r.site.takes)
+	}
+	if g := pick(t, drain(bo), "ground_gone"); g["by"].(map[string]any)["name"] != "Cy" {
+		t.Fatalf("the street hears it is gone: %v", g)
+	}
+}
+
+func TestAPartWaitsForAPiggysBite(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, _ := r.trio()
+	op := r.dropTen(ada)
+	drain(bo)
+	r.m.stacks[op].eating = true
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 3})
+	if f := only(t, drain(bo), "ground_taken"); f["why"] != "busy" || len(r.site.takes) != 0 {
+		t.Fatalf("a part names its count, so it waits: %v", f)
+	}
+}
+
+func TestAPartOfACountNoLongerThereIsRefusedAndTheStreetIsCorrected(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, cy := r.trio()
+	op := r.dropTen(ada)
+	// At the site the stack already holds 5 (a part this server never heard the answer to).
+	r.site.count = map[string]int{op: 5}
+	r.site.parts = map[string]int64{op + "-t10": 11}
+	drain(bo)
+	drain(cy)
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 4})
+	r.settle()
+	var got, left map[string]any
+	for _, f := range drain(bo) {
+		switch f["t"] {
+		case "ground_taken":
+			got = f
+		case "ground_left":
+			left = f
+		}
+	}
+	if got["status"] != "refused" || got["why"] != "stale" || got["text"] != pickTextStale || got["item"] != nil {
+		t.Fatalf("Bo is told to look again: %v", got)
+	}
+	if left == nil || left["n"] != float64(5) || left["by"] != nil {
+		t.Fatalf("the count is corrected: %v", left)
+	}
+	if f := only(t, drain(cy), "ground_left"); f["n"] != float64(5) {
+		t.Fatalf("for the whole street: %v", f)
+	}
+	// Asked again, from the count there is: 4 of 5, one left.
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 4})
+	r.settle()
+	if last := r.site.takes[len(r.site.takes)-1]; last != op+":9:pickup:4/5" || r.site.count[op] != 1 || r.m.stacks[op].N != 1 {
+		t.Fatalf("the second ask: %v, site %d", r.site.takes, r.site.count[op])
+	}
+}
+
+func TestALostAnswerAskedAgainTakesNothingMore(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, _ := r.trio()
+	op := r.dropTen(ada)
+	drain(bo)
+	// The site settles Bo's 4 but the answer is lost: Bo hears it did not work, the stack still shows 10.
+	r.site.lose = true
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 4})
+	r.settle()
+	if f := pick(t, drain(bo), "ground_taken"); f["status"] != "refused" || f["why"] != "off" {
+		t.Fatalf("no answer: %v", f)
+	}
+	if r.m.stacks[op].N != 10 || r.site.count[op] != 6 {
+		t.Fatalf("server %d, site %d", r.m.stacks[op].N, r.site.count[op])
+	}
+	// Bo asks again for 4: the same part (<op>-t10) answers as recorded; nothing more moves.
+	r.site.lose = false
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 4})
+	r.settle()
+	got := pick(t, drain(bo), "ground_taken")
+	if got["status"] != "settled" || got["op"] != op+"-t10" {
+		t.Fatalf("as recorded: %v", got)
+	}
+	if r.site.count[op] != 6 || r.m.stacks[op].N != 6 {
+		t.Fatalf("no double take: site %d, server %d", r.site.count[op], r.m.stacks[op].N)
+	}
+}
+
+func TestHTTPLedgerSendsAPartTheSameOnEveryTry(t *testing.T) {
+	secret := []byte(strings.Repeat("s", 40))
+	var mu sync.Mutex
+	var bodies []string
+	seen := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, _ := io.ReadAll(req.Body)
+		mu.Lock()
+		bodies = append(bodies, string(body))
+		seen++
+		n := seen
+		mu.Unlock()
+		if n == 1 {
+			w.WriteHeader(502) // a hiccup: tried again with the same ask
+			return
+		}
+		w.Write([]byte(`{"status":"settled","op":"drop-00000000000000aa-t10","item":{"c":"apple","n":4},"n":6}`))
+	}))
+	defer srv.Close()
+	l := &httpLedger{base: srv.URL, secret: secret, client: srv.Client(), now: time.Now, pause: func(time.Duration) {}}
+	a := l.dropTake("drop-00000000000000aa", 9, "pickup", 4, 10)
+	if a.Status != "settled" || a.Op != "drop-00000000000000aa-t10" || a.N == nil || *a.N != 6 || a.Item.N != 4 {
+		t.Fatalf("the answer: %+v", a)
+	}
+	if len(bodies) != 2 || bodies[0] != bodies[1] || bodies[0] != `{"from":10,"id":9,"n":4,"op":"drop-00000000000000aa","why":"pickup"}` {
+		t.Fatalf("the same body each try: %v", bodies)
+	}
+	// The whole stack names no count, as before.
+	bodies = nil
+	l.dropTake("drop-00000000000000aa", 9, "pickup", 0, 0)
+	if len(bodies) != 1 || bodies[0] != `{"id":9,"op":"drop-00000000000000aa","why":"pickup"}` {
+		t.Fatalf("a whole take: %v", bodies)
+	}
+}
+
+func TestAnOlderSiteThatTookTheWholeStackEmptiesTheStreet(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, cy := r.trio()
+	op := r.dropTen(ada)
+	drain(bo)
+	drain(cy)
+	old := &oldDropSite{r.site}
+	r.m.site = old
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": op, "n": 4})
+	r.settle()
+	if g := only(t, drain(cy), "ground_gone"); g["by"].(map[string]any)["name"] != "Bo" || r.m.stacks[op] != nil {
+		t.Fatalf("the stack went whole: %v", g)
+	}
+}
+
+// oldDropSite answers a part as a site from before G560 did: the whole stack under <op>-t.
+type oldDropSite struct{ *fakeDropSite }
+
+func (o *oldDropSite) dropTake(op string, id int64, why string, n, from int) dropAnswer {
+	return o.fakeDropSite.dropTake(op, id, why, 0, 0)
 }
 
 // pick is the one frame of a kind among others (a join's street list comes first).

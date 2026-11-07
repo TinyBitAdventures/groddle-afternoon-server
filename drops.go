@@ -45,7 +45,7 @@ package main
 // Client to server:
 //
 //	{"t":"ground_drop","ref":"…","item":{"c":"apple","n":3,"r":40},"x":1200,"y":-120}
-//	{"t":"ground_pickup","id":"drop-…"}
+//	{"t":"ground_pickup","id":"drop-…","n":3}          n: how many (Pick up how many?); none or the whole count takes the stack
 //
 // Server to client:
 //
@@ -54,6 +54,7 @@ package main
 //	{"t":"ground_dropped","op":"drop-…","ref":"…","status":"settled"|"refused","why":"…","text":"…","stack":Stack|null}
 //	{"t":"ground_taken","op":"drop-…-t","id":"drop-…","status":"settled"|"refused","why":"…","text":"…","item":{…}|null}
 //	{"t":"ground_gone","id":"drop-…","by":{"id":9,"name":"Bo"}|null,"why":"picked"|"returned"}
+//	{"t":"ground_left","street":"LA5…","id":"drop-…","n":7,"by":{"id":9,"name":"Bo"}|null}   some were picked up (n: left); by null: the count corrected
 //	{"t":"ground_back","op":"drop-…-t","id":"drop-…","item":{…}}       to a dropper whose stack came home
 //	{"t":"ground_eaten","street":"LA5…","id":"drop-…","n":2,"pig":"pig:1","x":1200,"y":-120}   a Piggy ate one (n: left; 0 is followed by ground_gone why "eaten")
 //
@@ -65,7 +66,17 @@ package main
 // stack nobody picks up for dropKeep goes back to the dropper's ledger and
 // pack (the source kept it forever, but nothing here should grow without
 // end); one drop and one pickup at a time per player; the picker's pack is
-// not asked whether it has room (the client checks before asking).
+// not asked whether it has room: the client asks only for what fits
+// (takeable.js 84-93 addItemStack's remainder stays on the ground).
+//
+// Pick up how many (G560): a pickup may name a part of the stack (main.js
+// 3227-3240 splits the stack, takeable_pickup takes the split part and the
+// rest stays down for everyone). The site records each part once under
+// <id>-t<from>, from being the count this module holds (a stack's count
+// only falls), so a retried ask answers as recorded and a count that is no
+// longer there is refused as stale with the count there is; the street hears
+// the new count (ground_left). The whole stack (or a part that is all of it)
+// goes as before under <id>-t.
 
 import (
 	"bytes"
@@ -114,6 +125,7 @@ const (
 	pickTextFar       = "Oops. The %s got too far away for you to pick up. Get closer and then try again." // main.js:2978
 	pickTextBusy      = "Someone is already picking that up."                                              // ours
 	pickTextOff       = "You can't pick that up right now."                                                // ours
+	pickTextStale     = "That stack changed. Have another look."                                           // ours: a count no longer there
 )
 
 var dropOpRe = regexp.MustCompile(`^drop-[0-9a-f]{16}$`)
@@ -184,13 +196,13 @@ type dropAnswer struct {
 	Op     string     `json:"op,omitempty"`   // a take: its own op
 	By     int64      `json:"by,omitempty"`   // a take refused as gone: who has it
 	Item   *tradeItem `json:"item,omitempty"` // a take: what it gave
-	N      *int       `json:"n,omitempty"`    // a bite: how many are left
+	N      *int       `json:"n,omitempty"`    // a bite or a part taken (or refused as stale): how many are left
 }
 
 // dropSite is the site's ledger (httpLedger). Calls block; the module makes them off the hub lock.
 type dropSite interface {
 	drop(c dropCall) dropAnswer
-	dropTake(op string, id int64, why string) dropAnswer
+	dropTake(op string, id int64, why string, n, from int) dropAnswer // n > 0: n of the from held (a part)
 	dropsOnGround() ([]dropRow, error)
 	dropEat(op string, from int) dropAnswer
 }
@@ -239,8 +251,13 @@ func (l *httpLedger) drop(c dropCall) dropAnswer {
 	return l.dropAsk(ledgerRouteDrop, body)
 }
 
-func (l *httpLedger) dropTake(op string, id int64, why string) dropAnswer {
-	body, _ := json.Marshal(map[string]any{"op": op, "id": id, "why": why})
+func (l *httpLedger) dropTake(op string, id int64, why string, n, from int) dropAnswer {
+	call := map[string]any{"op": op, "id": id, "why": why}
+	if n > 0 {
+		// The same body on every try (dropAsk): the site records the part once as <op>-t<from>.
+		call["n"], call["from"] = n, from
+	}
+	body, _ := json.Marshal(call)
 	return l.dropAsk(ledgerRouteDropTake, body)
 }
 
@@ -604,9 +621,10 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 	}
 	var msg struct {
 		ID string `json:"id"`
+		N  *int   `json:"n"`
 	}
-	if json.Unmarshal(frame, &msg) != nil || !dropOpRe.MatchString(msg.ID) {
-		m.refusePick(cl, "", "bad", pickTextGone)
+	if json.Unmarshal(frame, &msg) != nil || !dropOpRe.MatchString(msg.ID) || (msg.N != nil && *msg.N < 1) {
+		m.refusePick(cl, msg.ID, "bad", pickTextGone)
 		return
 	}
 	s := m.stacks[msg.ID]
@@ -618,7 +636,13 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 		m.refusePick(cl, s.ID, "off", pickTextOff)
 		return
 	}
-	if s.picking != 0 {
+	// A part: fewer than the stack holds (asking for the whole count, or more, takes the stack).
+	part := 0
+	if msg.N != nil && *msg.N < s.N {
+		part = *msg.N
+	}
+	// A part names the count it is taken from, so it waits for a Piggy's bite to land too.
+	if s.picking != 0 || (part > 0 && s.eating) {
 		m.refusePick(cl, s.ID, "busy", pickTextBusy)
 		return
 	}
@@ -644,7 +668,82 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 		}
 		s.unlocked = true
 	}
+	if part > 0 {
+		m.takePart(s, cl.ID(), cl.Name(), part)
+		return
+	}
 	m.take(s, cl.ID(), cl.Name(), "pickup")
+}
+
+// takePart asks the site for n of a stack (fewer than it holds); the rest stays for everyone.
+func (m *drops) takePart(s *groundStack, id int64, name string, n int) {
+	s.picking = id
+	m.picking[id] = s.ID
+	from := s.N
+	site := m.site
+	m.spawn(func() {
+		a := site.dropTake(s.ID, id, "pickup", n, from)
+		m.h.After(0, func() {
+			s.picking = 0
+			if m.picking[id] == s.ID {
+				delete(m.picking, id)
+			}
+			if a.Status == "" {
+				a.Status, a.Why, a.Text = "refused", "off", pickTextOff
+			}
+			out := map[string]any{"t": "ground_taken", "op": a.Op, "id": s.ID, "status": a.Status, "why": a.Why, "text": a.Text, "item": nil}
+			if a.Status == "settled" {
+				it := m.takenItem(s, a.Item)
+				if a.Item == nil {
+					it.N = n
+				}
+				out["item"] = it
+			} else if a.Text == "" {
+				out["text"] = pickTextGone
+				if a.Why == "stale" {
+					out["text"] = pickTextStale
+				}
+			}
+			if c := m.h.ClientLocked(id); c != nil {
+				m.h.SendLocked(c, out)
+			}
+			if m.stacks[s.ID] != s {
+				return
+			}
+			// Gone, or a site from before parts that took the whole stack (<id>-t): the street forgets it.
+			if a.Why == "gone" || (a.Status == "settled" && a.Op == s.ID+"-t") {
+				var by any
+				if a.Status == "settled" {
+					by = map[string]any{"id": id, "name": name}
+				}
+				m.remove(s)
+				m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_gone", "id": s.ID, "by": by, "why": "picked"}, 0)
+				return
+			}
+			if a.Status != "settled" && a.Why != "stale" {
+				return
+			}
+			// The site's count is the truth: what is left after this part, or what a stale ask found.
+			left := s.N
+			if a.N != nil {
+				left = *a.N
+			} else if a.Status == "settled" {
+				left = from - n
+			}
+			var by any
+			if a.Status == "settled" {
+				by = map[string]any{"id": id, "name": name}
+				log.Printf("drops: %s %d of %d picked by %d (%s, %d left)", s.ID, n, from, id, a.Op, left)
+			}
+			if left <= 0 {
+				m.remove(s)
+				m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_gone", "id": s.ID, "by": by, "why": "picked"}, 0)
+				return
+			}
+			s.N = left
+			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_left", "street": s.Street, "id": s.ID, "n": left, "by": by}, 0)
+		})
+	})
 }
 
 // take asks the site to put a stack in someone's ledger: a pickup, or a stack going home to its dropper.
@@ -655,7 +754,7 @@ func (m *drops) take(s *groundStack, id int64, name, why string) {
 	}
 	site := m.site
 	m.spawn(func() {
-		a := site.dropTake(s.ID, id, why)
+		a := site.dropTake(s.ID, id, why, 0, 0)
 		m.h.After(0, func() {
 			s.picking = 0
 			if m.picking[id] == s.ID {
