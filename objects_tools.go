@@ -59,9 +59,13 @@ var (
 	toolShovel  = toolNeed{"shovel", []string{"shovel", "ace_of_spades"}, "You need a working shovel."}
 	toolPeat    = toolNeed{"shovel", []string{"shovel", "ace_of_spades"}, "You'll need a working shovel first."}
 	toolCan     = toolNeed{"can", []string{"watering_can", "irrigator_9000"}, "That's going to be tough without a watering can :("}
+	// A shared public garden (gardens.go): the plots' own lines (js/garden.js waterPlot, clearPlot), as
+	// the source answers only with a talkback (include/garden.js 217-228 broken_watering_can, 326-330 broken_hoe).
+	toolGardenCan = toolNeed{"can", []string{"watering_can", "irrigator_9000"}, "You need a Watering Can to water plots."}
+	toolHoe       = toolNeed{"hoe", []string{"hoe", "high_class_hoe"}, "You need a Hoe to clear dirty plots."}
 
 	// toolClasses is every class asked about, once.
-	toolClasses = []string{"pick", "fancy_pick", "hatchet", "class_axe", "scraper", "super_scraper", "shovel", "ace_of_spades", "watering_can", "irrigator_9000"}
+	toolClasses = []string{"pick", "fancy_pick", "hatchet", "class_axe", "scraper", "super_scraper", "shovel", "ace_of_spades", "watering_can", "irrigator_9000", "hoe", "high_class_hoe"}
 )
 
 // toolFor is the tool a verb on spot needs, or nil.
@@ -148,7 +152,7 @@ func (o *objects) withTool(cl *Client, street string, need *toolNeed, refuse fun
 				return
 			}
 			held := map[string]bool{}
-			for _, n := range []toolNeed{toolPick, toolHatchet, toolScraper, toolShovel, toolCan} {
+			for _, n := range []toolNeed{toolPick, toolHatchet, toolScraper, toolShovel, toolCan, toolHoe} {
 				for _, cls := range n.classes {
 					held[n.group] = held[n.group] || classes[cls]
 				}
@@ -167,4 +171,14 @@ func (o *objects) withTool(cl *Client, street string, need *toolNeed, refuse fun
 			}
 		})
 	})
+}
+
+// withGardenTool is withTool for a shared public garden's verbs (gardens.go, through the hook
+// "objects.withTool"): group "can" or "hoe", the same answers kept for the same street visit.
+func (o *objects) withGardenTool(cl *Client, street, group string, refuse func(code, message string), act func(credit bool)) {
+	need := &toolGardenCan
+	if group == "hoe" {
+		need = &toolHoe
+	}
+	o.withTool(cl, street, need, refuse, act)
 }

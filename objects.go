@@ -539,6 +539,7 @@ func (o *objects) Register(r *Registry) {
 	r.Provide("objects.rookTree", o.rookTree)
 	r.Provide("objects.rookCreature", o.rookCreature)
 	r.Provide("objects.pigFood", o.pigFood)
+	r.Provide("objects.withTool", o.withGardenTool)
 }
 
 // treeClass is the class of the tree an id names on a street ("" when it names no tree there, or a

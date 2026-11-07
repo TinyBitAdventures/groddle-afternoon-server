@@ -1,0 +1,12 @@
+[
+  {"name": "seeds just short of shoots", "plot": {"s": "seeds", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000}, "at": 4999, "expect": {"state": "seeds", "wet": true}},
+  {"name": "seeds to shoots", "plot": {"s": "seeds", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000}, "at": 5000, "expect": {"state": "shoots", "wet": true}},
+  {"name": "shoots to a crop", "plot": {"s": "shoots", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000}, "at": 5000, "expect": {"state": "crop", "wet": true}},
+  {"name": "a dry plot keeps its progress and never grows", "plot": {"s": "seeds", "seed": "seed_spinach", "wet": false, "stageAt": 1000, "banked": 1500}, "at": 100000000, "expect": {"state": "seeds", "wet": false, "banked": 1500}},
+  {"name": "a drying mid-stage banks the growth", "plot": {"s": "seeds", "seed": "seed_spinach", "wet": true, "wetAt": -43199000, "stageAt": 0}, "at": 6000, "expect": {"state": "seeds", "wet": false, "banked": 1000}},
+  {"name": "banked growth counts toward the stage", "plot": {"s": "seeds", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000, "banked": 3000}, "at": 2000, "expect": {"state": "shoots", "wet": true}},
+  {"name": "the Growth Spurt card's modifier", "plot": {"s": "seeds", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000, "mod": 0.8}, "at": 4200, "expect": {"state": "shoots"}},
+  {"name": "potato seeds half grown", "plot": {"s": "seeds", "seed": "seed_potato", "wet": true, "wetAt": 1000, "stageAt": 1000}, "at": 20000, "expect": {"state": "seeds", "wet": true}},
+  {"name": "a crop stays a crop", "plot": {"s": "crop", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000}, "at": 50000, "expect": {"state": "crop", "wet": true}},
+  {"name": "a crop dries", "plot": {"s": "crop", "seed": "seed_spinach", "wet": true, "wetAt": 1000, "stageAt": 1000}, "at": 43201000, "expect": {"state": "crop", "wet": false}}
+]
