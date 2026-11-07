@@ -416,3 +416,106 @@ func TestEpicBlowoutDevThresholds(t *testing.T) {
 		t.Fatalf("dev blowout: %v", got)
 	}
 }
+
+// G432 random_kindness.js 274-328: Bestow is a point of the item through the ledger, then the
+// target's own game says which landed and the giver hears it.
+func TestBestowRandomKindness(t *testing.T) {
+	r := newVerbsRig(t)
+	led := newFakeUseLedger()
+	r.m.uses.ledger = led
+	r.m.uses.spawn = func(fn func()) { fn() }
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.joinAt(ada, "GA5", 100)
+	r.joinAt(bo, "GA5", 5000) // disable_proximity: across the street is fine
+	drain(ada)
+	drain(bo)
+	bestow := func(ref string) {
+		r.do(ada, map[string]any{"t": "verb_do", "verb": "bestow", "to": 9, "ref": ref, "k": 0})
+		r.fire(0) // the ledger's answer comes back under the hub lock
+	}
+	// Without the item the ledger refuses and nothing reaches the other player.
+	bestow("a")
+	done := kinds(drain(ada), "verb_done")
+	if len(done) != 1 || done[0]["status"] != "refused" || done[0]["text"] != useTextLacks {
+		t.Fatalf("no item: %v", done)
+	}
+	if got := kinds(drain(bo), "verb_got"); len(got) != 0 {
+		t.Fatalf("a bestow with no item arrived: %v", got)
+	}
+	// With it: the target hears, the giver's answer carries the ledger's word.
+	led.give(7, useKindness, 1)
+	bestow("b")
+	done = kinds(drain(ada), "verb_done")
+	if len(done) != 1 || done[0]["status"] != "ok" || done[0]["use"] == nil {
+		t.Fatalf("bestow: %v", done)
+	}
+	if use := done[0]["use"].(map[string]any); use["c"] != useKindness {
+		t.Fatalf("use: %v", use)
+	}
+	got := kinds(drain(bo), "verb_got")
+	if len(got) != 1 || got[0]["verb"] != "bestow" || got[0]["from"].(map[string]any)["name"] != "Ada" {
+		t.Fatalf("got: %v", got)
+	}
+	id := got[0]["id"].(string)
+	// Someone else can't answer, nor can the answer be more than a bestow gives.
+	r.do(ada, map[string]any{"t": "verb_landed", "id": id, "stat": "mood", "n": 50})
+	if l := kinds(drain(ada), "verb_landed"); len(l) != 0 {
+		t.Fatalf("the giver answered for the target: %v", l)
+	}
+	r.do(bo, map[string]any{"t": "verb_landed", "id": id, "stat": "mood", "n": 50})
+	l := kinds(drain(ada), "verb_landed")
+	if len(l) != 1 || l[0]["stat"] != "mood" || l[0]["n"] != float64(50) || l[0]["to"].(map[string]any)["name"] != "Bo" {
+		t.Fatalf("landed: %v", l)
+	}
+	// Once only.
+	r.do(bo, map[string]any{"t": "verb_landed", "id": id, "stat": "energy", "n": 50})
+	if l := kinds(drain(ada), "verb_landed"); len(l) != 0 {
+		t.Fatalf("answered twice: %v", l)
+	}
+	// An answer past 50, or none in kindnessWait: the giver hears only that it was bestowed.
+	bestow("c")
+	drain(ada)
+	id = kinds(drain(bo), "verb_got")[0]["id"].(string)
+	r.do(bo, map[string]any{"t": "verb_landed", "id": id, "stat": "mood", "n": 5000})
+	if l := kinds(drain(ada), "verb_landed"); len(l) != 1 || l[0]["stat"] != nil {
+		t.Fatalf("a claim past 50: %v", l)
+	}
+	bestow("d")
+	drain(ada)
+	drain(bo)
+	r.fire(kindnessWait)
+	if l := kinds(drain(ada), "verb_landed"); len(l) != 1 || l[0]["stat"] != nil {
+		t.Fatalf("no answer: %v", l)
+	}
+	// Not yourself; not someone gone.
+	bestow0 := map[string]any{"t": "verb_do", "verb": "bestow", "to": 7, "ref": "e"}
+	r.do(ada, bestow0)
+	if d := kinds(drain(ada), "verb_done"); len(d) != 1 || d[0]["text"] != verbTextSelf {
+		t.Fatalf("yourself: %v", d)
+	}
+	calls := len(led.calls)
+	r.joinAt(bo, "GIQ", 100)
+	r.do(ada, map[string]any{"t": "verb_do", "verb": "bestow", "to": 9, "ref": "f"})
+	r.fire(0)
+	if d := kinds(drain(ada), "verb_done"); len(d) != 1 || d[0]["text"] != verbTextNotThere {
+		t.Fatalf("not there: %v", d)
+	}
+	if len(led.calls) != calls {
+		t.Fatal("a point was asked for a player who isn't there")
+	}
+	// The rate brake holds a spammer to about one a second.
+	r.joinAt(bo, "GA5", 100)
+	drain(ada)
+	drain(bo)
+	led.give(7, useKindness, 40)
+	sent := 0
+	for i := 0; i < 20; i++ {
+		b, _ := json.Marshal(map[string]any{"t": "verb_do", "verb": "bestow", "to": 9, "ref": fmt.Sprintf("s%d", i)})
+		r.hub.Handle(ada, b)
+		r.fire(0)
+	}
+	sent = len(kinds(drain(bo), "verb_got"))
+	if sent > verbBurst {
+		t.Fatalf("spam: %d got through at once", sent)
+	}
+}

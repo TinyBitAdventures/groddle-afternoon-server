@@ -11,6 +11,13 @@ package main
 //   - Two pack verbs that ask whom (requires_target_pc, not emotes): the
 //     Watering Can's Soak (items/watering_can.js 273-332) and a Musicblock's
 //     Play for (musicblock_*.js verbs.play_for 94-252).
+//   - Random Kindness's Bestow (items/random_kindness.js 274-328, requires_target_pc,
+//     disable_proximity): a third pack verb that asks whom, within the street, with no
+//     distance limit. Each one uses a point of the item through the site's ledger first
+//     (objects_uses.go, 20 points, gone at 0), so a client without one can't bestow, and
+//     can't send more than the item's 20. The target's game answers verb_landed with what
+//     it gained (mood if its mood is below its energy, else energy: its own metabolics,
+//     as every reward is) and the giver hears which landed.
 //   - Charades (items/potion_charades.js 511-552, catalog_buffs.js charades
 //     400-426, main.js 1766-1793, location.js 889-892): the drinker picks a
 //     secret word the server keeps; the first other player on the street to
@@ -31,7 +38,9 @@ package main
 //
 // Client to server:
 //
-//	{"t":"verb_do","verb":"hug|high_five|kiss|moon|splank|soak|play_for","to":9,"ref":"…","block":"musicblock_d_green_01","garlic":false}
+//	{"t":"verb_do","verb":"hug|high_five|kiss|moon|splank|soak|play_for|bestow","to":9,"ref":"…","block":"musicblock_d_green_01","garlic":false,"k":0}
+//	        (k: bestow, which Random Kindness: its place among the player's in the pack, objects_uses.go copyOf)
+//	{"t":"verb_landed","id":"v-…","stat":"mood|energy","n":50}   the target's game: what a bestow gave it
 //	{"t":"charades_start","word":"…"}            the word the drinker chose (cleaned here)
 //	{"t":"verbs_influence","on":true}             one of the four party buffs is on (or none is)
 //
@@ -39,6 +48,7 @@ package main
 //
 //	{"t":"verb_done","verb":"hug","ref":"…","status":"ok|refused","text":"…","to":{"id":9,"name":"Bo"},"id":"v-…","block":"…","garlic":false}
 //	{"t":"verb_got","verb":"hug","id":"v-…","from":{"id":7,"name":"Ada"},"block":"…","garlic":false}
+//	{"t":"verb_landed","verb":"bestow","id":"v-…","to":{"id":9,"name":"Bo"},"stat":"mood","n":50}   to the giver (no stat: nothing landed, or no answer in kindnessWait)
 //	{"t":"charades_started","status":"ok|refused","text":"…","word":"…","ends":1730000000000}   to the drinker (refused why "word": a bad word, wordfilter.go)
 //	{"t":"charades_on","from":{"id":7,"name":"Ada"},"ends":…,"text":"Ada is playing Charades. …"}   to the street (and to a joiner)
 //	{"t":"charades_end","why":"guessed|ruined|timeout|left","word":"…","winner":{…}}            to the drinker
@@ -102,6 +112,8 @@ const (
 	blowoutPlayers = 12                // home.js:198 activePlayers.length >= 12
 	blowoutHigh    = 11                // home.js:213 drugged >= 11
 	blowoutDevN    = 3                 // home.js:198, 213 config.is_dev
+	kindnessMost   = 50                // random_kindness.js:299, 306 metabolics_add_*(50)
+	kindnessWait   = 4 * time.Second   // ours: how long the giver's line waits for the target's game
 
 	verbTextSelf      = "You can't do that to yourself."                                                                        // main.js:3166
 	verbTextNotThere  = "You can't do that to a player that isn't there!"                                                       // main.js:3177
@@ -139,6 +151,7 @@ var verbRules = map[string]verbRule{
 	"splank":    {race: verbTextPlankRace},
 	"soak":      {},
 	"play_for":  {},
+	"bestow":    {},
 }
 
 // The four buffs home.js:207 counts as under the influence (js/player-verbs-mp.js INFLUENCE_BUFFS).
@@ -163,17 +176,27 @@ type verbs struct {
 	games map[int64]*charadesGame // drinker -> game
 	high  map[int64]bool          // players under the influence (their game's word)
 	blown map[string]map[int64]bool
+	uses  *useAsker               // Random Kindness's points through the site's ledger
+	kind  map[string]*kindnessOut // bestows waiting for the target's verb_landed
+}
+
+// kindnessOut is one bestow the target's game has yet to answer.
+type kindnessOut struct {
+	from, to int64
+	stop     func() bool
 }
 
 func newVerbs(h *Hub) Module {
 	var b [4]byte
 	rand.Read(b[:])
 	return &verbs{h: h, boot: hex.EncodeToString(b[:]), dev: os.Getenv("GRODDLE_VERBS_DEV") == "1",
-		rates: map[int64]*bucket{}, games: map[int64]*charadesGame{}, high: map[int64]bool{}, blown: map[string]map[int64]bool{}}
+		rates: map[int64]*bucket{}, games: map[int64]*charadesGame{}, high: map[int64]bool{}, blown: map[string]map[int64]bool{},
+		uses: newUseAsker(h, "verbs: Random Kindness"), kind: map[string]*kindnessOut{}}
 }
 
 func (m *verbs) Register(r *Registry) {
 	r.Handle("verb_do", m.do)
+	r.Handle("verb_landed", m.landed)
 	r.Handle("charades_start", m.charadesStart)
 	r.Handle("verbs_influence", m.influence)
 	r.OnChat(m.chat)
@@ -200,6 +223,7 @@ func (m *verbs) do(cl *Client, frame json.RawMessage) {
 		Ref    string `json:"ref"`
 		Block  string `json:"block"`
 		Garlic bool   `json:"garlic"`
+		K      *int   `json:"k"`
 	}
 	_ = json.Unmarshal(frame, &msg)
 	ref := msg.Ref
@@ -273,25 +297,109 @@ func (m *verbs) do(cl *Client, frame json.RawMessage) {
 			return
 		}
 	}
+	if msg.Verb == "bestow" {
+		// random_kindness.js: disable_proximity. The item's point is the ledger's to confirm and use first.
+		street, to := cl.Street(), t.ID()
+		m.uses.askCopy(cl, useKindness, 0, copyOf(msg.K), func(use map[string]any, code, message string) {
+			if code != "" {
+				refuse(message)
+				return
+			}
+			t := m.h.ClientLocked(to)
+			if !cl.Online() || t == nil || !t.Online() || t.Street() != street || cl.Street() != street {
+				// They left while the site answered: the point goes back, nothing happened.
+				m.uses.giveBack(use, cl.ID())
+				if cl.Online() {
+					refuse(verbTextNotThere)
+				}
+				return
+			}
+			id := m.land(cl, t, "bestow", ref, use, msg.Block, msg.Garlic)
+			m.awaitKindness(id, cl.ID(), to)
+		})
+		return
+	}
 	ax, ay := cl.Pos()
 	tx, ty := t.Pos()
 	if math.Hypot(ax-tx, ay-ty) > verbRadius {
 		refuse(verbTextFar)
 		return
 	}
+	m.land(cl, t, msg.Verb, ref, nil, msg.Block, msg.Garlic)
+}
+
+// land is the server's word that an act happened: to the target, then to the doer. Its id.
+func (m *verbs) land(cl, t *Client, verb, ref string, use map[string]any, block string, garlic bool) string {
 	m.seq++
 	id := "v-" + m.boot + "-" + strconv.FormatUint(m.seq, 36)
-	got := map[string]any{"t": "verb_got", "verb": msg.Verb, "id": id, "from": verbWho(cl)}
-	done := map[string]any{"t": "verb_done", "verb": msg.Verb, "ref": ref, "status": "ok", "id": id, "to": verbWho(t)}
-	if msg.Block != "" {
-		got["block"], done["block"] = msg.Block, msg.Block
+	got := map[string]any{"t": "verb_got", "verb": verb, "id": id, "from": verbWho(cl)}
+	done := map[string]any{"t": "verb_done", "verb": verb, "ref": ref, "status": "ok", "id": id, "to": verbWho(t)}
+	if block != "" {
+		got["block"], done["block"] = block, block
 	}
-	if msg.Verb == "kiss" {
-		got["garlic"], done["garlic"] = msg.Garlic, msg.Garlic
+	if verb == "kiss" {
+		got["garlic"], done["garlic"] = garlic, garlic
+	}
+	if use != nil {
+		done["use"] = use
 	}
 	m.h.SendLocked(t, got)
 	m.h.SendLocked(cl, done)
-	log.Printf("verbs: %d %s %d on %s (%s)", cl.ID(), msg.Verb, t.ID(), cl.Street(), id)
+	log.Printf("verbs: %d %s %d on %s (%s)", cl.ID(), verb, t.ID(), cl.Street(), id)
+	return id
+}
+
+// awaitKindness waits for the target's game to say what a bestow gave it.
+func (m *verbs) awaitKindness(id string, from, to int64) {
+	out := &kindnessOut{from: from, to: to}
+	out.stop = m.h.After(kindnessWait, func() { m.tellKindness(id, "", 0) })
+	m.kind[id] = out
+}
+
+// tellKindness gives the giver the line's ending (self_msgs, random_kindness.js 302, 309).
+func (m *verbs) tellKindness(id, stat string, n int) {
+	out := m.kind[id]
+	if out == nil {
+		return
+	}
+	delete(m.kind, id)
+	if out.stop != nil {
+		out.stop()
+	}
+	giver := m.h.ClientLocked(out.from)
+	if giver == nil || !giver.Online() {
+		return
+	}
+	who := map[string]any{"id": out.to}
+	if t := m.h.ClientLocked(out.to); t != nil {
+		who = verbWho(t)
+	}
+	msg := map[string]any{"t": "verb_landed", "verb": "bestow", "id": id, "to": who}
+	if stat != "" {
+		msg["stat"], msg["n"] = stat, n
+	}
+	m.h.SendLocked(giver, msg)
+}
+
+// landed is the target's game saying what a bestow gave it. Only the bestow's target may answer,
+// once, and only what a bestow can give: it moves nothing but the words on the giver's screen.
+func (m *verbs) landed(cl *Client, frame json.RawMessage) {
+	var msg struct {
+		ID   string `json:"id"`
+		Stat string `json:"stat"`
+		N    int    `json:"n"`
+	}
+	if json.Unmarshal(frame, &msg) != nil {
+		return
+	}
+	out := m.kind[msg.ID]
+	if out == nil || out.to != cl.ID() {
+		return
+	}
+	if (msg.Stat != "mood" && msg.Stat != "energy") || msg.N < 1 || msg.N > kindnessMost {
+		msg.Stat, msg.N = "", 0
+	}
+	m.tellKindness(msg.ID, msg.Stat, msg.N)
 }
 
 // —— Charades ——

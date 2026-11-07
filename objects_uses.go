@@ -50,8 +50,8 @@ package main
 //
 // The same asking serves the other shared acts that use something up (slice 5):
 // a street Piggy sated by food (objects_pigs.go askFeed: whole items, "n"), a
-// Rook Balm's full revive (rook.go), and Sneezing and Sparkle Powder spread to
-// the street (hi.go). Each module holds its own useAsker.
+// Rook Balm's full revive (rook.go), Sneezing and Sparkle Powder spread to
+// the street (hi.go), and a Random Kindness bestowed (verbs.go). Each module holds its own useAsker.
 //
 // Without the site's ledger (-trade-ledger off, tests) the jar is the
 // client's word as before and "use" is left out.
@@ -91,6 +91,7 @@ const (
 	useBalm            = "potion_rook_balm"
 	useSneezing        = "sneezing_powder"
 	useSparkle         = "sparkle_powder"
+	useKindness        = "random_kindness" // verbs.go: its 20 points (random_kindness.js points_capacity)
 )
 
 // useOpRe is newUseOp's shape (the site's LedgerUse::isUse).
@@ -379,6 +380,15 @@ func (a *useAsker) askCopy(cl *Client, class string, n, k int, then func(use map
 			}
 		})
 	})
+}
+
+// giveBack returns a use whose act fell through after the site took it (the target left meanwhile):
+// the same void a lost answer gets (useVoids).
+func (a *useAsker) giveBack(use map[string]any, id int64) {
+	op, _ := use["op"].(string)
+	if l, ok := a.ledger.(*httpLedger); ok && op != "" {
+		l.useJournal().lost(op, id)
+	}
 }
 
 // askUse is the objects module's ask for one charge.
