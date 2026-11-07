@@ -56,7 +56,8 @@ package main
 //     (inc_groups.js:329, 346).
 //   - The cone of silence: "Sorry, you're currently suspended from this
 //     chat." in Global Chat and the Trade Channel (main.js:5821, 5833), and
-//     the help cone in Live Help (main.js:5809). Group chat has no cone.
+//     the help cone in Live Help (main.js:5809). Group chat has no cone. The
+//     chat cone reaches Local chat too (hub.go, main.js:1708-1710).
 //   - Going offline leaves every chat (inc_groups.js:371-391 groups_logout).
 //   - Blocking: the source delivers a blocked player's lines and the client
 //     drops them (RightSideManager.as:218-223 chatUpdate, pc.ignored), so the
@@ -420,6 +421,10 @@ func (m *channels) watchMsg(cl *Client, frame json.RawMessage) {
 	id := cl.ID()
 	w := &chanWatch{groups: groups, rooms: rooms, silence: silence, exp: time.Unix(c.Exp, 0)}
 	m.watch[id] = w
+	// Local chat's cone stands on the newest word from the site (hub.go, G480).
+	if m.h.setConeLocked(id, silence["chat"], c.Iat) {
+		m.h.SendLocked(cl, map[string]any{"t": "cone", "on": silence["chat"]})
+	}
 	// A chat the new list no longer allows closes; Live Help moves to the
 	// channel the player's level now gives (main.js:579-585).
 	open := m.open[id]

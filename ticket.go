@@ -22,6 +22,8 @@ type Claims struct {
 	Via string `json:"via,omitempty"`
 	// Off is the account's "Appear offline" setting when the ticket was made (presence.go).
 	Off bool `json:"off,omitempty"`
+	// Cone: the character is under the chat cone of silence when the ticket was made (hub.go, G480).
+	Cone bool `json:"cone,omitempty"`
 }
 
 var (

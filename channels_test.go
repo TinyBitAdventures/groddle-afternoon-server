@@ -437,3 +437,93 @@ func TestRosterText(t *testing.T) {
 		t.Fatalf("many: %q", got)
 	}
 }
+
+// G480: the chat cone holds in Local chat (main.js doLocalChat 1708-1710, doLocalChatStart 1679).
+func TestConeOfSilenceHoldsInLocalChat(t *testing.T) {
+	r := newChanRig(t)
+	const street = "GA5101HF7F429V5"
+	a := r.hub.Connect(Claims{Sub: 7, Name: "Ada", Iat: r.now.Unix(), Cone: true})
+	hello := kinds(drain(a), "hello")
+	if len(hello) != 1 || hello[0]["cone"] != true {
+		t.Fatalf("the ticket's cone is in hello: %v", hello)
+	}
+	b := r.connect(9, "Bo")
+	var heard []string
+	r.hub.onChat = append(r.hub.onChat, func(cl *Client, text string) { heard = append(heard, text) })
+	r.send(a, map[string]any{"t": "join", "street": street})
+	r.send(b, map[string]any{"t": "join", "street": street})
+	drain(a)
+	drain(b)
+
+	say := func(cl *Client) {
+		r.now = r.now.Add(time.Second)
+		r.send(cl, map[string]any{"t": "chat", "text": "hello"})
+	}
+	// A silenced line reaches nobody, no Feat or hi hears it, and the speaker is told.
+	say(a)
+	if got := kinds(drain(b), "said"); len(got) != 0 {
+		t.Fatalf("a silenced line reached the street: %v", got)
+	}
+	aGot := drain(a)
+	if errs := kinds(aGot, "error"); len(errs) != 1 || errs[0]["code"] != "suspended" || errs[0]["message"] != chanSuspended {
+		t.Fatalf("told: %v", errs)
+	}
+	if len(kinds(aGot, "said")) != 0 || len(heard) != 0 {
+		t.Fatalf("not even to the speaker or the chat hooks: %v %v", aGot, heard)
+	}
+	// No typing mark.
+	r.send(a, map[string]any{"t": "typing"})
+	if got := kinds(drain(b), "typing"); len(got) != 0 {
+		t.Fatalf("a mark from under the cone: %v", got)
+	}
+	// Someone else is unaffected, and the silenced player still hears them.
+	say(b)
+	if got := kinds(drain(a), "said"); len(got) != 1 || got[0]["id"] != float64(9) {
+		t.Fatalf("the silenced player still hears: %v", got)
+	}
+	if got := kinds(drain(b), "said"); len(got) != 1 {
+		t.Fatalf("an unsilenced line: %v", got)
+	}
+	r.send(b, map[string]any{"t": "typing"})
+	if got := kinds(drain(a), "typing"); len(got) != 1 {
+		t.Fatalf("an unsilenced mark: %v", got)
+	}
+	// A list made before the ticket can't lift it.
+	old := chanSign(chanTestSecret, map[string]any{"k": "groups", "sub": 7, "g": "", "c": "global", "s": "", "iat": r.now.Add(-time.Hour).Unix(), "exp": r.now.Add(time.Hour).Unix()})
+	r.send(a, map[string]any{"t": "groups_watch", "token": old})
+	if got := kinds(drain(a), "cone"); len(got) != 0 {
+		t.Fatalf("an old list: %v", got)
+	}
+	say(a)
+	if got := kinds(drain(b), "said"); len(got) != 0 {
+		t.Fatal("an old list lifted the cone")
+	}
+	drain(a)
+	// A newer list lifts it and tells the game; the help cone alone is not this cone (player.js 2927-2934).
+	r.now = r.now.Add(time.Minute)
+	r.watch(a, nil, "global", "help")
+	if got := kinds(drain(a), "cone"); len(got) != 1 || got[0]["on"] != false {
+		t.Fatalf("lifted: %v", got)
+	}
+	say(a)
+	if got := kinds(drain(b), "said"); len(got) != 1 || got[0]["id"] != float64(7) {
+		t.Fatalf("after the lift: %v", got)
+	}
+	drain(a)
+	// And a newer list can lay it on someone already playing.
+	r.now = r.now.Add(time.Minute)
+	r.watch(a, nil, "global", "chat")
+	if got := kinds(drain(a), "cone"); len(got) != 1 || got[0]["on"] != true {
+		t.Fatalf("laid: %v", got)
+	}
+	say(a)
+	if got := kinds(drain(b), "said"); len(got) != 0 {
+		t.Fatal("after the cone came down")
+	}
+	// A reconnect keeps it from the new ticket, whatever the old socket had.
+	r.now = r.now.Add(time.Minute)
+	a2 := r.hub.Connect(Claims{Sub: 7, Name: "Ada", Iat: r.now.Unix()})
+	if hello := kinds(drain(a2), "hello"); len(hello) != 1 || hello[0]["cone"] != nil {
+		t.Fatalf("a clean ticket: %v", hello)
+	}
+}

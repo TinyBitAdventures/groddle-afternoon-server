@@ -5,7 +5,7 @@ package main
 // (hub.go "chat"), the channels and group chats (channels.go channel_say) and
 // party chat (party.go party_chat). A line the server refused is written too,
 // marked, since that is what moderation looks for: "slow_down" (over the rate)
-// and "silenced" (a channel's cone of silence). A line nobody could hear (no
+// and "silenced" (the cone of silence, in a channel or Local chat). A line nobody could hear (no
 // street, not in that chat, not in a party, a slash command in party chat) is
 // not a chat line and is not written. IMs (im.go) are private and are never
 // written here: the console's chat log has no IM text. Reactions on lines

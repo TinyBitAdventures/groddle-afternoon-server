@@ -34,7 +34,7 @@ package main
 // react to your lines, nor you to theirs. Each copy sent leaves out the
 // reactions of anyone its player blocks (buddies.ignoring), and nobody is sent a
 // line's reactions when they block whoever said it (their game hides the line),
-// as blocks hide chat. A channel's cone of silence refuses reactions there too.
+// as blocks hide chat. A channel's cone of silence refuses reactions there too, and the chat cone in Local.
 //
 // Kept: the last reactKeep lines of each street, party and channel, none older
 // than reactKeepFor, at most reactLinesMax in all, in memory only (the server's
@@ -361,6 +361,11 @@ func (m *reacts) react(cl *Client, frame json.RawMessage) {
 	default:
 		if !l.seen[id] {
 			m.refuse(cl, "That line is not one you have.")
+			return
+		}
+		// Local chat: the chat cone (hub.go, G480), as a channel's cone refuses reactions in it.
+		if l.kind == "local" && m.h.cones[id].on {
+			m.refuse(cl, chanSuspended)
 			return
 		}
 		for who := range l.seen {

@@ -514,3 +514,23 @@ func reactSummary(rs []reaction) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// G480: the chat cone reaches Local chat's reactions, as a channel's cone does a channel's.
+func TestReactionsLocalKeepToTheChatCone(t *testing.T) {
+	r := newReactRig(t, "")
+	ada, bo := r.online(7, "Ada"), r.online(9, "Bo")
+	r.street("GA5", ada, bo)
+	r.do(ada, map[string]any{"t": "chat", "text": "hello"})
+	lid := lidOf(t, drain(bo), "said")
+	drain(ada)
+	r.hub.mu.Lock()
+	r.hub.setConeLocked(9, true, r.now.Unix())
+	r.hub.mu.Unlock()
+	r.react(bo, lid, "heart", true)
+	if errs := reactErrors(drain(bo)); len(errs) != 1 || errs[0] != "react: "+chanSuspended {
+		t.Fatalf("under the cone: %v", errs)
+	}
+	if a := lastReacted(drain(ada), "reacted", lid); a != "-" {
+		t.Fatalf("Ada heard a reaction from under the cone: %q", a)
+	}
+}

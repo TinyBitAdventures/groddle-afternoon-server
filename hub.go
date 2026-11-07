@@ -25,7 +25,8 @@ import (
 //
 // Server to client:
 //
-//	{"t":"hello","you":{"id":7,"name":"Ada"}}
+//	{"t":"hello","you":{"id":7,"name":"Ada"},"cone":true}  cone only for a player under the cone of silence
+//	{"t":"cone","on":false}                             the site lifted or laid the cone since hello
 //	{"t":"street","street":"GA5…","players":[Player…]}  everyone else there, after a join
 //	{"t":"joined","player":Player}
 //	{"t":"left","id":7}
@@ -49,10 +50,17 @@ import (
 // their line clears it (doLocalChat 1758, overlay_dismiss). The client sends one
 // per line, at most each 4 s (ChatArea.as ACTIVITY_TIMER 4000); the server
 // relays at most one each typingEvery, with no text, and not between players
-// where either blocks the other (blockedBetween). Ours: the source skips the
-// mark for a player in a timeout or the cone of silence (main.js 1679); here
-// Local chat itself has no cone (channels.go keeps it for Global, Trade and
-// Live Help), so neither has the mark.
+// where either blocks the other (blockedBetween).
+//
+// The cone of silence (register G480) holds in Local chat as in the channels:
+// no mark for a player under it (main.js doLocalChatStart 1679), and their line
+// goes to nobody and comes back as "Sorry, you're currently suspended from this
+// chat." (doLocalChat 1708-1710), before any Feat or hi hears it. It is the
+// "chat" cone (isInConeOfSilence with no type, player.js 2927-2934), never the
+// help cone. The hub's word comes from the signed ticket at connect and the
+// newest signed groups list after (channels.go), so a client that sends no list,
+// or an old one, can't speak its way out. hello carries "cone", and
+// {"t":"cone","on":true} tells the game when a new list changes it.
 //
 // Shared systems (quoins, street objects, parties, …) are modules (modules.go),
 // each in a file of its own with its message kinds listed in its header.
@@ -136,6 +144,26 @@ type Hub struct {
 	onWeb   []func(cl *Client, event string)
 	off     map[int64]bool
 	inputAt map[int64]time.Time
+
+	// The cone of silence's word for Local chat: the newest signed one per character (G480).
+	cones map[int64]coneWord
+}
+
+// coneWord is whether a character is under the chat cone, as of a signed ticket or groups list made at iat.
+type coneWord struct {
+	on  bool
+	iat int64
+}
+
+// setConeLocked takes the site's word on a character's chat cone unless a newer word already
+// stands (a saved list resent after a newer ticket says nothing). True when the cone changed.
+func (h *Hub) setConeLocked(id int64, on bool, iat int64) bool {
+	was, known := h.cones[id]
+	if known && iat < was.iat {
+		return false
+	}
+	h.cones[id] = coneWord{on: on, iat: iat}
+	return was.on != on
 }
 
 func NewHub(now func() time.Time) *Hub {
@@ -143,7 +171,7 @@ func NewHub(now func() time.Time) *Hub {
 		now = time.Now
 	}
 	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{},
-		webs: map[int64]map[*Client]bool{}, off: map[int64]bool{}, inputAt: map[int64]time.Time{}}
+		webs: map[int64]map[*Client]bool{}, off: map[int64]bool{}, inputAt: map[int64]time.Time{}, cones: map[int64]coneWord{}}
 	for _, m := range modules {
 		m(h).Register(&Registry{h: h})
 	}
@@ -181,7 +209,12 @@ func (h *Hub) Connect(c Claims) *Client {
 	h.clients[c.Sub] = cl
 	h.off[c.Sub] = c.Off
 	h.inputAt[c.Sub] = h.now()
-	h.queueLocked(cl, map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "off": c.Off})
+	h.setConeLocked(c.Sub, c.Cone, c.Iat)
+	hello := map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "off": c.Off}
+	if h.cones[c.Sub].on {
+		hello["cone"] = true
+	}
+	h.queueLocked(cl, hello)
 	for _, fn := range h.onConnect {
 		fn(cl)
 	}
@@ -280,6 +313,11 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		if cl.street == "" || text == "" {
 			return
 		}
+		if h.cones[cl.id].on { // main.js doLocalChat 1708-1710
+			h.logChatLocked("local", cl.street, cl, text, "silenced", nil) // chatlog.go; before the reply, which may drop a client that stopped reading
+			h.replyLocked(cl, "suspended", chanSuspended)
+			return
+		}
 		if !h.allowChatLocked(cl) {
 			h.logChatLocked("local", cl.street, cl, text, "slow_down", nil) // chatlog.go; before the reply, which may drop a client that stopped reading
 			h.replyLocked(cl, "slow_down", "Slow down a little.")
@@ -303,7 +341,7 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		}
 	case "typing":
 		now := h.now()
-		if cl.street == "" || (!cl.typingAt.IsZero() && now.Sub(cl.typingAt) < typingEvery) {
+		if cl.street == "" || h.cones[cl.id].on || (!cl.typingAt.IsZero() && now.Sub(cl.typingAt) < typingEvery) { // the cone: main.js doLocalChatStart 1679
 			return
 		}
 		cl.typingAt = now
