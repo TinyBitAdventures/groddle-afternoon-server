@@ -62,8 +62,8 @@ package main
 // everyone, on the street or off it (die 734-773: the dead trant class; wood_tree.js onDie: a
 // Patch and 25 Planks). A tree State then reads "poison": ms left and "by": who poured it, and
 // "dead": true once it died. A dead tree refuses every verb ("code":"dead") and never comes back
-// while the server runs: what grows in its plot is each player's own Patch, as every street Patch
-// is in multiplayer. The poisoner is credited the dead Wood Tree's 25 Planks (credits.go "take").
+// while the server runs: what grows in its plot is each player's own Patch, except on a street whose
+// Patches are shared (patches.go, -patches on): there killTree hands the plot to patches.adopt. The poisoner is credited the dead Wood Tree's 25 Planks (credits.go "take").
 // A rooked tree at health 1 dies too (trants.js onRooked 1151); solo keeps it at 1.
 // The source's hourly neglect (onInterval 576-664: health falls every 15 to 120 minutes by
 // health_change_rate unless petted and watered in time, onMaturityCycle's 10-35% death roll at
@@ -422,19 +422,17 @@ func init() {
 type liveObj struct {
 	spot *objSpot
 
-	chunks     int  // rock
-	mega       bool // rock: came back at 150
-	nextMega   bool // rock: will come back at 150
-	units      int  // node
-	petted     bool // node (Paper Tree), tree
-	watered    bool
-	resetAt    time.Time // Paper Tree: tending flags clear
-	fruit, cap int       // tree
-	health     int
-	maturity   int
-	day        int64          // tree: the game day its flags and fruit belong to; wood: its harvesters' day
-	woodCount  int            // wood: harvest_count (wood_tree.js 732-782)
-	woodBy     map[int64]bool // wood: who harvested it this game day (the source's intervals[today][pc])
+	chunks   int  // rock
+	mega     bool // rock: came back at 150
+	nextMega bool // rock: will come back at 150
+	units    int  // node
+	// treeCore (trees.go): a tree's fruit, capacity, health, maturity, tending flags and the game
+	// day they belong to (wood: its harvesters' day); petted and watered are a Paper Tree's too, petted
+	// a Piggy's.
+	treeCore
+	resetAt   time.Time      // Paper Tree: tending flags clear
+	woodCount int            // wood: harvest_count (wood_tree.js 732-782)
+	woodBy    map[int64]bool // wood: who harvested it this game day (the source's intervals[today][pc])
 
 	// tree, wood: Tree Poison's die timer and who poured it; dead once it ran out (or the Rook
 	// struck a tree at health 1), with deadBy the poisoner (0: the Rook).
@@ -571,17 +569,10 @@ func (o *objects) rookTree(street, id string) bool {
 	if ob.dead {
 		return false
 	}
-	if ob.health <= 1 {
+	if o.w.treeRook(&ob.treeCore, spot.class) {
 		o.killTree(street, ob, 0)
 		return true
 	}
-	ob.fruit = 0
-	loss := 2
-	if ob.health == 2 {
-		loss = 1
-	}
-	ob.health = max(1, ob.health-loss)
-	ob.cap = o.w.capAt(spot.class, ob.maturity, ob.health)
 	o.broadcast(street, 0, ob)
 	// onRookedStep 6 (12 s on) is the sequence's last plusHealth; the complaint follows it.
 	o.armRookFruit(street, ob, rookFruitFirst)
@@ -1129,24 +1120,7 @@ func (o *objects) chopWood(ob *liveObj, verb string, harvester int64) verdict {
 	if verb != "harvest" {
 		return refuse("bad_verb", "You can't do that to a Wood Tree here.")
 	}
-	if ob.maturity <= 0 {
-		return refuse("cleared", "This Wood Tree has been cleared.")
-	}
-	if ob.woodBy[harvester] {
-		return refuse("daily_limit", "You can only harvest from this tree once per game day.")
-	}
-	if ob.woodBy == nil {
-		ob.woodBy = map[int64]bool{}
-	}
-	ob.woodBy[harvester] = true
-	got := creditItem("plank", woodPlanks[min(max(ob.maturity, 1), 6)-1])
-	if ob.maturity <= 2 || ob.woodCount != 0 {
-		ob.maturity--
-		ob.woodCount = 0
-	} else {
-		ob.woodCount = 1
-	}
-	return verdict{ok: true, got: got}
+	return woodChop(&ob.treeCore, &ob.woodCount, &ob.woodBy, harvester)
 }
 
 // helpMineBonus is mining.js 335-337: min(i+1, 4) for each of up to 9 helps.
@@ -1509,59 +1483,9 @@ func (o *objects) armReset(street string, ob *liveObj, d time.Duration) {
 func (o *objects) tendTree(ob *liveObj, verb, skill string) verdict {
 	switch verb {
 	case "harvest":
-		// trants.js canHarvestTrant: too small below maturity 3.
-		if ob.maturity < 3 {
-			return refuse("small", "This tree is too small to harvest.")
-		}
-		// include/trants.js performHarvest 234-237.
-		if ob.fruit <= 0 {
-			return refuse("empty", notReady["tree"])
-		}
-		// catalog_skill_packages.js gardening_harvest bonus_amount by Arborology
-		// rank (removeFruit 447-461 takes at most what is there). A super harvest's
-		// bonus never comes off the tree (trants.js harvestTrant), so it stays local.
-		amount, ok := o.w.rules.Harvest[skill]
-		if !ok {
-			amount = o.w.rules.Harvest["no_skill"]
-		}
-		take := min(amount, ob.fruit)
-		ob.fruit -= take
-		return verdict{ok: true, extra: map[string]any{"take": take}, got: creditItem(objFruit[ob.spot.class], take)}
+		return o.w.treeHarvest(&ob.treeCore, ob.spot.class, skill)
 	case "pet", "water":
-		if verb == "pet" && ob.petted {
-			return refuse("not_wanted", "This tree was already petted today.")
-		}
-		if verb == "water" && ob.watered {
-			return refuse("not_wanted", "This tree was already watered today.")
-		}
-		// trant-care.js performTrantCare: the success roll comes first
-		// (light_green_thumb_pet / _water success_rate by rank).
-		rates := o.w.rules.Care[verb]
-		rate, ok := rates[skill]
-		if !ok {
-			rate = rates["no_skill"]
-		}
-		roll := o.roll()
-		success := roll*100 < rate
-		if success {
-			if verb == "pet" {
-				ob.petted = true
-			} else {
-				ob.watered = true
-			}
-			// include/trants.js performTending 670-684: both together lift health once, and that
-			// plusHealth (697-704) regrows the fruit (onFruitCycle 1043-1054).
-			grew := 0
-			if ob.petted && ob.watered {
-				ob.health = min(10, max(1, ob.health+1))
-				grew = o.fruitCycle(ob)
-			} else {
-				ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
-				ob.fruit = min(ob.fruit, ob.cap)
-			}
-			return verdict{ok: true, extra: map[string]any{"roll": roll, "success": success, "grew": grew}}
-		}
-		return verdict{ok: true, extra: map[string]any{"roll": roll, "success": success}}
+		return o.w.treeCare(&ob.treeCore, ob.spot.class, verb, skill, o.roll)
 	}
 	return refuse("bad_verb", "You can't do that to a tree.")
 }
@@ -1626,31 +1550,27 @@ func (o *objects) killTree(street string, ob *liveObj, by int64) {
 		creditLocked(o.h, by, "take", creditItem("plank", deadWoodPlanks))
 	}
 	o.broadcast(street, 0, ob)
+	// G564: on a street whose Patches are shared, its plot is everyone's at once (patches.go adopt).
+	if adopt, ok := o.h.ProvidedLocked("patches.adopt").(func(string, *objSpot)); ok {
+		adopt(street, ob.spot)
+	}
 }
 
 // fruitCycle is include/trants.js onFruitCycle 1043-1054 on the shared tree, as plusHealth runs it:
 // the capacity for its maturity and health (updateFruitCap 1026-1041), then that fruitProdMap cell
 // pushed back on, never past the capacity (pushFruit 466-473). The fruit it added.
 func (o *objects) fruitCycle(ob *liveObj) int {
-	ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
-	before := min(ob.fruit, ob.cap)
-	ob.fruit = min(ob.cap, before+o.w.prodAt(ob.spot.class, ob.maturity, ob.health))
-	return ob.fruit - before
+	return o.w.treeFruitCycle(&ob.treeCore, ob.spot.class)
 }
 
 // newDay is game.js resetAllTrantsForNewDay for one tree: the tending flags clear, a new window
 // to pet and water it. The fruit stays as it is: GSJS never refills trees at the day turn (fruit
 // comes back from tending and Fertilidust: fruitCycle).
 func (o *objects) newDay(ob *liveObj) bool {
-	today := o.today()
-	if ob.day >= today || ob.dead {
+	if ob.dead {
 		return false
 	}
-	ob.day = today
-	ob.petted, ob.watered = false, false
-	ob.cap = o.w.capAt(ob.spot.class, ob.maturity, ob.health)
-	ob.fruit = min(ob.fruit, ob.cap)
-	return true
+	return o.w.treeNewDay(&ob.treeCore, ob.spot.class, o.today())
 }
 
 // armDay sets the one timer that rolls every touched tree over at the next game day.
@@ -1790,21 +1710,12 @@ func (o *objects) fertilize(street string, ob *liveObj) bool {
 		return false
 	}
 	if ob.spot.kind == "wood" {
-		if ob.maturity <= 0 || ob.maturity >= 6 {
-			return false
-		}
-		ob.maturity++
-		return true
+		return woodDust(&ob.treeCore)
 	}
-	before := [3]int{ob.maturity, ob.health, ob.fruit}
-	if ob.maturity < min(10, len(o.w.rules.Trants[ob.spot.class])) {
-		ob.maturity++
-	}
-	ob.health = 10
-	o.fruitCycle(ob)
+	changed := o.w.treeDust(&ob.treeCore, ob.spot.class)
 	if o.rooked(street, ob.spot.id) {
 		// Its capacity moved: the rooked tree's fruit push goes on from here.
 		o.armRookFruit(street, ob, rookFruitEvery)
 	}
-	return before != [3]int{ob.maturity, ob.health, ob.fruit}
+	return changed
 }
