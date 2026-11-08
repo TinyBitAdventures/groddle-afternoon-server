@@ -6,7 +6,18 @@ package main
 // Ids are the client's spawn index on the street (data/objects.json from the game's
 // tools/build-realtime-objects.mjs, the same index the Rook's keys use): chicken:<i> (game.js
 // spawnChickens), butterfly:<i> (spawnButterflies: all flying since ticket 25; a resting spot still holds),
-// batterfly:<i> (animal-husbandry-feature, batterfly:<i>).
+// batterfly:<i> (animal-husbandry-feature, batterfly:<i>), kitty:<i> (heli-kitties-feature) and
+// crab:<i> (crabs-feature).
+//
+// Heli Kitties and Crabs (slice 2 of research/plans/street-animals-shared.md): in the original one
+// npc_kitty_chicken or npc_crab item walked the street for everyone (npc_kitty_chicken.js
+// startMoving, onPathing 1103-1113; npc_walkable roam). Now every page walks each on one path from
+// the server's clock and its spot (the snapshot's "spots"), with the source's pauses rolled from a
+// seed every page shares (the game's js/street-creatures.js kittyWalkAt, crabWalkAt), so the server
+// keeps only lag and hold, as for a Chicken. A player at one holds it (wait), a pet holds a Heli
+// Kitty for its sleep and a flatter, hug, insult or pinch holds a Crab for its menu wait (tendWalker),
+// and the street sees it (obj_ev). What each verb gives stays the player's own, and so does a Crab's
+// memory of the tunes it heard (Austin 2026-11-08: position only).
 //
 // Where they are (the remake's own paths, shared): every client draws each animal on the same path
 // from the same clock, so the server never moves them and an animal nobody touched costs nothing.
@@ -125,10 +136,39 @@ var creatureVerbs = map[string]map[string]string{
 // creatureItem is what a landed verb gives (js/animal-kinship.js performAnimalKinship).
 var creatureItem = map[string]string{"squeeze": "grain", "milk": "milk_butterfly", "nibble": "meat"}
 
-var creatureLabel = map[string]string{"chicken": "Chicken", "butterfly": "Butterfly", "batterfly": "Batterfly", "pig": "Piggy"}
+var creatureLabel = map[string]string{"chicken": "Chicken", "butterfly": "Butterfly", "batterfly": "Batterfly", "pig": "Piggy", "kitty": "Heli Kitty", "crab": "Crab"}
 
 func isCreature(kind string) bool {
-	return kind == "chicken" || kind == "butterfly" || kind == "batterfly"
+	return kind == "chicken" || kind == "butterfly" || kind == "batterfly" || kind == "kitty" || kind == "crab"
+}
+
+// walker: a street animal that walks the whole run of its floor (a Heli Kitty, a Crab), so a
+// player may meet it anywhere along the street.
+func walker(kind string) bool { return kind == "kitty" || kind == "crab" }
+
+// holdFor is a rule's hold (data/objects.json rules.holds), or def when the layout has none.
+func (o *objects) holdFor(key string, def time.Duration) time.Duration {
+	if ms := o.w.rules.Holds[key]; ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return def
+}
+
+// tendWalker is a verb on a Heli Kitty or a Crab (slice 2 of research/plans/street-animals-shared.md):
+// what a player gets from it stays theirs (their client's rules, as in solo: a kitty's pet, a crab's
+// flatter, hug, insult or pinch, and the crab's tune memory, which stays each player's own); the
+// street sees it happen (obj_ev) and the animal stands still for everyone meanwhile, as the source
+// stopped the one item for the player at it.
+func (o *objects) tendWalker(ob *liveObj, m objAct) verdict {
+	switch {
+	case ob.spot.kind == "kitty" && m.Verb == "pet":
+		o.hold(ob, o.holdFor("kittyPet", 2810*time.Millisecond))
+	case ob.spot.kind == "crab" && (m.Verb == "flatter" || m.Verb == "hug" || m.Verb == "insult" || m.Verb == "pinch"):
+		o.hold(ob, o.holdFor("crabVerb", 1500*time.Millisecond))
+	default:
+		return refuse("bad_verb", "You can't do that to a "+creatureLabel[ob.spot.kind]+".")
+	}
+	return verdict{ok: true, ev: m.Verb}
 }
 
 // akRank is the Animal Kinship rank a skill string names (animalkinship_<n>, 0 for anything else).
@@ -348,7 +388,7 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 
 // creatureReach is how far from its spot a player may act on it: a flyer crosses the whole street.
 func creatureReach(spot *objSpot) (float64, float64) {
-	if spot.fly {
+	if spot.fly || walker(spot.kind) {
 		return math.Inf(1), creatureReachY
 	}
 	return creatureReachX, creatureReachY
@@ -358,6 +398,9 @@ func creatureReach(spot *objSpot) (float64, float64) {
 // first: askIncubate, askBatterfly).
 func (o *objects) tendCreature(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
 	kind := ob.spot.kind
+	if walker(kind) {
+		return o.tendWalker(ob, m)
+	}
 	pkg, ok := creatureVerbs[kind][m.Verb]
 	if !ok || pkg == "" {
 		return refuse("bad_verb", "You can't do that to a "+creatureLabel[kind]+".")

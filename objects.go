@@ -61,7 +61,7 @@ package main
 //
 // Every "objs" frame carries "now" (the server's Unix ms, the street animals' shared clock); the
 // snapshot says "creatures":true when this server shares the street animals, "animals" names them
-// and "spots" gives each Batterfly's place ({"batterfly:0":[x,y]}).
+// and "spots" gives each Batterfly's, Heli Kitty's and Crab's place ({"batterfly:0":[x,y]}).
 //
 // A Wood Tree is tree:<i> too: {"id":"tree:3","maturity":5,"count":1}.
 //
@@ -186,10 +186,10 @@ const (
 )
 
 var (
-	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
+	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true}
+		"wait": true, "food": true, "flatter": true, "hug": true, "insult": true, "pinch": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true}
 )
 
@@ -273,6 +273,10 @@ type objRules struct {
 	// PigTrip is a street Piggy's walk to food and home (the game's js/street-creatures.js
 	// PIGGY_TRIP, objects_pigs.go startTrip).
 	PigTrip pigTripRule `json:"pigtrip"`
+	// Holds is how long a landed verb on a Heli Kitty or a Crab holds it for everyone (ms):
+	// "kittyPet" its sleep (npc_kitty_chicken.js 240-279: 3sleepStart then one sleep cycle),
+	// "crabVerb" its menu wait (npc_crab onWaitEnd: walks on 1.5 s later).
+	Holds map[string]int64 `json:"holds"`
 }
 
 // objSpot is one object as laid out: its kind, class, place and (trees) its fresh maturity and health.
@@ -309,6 +313,8 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			Chick [][]any   `json:"chickens"`
 			Bfly  [][]any   `json:"butterflies"`
 			Bat   [][]any   `json:"batterflies"`
+			Kitty [][]any   `json:"kitties"`
+			Crab  [][]any   `json:"crabs"`
 			Trunk []float64 `json:"trunks"`
 			Sad   bool      `json:"sad"`
 		} `json:"streets"`
@@ -384,7 +390,7 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			id := "pig:" + strconv.Itoa(int(i))
 			spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y, index: int(i), rng: rng}
 		}
-		for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat} {
+		for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat, "kitty": row.Kitty, "crab": row.Crab} {
 			for _, r := range rows {
 				if len(r) < 3 {
 					return nil, fmt.Errorf("%s: bad %s %v", tsid, kind, r)
@@ -401,7 +407,11 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 					fly = f == 1
 				}
 				id := kind + ":" + strconv.Itoa(int(i))
-				spots[id] = &objSpot{id: id, kind: kind, class: "npc_" + kind, x: x, y: y, fly: fly}
+				class := "npc_" + kind
+				if kind == "kitty" {
+					class = "npc_kitty_chicken"
+				}
+				spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, fly: fly, index: int(i)}
 			}
 		}
 		if row.Sad {
@@ -808,7 +818,7 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		return m
 	case "wood":
 		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
-	case "chicken", "butterfly", "batterfly":
+	case "chicken", "butterfly", "batterfly", "kitty", "crab":
 		return o.creatureState(ob)
 	default:
 		return o.deathState(ob, map[string]any{"id": s.id, "fruit": ob.fruit, "cap": ob.cap, "health": ob.health, "maturity": ob.maturity, "petted": ob.petted, "watered": ob.watered})
@@ -876,7 +886,9 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 		if isCreature(spot.kind) {
 			animals = append(animals, id)
 		}
-		if spot.kind == "batterfly" {
+		if spot.kind == "batterfly" || walker(spot.kind) {
+			// A Heli Kitty's and a Crab's spot too (slice 2): their planner groups come after groups a
+			// player's own projects and the seasons add, so every page walks them from the server's.
 			places[id] = []float64{spot.x, spot.y}
 		}
 	}

@@ -52,7 +52,8 @@ func TestASqueezedChickenIsEveryonesButTheLimitIsEachPlayers(t *testing.T) {
 	b := r.player(2, "Bo", defaultStreet, ch.x+80, ch.y)
 	r.send(a, map[string]any{"t": "obj_sync"})
 	snap := r.only(a, "objs")
-	if animals, _ := snap["animals"].([]any); snap["creatures"] != true || num(snap["now"]) != float64(r.now.UnixMilli()) || objOf(snap, "chicken:0") != nil || len(animals) != 7 || animals[0] != "butterfly:0" {
+	// Four Butterflies, three Chickens and (slice 2) its Crab.
+	if animals, _ := snap["animals"].([]any); snap["creatures"] != true || num(snap["now"]) != float64(r.now.UnixMilli()) || objOf(snap, "chicken:0") != nil || len(animals) != 8 || animals[0] != "butterfly:0" || animals[7] != "crab:0" {
 		t.Fatalf("a fresh street's snapshot: %v", snap)
 	}
 	// No skill: a 60% squeeze rolled 0.5 lands, held 2.5 s for everyone, one Grain credited.
