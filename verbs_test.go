@@ -519,3 +519,61 @@ func TestBestowRandomKindness(t *testing.T) {
 		t.Fatalf("spam: %d got through at once", sent)
 	}
 }
+
+// G429: garlic.js 125-156 through the server.
+func TestGarlicBreathTakesMoodFromEveryoneElseOnTheStreetOnce(t *testing.T) {
+	r := newVerbsRig(t)
+	ada, bo := r.pair()
+	cy := r.connect(11, "Cy")
+	r.joinAt(cy, verbsStreet, 4000) // far off still smells it: the whole street (activePlayers)
+	dee := r.connect(12, "Dee")
+	r.joinAt(dee, "LA9OTHERSTREET1", 100)
+	drain(ada)
+	drain(bo)
+	drain(cy)
+	drain(dee)
+
+	r.do(ada, map[string]any{"t": "garlic_breath", "count": 3})
+	if got := kinds(drain(ada), "garlic_smell"); len(got) != 0 {
+		t.Fatalf("the eater smells nothing: %v", got)
+	}
+	for _, cl := range []*Client{bo, cy} {
+		m := verbOne(t, drain(cl), "garlic_smell")
+		if m["count"] != float64(3) || m["mood"] != float64(3) {
+			t.Fatalf("1 mood a clove: %v", m)
+		}
+		if from, _ := m["from"].(map[string]any); from["name"] != "Ada" {
+			t.Fatalf("from Ada: %v", m)
+		}
+	}
+	if got := kinds(drain(dee), "garlic_smell"); len(got) != 0 {
+		t.Fatalf("another street smells nothing: %v", got)
+	}
+
+	// A second Garlic while the breath lasts touches nobody (garlic.js:126-127).
+	r.do(ada, map[string]any{"t": "garlic_breath", "count": 1})
+	if got := kinds(drain(bo), "garlic_smell"); len(got) != 0 {
+		t.Fatalf("breath already on: %v", got)
+	}
+	// After the 300 s buff, a new breath: capped at 20 (garlic.js:131).
+	r.now = r.now.Add(garlicFor)
+	r.do(ada, map[string]any{"t": "garlic_breath", "count": 45})
+	m := verbOne(t, drain(bo), "garlic_smell")
+	if m["count"] != float64(45) || m["mood"] != float64(garlicMost) {
+		t.Fatalf("capped at 20: %v", m)
+	}
+}
+
+func TestGarlicBreathAloneStillStartsTheBreath(t *testing.T) {
+	r := newVerbsRig(t)
+	ada := r.connect(7, "Ada")
+	r.joinAt(ada, verbsStreet, 100)
+	r.do(ada, map[string]any{"t": "garlic_breath", "count": 2})
+	bo := r.connect(9, "Bo")
+	r.joinAt(bo, verbsStreet, 300)
+	drain(bo)
+	r.do(ada, map[string]any{"t": "garlic_breath", "count": 2})
+	if got := kinds(drain(bo), "garlic_smell"); len(got) != 0 {
+		t.Fatalf("the breath began alone; a second Garlic in it smells of nothing: %v", got)
+	}
+}

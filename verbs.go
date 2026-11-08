@@ -22,6 +22,9 @@ package main
 //     400-426, main.js 1766-1793, location.js 889-892): the drinker picks a
 //     secret word the server keeps; the first other player on the street to
 //     say it in chat wins 50 iMG and 250 currants.
+//   - Garlic Breath (items/garlic.js 125-156, G429): the first Garlic eaten while
+//     the breath buff is off takes 1 mood per clove, at most 20, from every other
+//     player on the street, who hear "Something smells funky." (garlic_breath).
 //   - Epic Blowout (locations/home.js 197-218): a house party, a player's
 //     home (HOME_<id> or HOUSE_<id>, a POL that is not public) with 12
 //     players or more, 11 of them guests under the influence (Buzzed, Smashed,
@@ -43,6 +46,7 @@ package main
 //	{"t":"verb_landed","id":"v-…","stat":"mood|energy","n":50}   the target's game: what a bestow gave it
 //	{"t":"charades_start","word":"…"}            the word the drinker chose (cleaned here)
 //	{"t":"verbs_influence","on":true}             one of the four party buffs is on (or none is)
+//	{"t":"garlic_breath","count":3}               the eater's game: Garlic eaten with no Garlic Breath on (garlic.js:130)
 //
 // Server to client:
 //
@@ -55,6 +59,7 @@ package main
 //	{"t":"charades_over","from":{…},"why":"…","winner":{…}|null,"text":"…"}                   to the rest of the street
 //	{"t":"charades_won","from":{…},"xp":50,"currants":250,"text":"…"}                          to the winner
 //	{"t":"party_blowout","owner":7}                                                           to each player at the party
+//	{"t":"garlic_smell","from":{"id":7,"name":"Ada"},"count":3,"mood":3}                       to every other player on the eater's street
 //
 // Rules kept from the source:
 //   - Not yourself ("You can't do that to yourself.", main.js:3166), not a
@@ -77,6 +82,12 @@ package main
 //     street ends it (location.js:889-892, then on_remove's "Nobody guessed").
 //   - Epic Blowout: 12 players and 11 influenced guests (home.js:198, 213);
 //     the owner may be influenced but is not counted.
+//   - Garlic Breath: every other player in pc.location.activePlayers, blocked or
+//     not (garlic.js:133 checks only the eater's own tsid); mood_amount =
+//     min(1 * count, 20) (131). A second Garlic while the 300 s buff lasts
+//     touches nobody (126-127; catalog_buffs.js buff_garlic_breath duration 300),
+//     so the server takes one garlic_breath a player per 300 s, whatever the
+//     game says (a client can't drain a street's mood by repeating it).
 //
 // Ours: one verb a second per player, a burst of four (the source's energy
 // cost was the only brake; the energy is the client's here); the word is
@@ -114,6 +125,9 @@ const (
 	blowoutDevN    = 3                 // home.js:198, 213 config.is_dev
 	kindnessMost   = 50                // random_kindness.js:299, 306 metabolics_add_*(50)
 	kindnessWait   = 4 * time.Second   // ours: how long the giver's line waits for the target's game
+	garlicMost     = 20                // garlic.js:131 Math.min(1 * msg.count, 20)
+	garlicCountMax = 1000              // ours: the count shown in the line, clamped
+	garlicFor      = 300 * time.Second // catalog_buffs.js buff_garlic_breath duration 300
 
 	verbTextSelf      = "You can't do that to yourself."                                                                        // main.js:3166
 	verbTextNotThere  = "You can't do that to a player that isn't there!"                                                       // main.js:3177
@@ -168,16 +182,17 @@ type charadesGame struct {
 }
 
 type verbs struct {
-	h     *Hub
-	boot  string
-	seq   uint64
-	dev   bool
-	rates map[int64]*bucket
-	games map[int64]*charadesGame // drinker -> game
-	high  map[int64]bool          // players under the influence (their game's word)
-	blown map[string]map[int64]bool
-	uses  *useAsker               // Random Kindness's points through the site's ledger
-	kind  map[string]*kindnessOut // bestows waiting for the target's verb_landed
+	h      *Hub
+	boot   string
+	seq    uint64
+	dev    bool
+	rates  map[int64]*bucket
+	games  map[int64]*charadesGame // drinker -> game
+	high   map[int64]bool          // players under the influence (their game's word)
+	blown  map[string]map[int64]bool
+	uses   *useAsker               // Random Kindness's points through the site's ledger
+	kind   map[string]*kindnessOut // bestows waiting for the target's verb_landed
+	breath map[int64]time.Time     // when each player's Garlic Breath began (garlic_breath)
 }
 
 // kindnessOut is one bestow the target's game has yet to answer.
@@ -191,7 +206,7 @@ func newVerbs(h *Hub) Module {
 	rand.Read(b[:])
 	return &verbs{h: h, boot: hex.EncodeToString(b[:]), dev: os.Getenv("GRODDLE_VERBS_DEV") == "1",
 		rates: map[int64]*bucket{}, games: map[int64]*charadesGame{}, high: map[int64]bool{}, blown: map[string]map[int64]bool{},
-		uses: newUseAsker(h, "verbs: Random Kindness"), kind: map[string]*kindnessOut{}}
+		uses: newUseAsker(h, "verbs: Random Kindness"), kind: map[string]*kindnessOut{}, breath: map[int64]time.Time{}}
 }
 
 func (m *verbs) Register(r *Registry) {
@@ -199,6 +214,7 @@ func (m *verbs) Register(r *Registry) {
 	r.Handle("verb_landed", m.landed)
 	r.Handle("charades_start", m.charadesStart)
 	r.Handle("verbs_influence", m.influence)
+	r.Handle("garlic_breath", m.garlic)
 	r.OnChat(m.chat)
 	r.OnJoin(m.joined)
 	r.OnLeave(m.left)
@@ -611,4 +627,43 @@ func (m *verbs) blowout(street string) {
 		}
 	}
 	log.Printf("verbs: epic blowout at %s (%d players, %d influenced)", street, len(here), n)
+}
+
+// —— Garlic Breath (G429) ——
+
+// garlic is garlic.js verbs.eat 128-150: the eater's game says a Garlic went
+// down with no breath buff on; every other player on the street loses
+// min(count, 20) mood in their own game and hears "Something smells funky."
+func (m *verbs) garlic(cl *Client, frame json.RawMessage) {
+	var msg struct {
+		Count int `json:"count"`
+	}
+	_ = json.Unmarshal(frame, &msg)
+	now := m.h.Now()
+	for id, at := range m.breath {
+		if now.Sub(at) >= garlicFor {
+			delete(m.breath, id)
+		}
+	}
+	if _, on := m.breath[cl.ID()]; on {
+		return // garlic.js:126-127: the breath is on; it does not affect them
+	}
+	m.breath[cl.ID()] = now
+	street := cl.Street()
+	if street == "" {
+		return
+	}
+	n := msg.Count
+	if n < 1 {
+		n = 1
+	}
+	if n > garlicCountMax {
+		n = garlicCountMax
+	}
+	mood := n
+	if mood > garlicMost {
+		mood = garlicMost
+	}
+	m.h.BroadcastStreetLocked(street, map[string]any{"t": "garlic_smell", "from": verbWho(cl), "count": n, "mood": mood}, cl.ID())
+	log.Printf("verbs: %d has garlic breath on %s", cl.ID(), street)
 }
