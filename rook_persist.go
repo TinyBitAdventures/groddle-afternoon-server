@@ -69,11 +69,13 @@ func (m *rook) load() error {
 		s := m.street(tsid)
 		s.restUntil = rest
 		for key, r := range rec.Rooked {
-			if !rookKeyRe.MatchString(key) || !rookableClasses[r.Class] {
+			if class := rookKeyClass(key); class == "" || !rookableClasses[r.Class] || (rookPatchKeyRe.MatchString(key) && class != r.Class) {
 				continue
 			}
 			s.rooked[key] = &rookedThing{class: r.Class, healers: append([]int64(nil), r.Healers...)}
-			s.keys[key] = r.Class
+			if rookKeyRe.MatchString(key) {
+				s.keys[key] = r.Class // a Patch tree's key comes from the patches module (wingBeat)
+			}
 			if id := rec.Objs[key]; id != "" {
 				s.objs[key] = id
 			}

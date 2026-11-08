@@ -16,6 +16,9 @@ package main
 //	{"t":"obj_act","req":8,"id":"tree:1","verb":"poison"}  a Tree Poison pour landed ("antidote" too)
 //	{"t":"obj_dust","req":10}                            Fertilidust used: every living tree on the street
 //	{"t":"obj_dust","req":11,"id":"tree:2"}              Fertilidust Lite used on that tree (near you)
+//	{"t":"obj_dust","req":11,"id":"patch:0"}             …or on the tree in that shared Patch (G564: a plot
+//	                                                       key, patches_trees.go; the full jar reaches
+//	                                                       every Patch tree of the street too)
 //	{"t":"obj_day_dev"}                                  QA only, GRODDLE_TREES_DEV=1: the game day turns now
 //	{"t":"obj_dev","id":"pig:0","hunger":5,"tick":true}  QA only, GRODDLE_TREES_DEV=1 (objects_pigs.go pigDev)
 //	{"t":"obj_act","req":9,"id":"pig:0","verb":"pet","skill":"animalkinship_2"}  a Piggy (objects_pigs.go):
@@ -39,8 +42,11 @@ package main
 //	{"t":"obj_no","req":7,"id":"rock:2","verb":"mine","code":"empty","message":"…","obj":State}
 //	{"t":"obj_dust_used","req":10,"c":"fertilidust","use":{…}}  the ledger used the jar's charge
 //	                                                       (objects_uses.go; no "use" without a ledger):
-//	                                                       the dust lands 3 s on
-//	{"t":"obj_dusted","req":10,"ids":["tree:0","tree:3"]}  the trees the dust grew (all hear "objs")
+//	                                                       the dust lands 3 s on; "revived":["trant_spice_dead:0"]:
+//	                                                       the dead trants in shared Patches the full jar
+//	                                                       brought back now (all hear "patches")
+//	{"t":"obj_dusted","req":10,"ids":["tree:0","tree:3"]}  the trees the dust grew (all hear "objs"; shared
+//	                                                       Patch trees by plot key, all hear "patches")
 //	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
 //	{"t":"obj_dig","id":"node:dirt_pile:0","helping":true}    your dig joined someone else's
 //	{"t":"obj_ev","street":"GA5…","id":"pig:0","ev":"happy"}  a Piggy's twice-daily tick ("croak", or
@@ -1636,7 +1642,11 @@ func (o *objects) dayDev(cl *Client, _ json.RawMessage) {
 // every trant and Wood Tree of the location, the onFertilidust event 3 s on, which the client
 // waits before it sends this; fertilidust_lite.js onUse 266-296: the closest tree, findCloseStack,
 // so its id must be near). The jar, its charge and its lines are the player's own. Trees a client
-// grew in its own Patches are not shared and never named here.
+// grew in its own Patches are not shared and never named here. On a street whose Patches are shared
+// (G564 slice 2, patches_trees.go) the same jar reaches them: the full jar revives their dead trants
+// as it is used and grows their living trees with the street's as it lands; Lite may name a Patch
+// tree by its plot key (a tree:<i> plot's key is a dead street tree's id: the Patch tree grown there
+// is the one meant).
 func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 	var m struct {
 		Req int64  `json:"req"`
@@ -1657,17 +1667,31 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 	street := cl.Street()
 	spots := o.w.streets[street]
 	var targets []*objSpot
+	patchKey := ""
 	if m.ID != "" {
 		spot := spots[m.ID]
-		if street == "" || spot == nil || (spot.kind != "tree" && spot.kind != "wood") {
+		tx, ty := 0.0, 0.0
+		if spot != nil {
+			tx, ty = spot.x, spot.y
+		}
+		if street != "" && (spot == nil || o.isDead(street, m.ID)) {
+			if where, ok := o.h.ProvidedLocked("patches.dustSpot").(func(string, string) (float64, float64, bool)); ok {
+				if x, y, ok := where(street, m.ID); ok {
+					patchKey, tx, ty = m.ID, x, y
+				}
+			}
+		}
+		if patchKey == "" && (street == "" || spot == nil || (spot.kind != "tree" && spot.kind != "wood")) {
 			no("unknown", "That is not something here.")
 			return
 		}
-		if x, y := cl.Pos(); math.Abs(x-spot.x) > objReachX || math.Abs(y-spot.y) > objReachY {
+		if x, y := cl.Pos(); math.Abs(x-tx) > objReachX || math.Abs(y-ty) > objReachY {
 			no("far", "You need to be closer.")
 			return
 		}
-		targets = append(targets, spot)
+		if patchKey == "" {
+			targets = append(targets, spot)
+		}
 	} else {
 		for _, spot := range spots {
 			if spot.kind == "tree" || spot.kind == "wood" {
@@ -1693,10 +1717,20 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 		if use != nil {
 			ans["use"] = use
 		}
+		// G564: the full jar's dead trants in shared Patches come back at once (fertilidust.js onUse).
+		var revived []string
+		if m.ID == "" {
+			if revive, ok := o.h.ProvidedLocked("patches.revive").(func(string) []string); ok {
+				if revived = revive(street); len(revived) > 0 {
+					ans["revived"] = revived
+				}
+			}
+		}
 		if cl.Online() {
 			o.h.SendLocked(cl, ans)
 		}
-		o.h.After(dustLand, func() { o.dustTrees(cl, m.Req, street, targets) })
+		all := m.ID == ""
+		o.h.After(dustLand, func() { o.dustTrees(cl, m.Req, street, targets, all, patchKey, revived) })
 	})
 }
 
@@ -1705,6 +1739,12 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 // regrows its fruit (fruitCycle); a Wood Tree (wood_tree.js onFertilidust 870-874) grows one below
 // 6. A dead tree, or a Wood Tree already cleared (onDie: gone in the source), takes nothing. True
 // when the tree changed.
+// isDead is whether the shared tree an id names on a street died (its plot may hold a Patch tree now).
+func (o *objects) isDead(street, id string) bool {
+	ob := o.streets[street][id]
+	return ob != nil && ob.dead
+}
+
 func (o *objects) fertilize(street string, ob *liveObj) bool {
 	if ob.dead {
 		return false

@@ -1,6 +1,6 @@
 package main
 
-// Shared street Patches (register G564, slice 0 and 1): a street Patch, the Seedling planted in it,
+// Shared street Patches (register G564, slices 0 to 2): a street Patch, the Seedling planted in it,
 // the tree it grows into and the dead tree that tree leaves are the same for everyone on the street,
 // as in the original, where a Patch was an item in the location (items/patch.js, patch_dark.js,
 // patch_seedling.js, include/trants.js, wood_tree.js, trant_*_dead.js). The server keeps each plot
@@ -29,8 +29,10 @@ package main
 //	{"t":"patch_act","req":10,"id":"patch:0","verb":"poison"}        a Tree Poison pour landed ("antidote")
 //	                                                                  ("ms": the die time, dev only)
 //	{"t":"patch_act","req":11,"id":"trant_spice_dead:0","verb":"clear"}   a dead tree's clear landed
-//	{"t":"patch_act","req":12,"id":"patch:0","verb":"dust"}          slice 2: answers "code":"later"
-//	                                                                  ("trantsform" too)
+//	{"t":"patch_act","req":12,"id":"patch:0","verb":"trantsform","k":0}   a Trantsformation Fluid pour
+//	                                                                  landed ("k": the bottle, its place among
+//	                                                                  the player's bottles in the pack)
+//	Fertilidust (and Lite) on Patch trees is objects.go's obj_dust, which asks this module (below).
 //	{"t":"patch_ack","id":"pg-…"}                                    a grant's items are in the saved pack
 //	{"t":"patch_dev","clean":5000,"dug":5000,"min":5000,"max":60000,"cycle":5000,"wood":1000,"roll":0,"day":true}
 //	                                                                  QA only, GRODDLE_PATCHES_DEV=1
@@ -47,7 +49,7 @@ package main
 //	        tend start "lock"; dig start "diggers"; dig, harvest, clear "grant":{"id","c","n"}; plant,
 //	        poison, antidote "use" (the ledger's take, applied once); Seedling pet "petted","first",
 //	        "third","owner","grew"; tree pet/water "roll","success","grew" (a Wood Tree "matured");
-//	        harvest "take","harvests","limit"; poison "poison" (ms)
+//	        harvest "take","harvests","limit"; poison "poison" (ms); trantsform "use","from","to"
 //	{"t":"patch_no","req":3,"id":"patch:0","verb":"tend","code":"busy","message":"…","now":ms,"plot":Plot}
 //	{"t":"patch_grant","id":"pg-…","c":"plank","n":25}             on connect: a grant not acknowledged yet
 //	{"t":"patch_ev","street":"GM4…","by":7,"id":"patch:0","verb":"tend","do":"start"}
@@ -63,8 +65,8 @@ package main
 // Plot ids are the page's own keys: `<soilClass>:<n>` (patches-feature soilSpawnPlan) and `tree:<i>`,
 // the plot a dead shared street tree left (objects.go killTree -> patches.adopt). Refusal codes:
 // slow_down, unknown, far, busy, not_messy, planted, dug, weeds, hole, wrong_bean, no_item, no_answer,
-// enough, small, empty, daily_limit, not_wanted, cleared, poisoned, not_poisoned, nothing, not_tree,
-// no_tool, later.
+// enough, small, weak, empty, daily_limit, not_wanted, cleared, poisoned, not_poisoned, nothing,
+// not_tree, no_tool, rooked.
 //
 // The rules (js/patches.js, from the source; data/patches.json carries the numbers):
 //   - Tend a weedy Patch: one tender at a time ("Someone else is already working on this patch.",
@@ -108,8 +110,31 @@ package main
 // withering; a plot whose key the layout no longer has is kept aside (parked, logged) and written
 // back, never dropped, so a later layout can move it by key.
 //
-// Slice 2, stubbed: the Rook strips no Patch tree yet ("patches.rookTree" answers false), Fertilidust
-// reaches none ("patches.dust" names none) and patch_act "dust" / "trantsform" answer "later".
+// Slice 2, every tree verb (the plan's section 5, from the source and as street trees online):
+//   - The Rook (rook.go): a Patch tree is rookable as the street's own trees are, keyed by its plot,
+//     "<class>:p<plot key>" (the page's js/rook-attack.js rookKeyFor). At each wing beat the Rook asks
+//     "patches.rookable" for the street's living Patch trees and strips the ones it rooks through
+//     "patches.rookTree": include/trants.js onRooked 1140-1151 by the shared rule (trees.go treeRook:
+//     every fruit gone, health down 2), and a trant already at health 1 dies to its dead class, as
+//     objects.go rookTree does a street tree. A Wood Tree is rooked and stripped of nothing (objects.go
+//     strips trants only). While rooked it waits for its revival: pet, water, harvest and
+//     Trantsformation Fluid answer "rooked" ("It's rooked. Revive it first.", as objects.go), and a
+//     rooked trant grows its fruit back from step 6 (12 s on) every 4 s until it stops changing
+//     (include/trants.js 1170-1232, objects.go armRookFruit). A Patch tree that dies or is cleared is
+//     no longer rooked ("rook.unrook"), so a tree grown later in the plot starts clean.
+//   - Fertilidust (objects.go handleDust, obj_dust, the one jar route online): the full jar revives
+//     every dead trant of the street's shared Patches at once, as the jar is used ("patches.revive":
+//     fertilidust.js onUse 266-345, replaceWith the living class at health 4 + 1 and maturity 3 + 1, no
+//     fruit: js/patches.js REVIVED_TRANT), and 3 s on grows every living Patch tree with the street's
+//     own ("patches.dust": trees.go treeDust, woodDust). Lite names one tree: a Patch tree by its plot
+//     key ("patches.dustSpot" says where it stands) grows alone (fertilidust_lite.js onUse 266-296).
+//   - Trantsformation Fluid (potion_trantsformation_fluid.js canPour 512-527, getValidTargets 529-534,
+//     onPour 536-592): a grown tree, never an Egg Plant on a street and never a poisoned one, maturity
+//     4 or more and (a trant) health 4 or more, becomes a different random tree of this.replacements
+//     (595; never an Egg Plant on a street) at health 4 and maturity max(4, maturity - 3) (a Wood Tree at
+//     most 6, as js/patches.js growTree), with no fruit (the page's createTrantState fruitCount 0). The
+//     bottle is the ledger's to use first (LedgerUse.php CLASSES potion_trantsformation_fluid); a tree
+//     that changed while it waited gives the use back.
 //
 // -patches (default off: every patch_* frame is the hub's bad_frame, so pages keep their own
 // Patches); -patches-file (default realtime-patches.json beside -secret-file; off: memory only). Plant,
@@ -145,21 +170,24 @@ const (
 	patchGrantKeep    = 7 * 24 * time.Hour // a grant nobody acknowledged this long goes
 	patchGrantsPerOne = 200
 
-	patchBusy        = "Someone else is already working on this patch."    // patch.js 171-174, 373-381
-	patchNoTending   = "Nope, no tending needed."                          // patch.js 334
-	patchSeedTend    = "A seedling is growing - no need for tending!"      // patch.js 331
-	patchSeedDig     = "A seedling is growing - why would you dig it out?" // patch.js 175-178
-	patchSeedPlant   = "There's already a seedling here."                  // patch.js 235-240
-	patchHole        = "There is already a hole there."                    // patch.js 179-182
-	patchWeeds       = "You should probably tend to the weeds first."      // js/patches.js plotVerbs
-	patchFillFirst   = "You need to wait for the hole to fill in first."   // js/patches.js plotVerbs
-	patchWrongBean   = "That bean will not grow here. Beans only grow in certain regions. Like attracts like."
-	patchNoBean      = "But what to plant? You need a *seasoned* bean. Plain beans will not work, so ask a friend where to find a seasoned one." // js/patches.js NO_SEASONED_BEAN_MSG
-	patchEnough      = "That's enough, thnx."                                                                                                    // patch_seedling.js onStatus 257-268
-	patchNothingHere = "There's nothing here to clear."                                                                                          // the second clear
-	patchNotTree     = "That isn't a tree."                                                                                                      // ours: a tree verb on soil
-	patchLater       = "Not on shared Patches yet."                                                                                              // slice 2
-	patchUnknown     = "That is not something here."
+	patchBusy         = "Someone else is already working on this patch."    // patch.js 171-174, 373-381
+	patchNoTending    = "Nope, no tending needed."                          // patch.js 334
+	patchSeedTend     = "A seedling is growing - no need for tending!"      // patch.js 331
+	patchSeedDig      = "A seedling is growing - why would you dig it out?" // patch.js 175-178
+	patchSeedPlant    = "There's already a seedling here."                  // patch.js 235-240
+	patchHole         = "There is already a hole there."                    // patch.js 179-182
+	patchWeeds        = "You should probably tend to the weeds first."      // js/patches.js plotVerbs
+	patchFillFirst    = "You need to wait for the hole to fill in first."   // js/patches.js plotVerbs
+	patchWrongBean    = "That bean will not grow here. Beans only grow in certain regions. Like attracts like."
+	patchNoBean       = "But what to plant? You need a *seasoned* bean. Plain beans will not work, so ask a friend where to find a seasoned one." // js/patches.js NO_SEASONED_BEAN_MSG
+	patchEnough       = "That's enough, thnx."                                                                                                    // patch_seedling.js onStatus 257-268
+	patchNothingHere  = "There's nothing here to clear."                                                                                          // the second clear
+	patchNotTree      = "That isn't a tree."                                                                                                      // ours: a tree verb on soil
+	patchRooked       = "It's rooked. Revive it first."                                                                                           // objects.go actOn
+	patchNoTrantsform = "You must be near a tree to apply this."                                                                                  // potion_trantsformation_fluid.js canPour 512
+	patchTrantSmall   = "This tree is too small to be trantsformed"                                                                               // canPour 523
+	patchTrantWeak    = "This tree is too weak to be trantsformed"                                                                                // canPour 524
+	patchUnknown      = "That is not something here."
 )
 
 var (
@@ -169,11 +197,13 @@ var (
 	patchesFileForTest string
 	patchesOffForTest  bool
 
-	patchKeyRe   = regexp.MustCompile(`^(?:(patch|patch_dark|trant_[a-z]+_dead):(\d{1,2})|tree:(\d{1,2}))$`)
-	patchVerbs   = map[string]bool{"tend": true, "dig": true, "plant": true, "pet": true, "water": true, "harvest": true, "poison": true, "antidote": true, "clear": true, "dust": true, "trantsform": true}
-	deadTrants   = map[string]bool{"trant_bean_dead": true, "trant_bubble_dead": true, "trant_egg_dead": true, "trant_fruit_dead": true, "trant_gas_dead": true, "trant_spice_dead": true}
-	patchStages  = map[string]bool{"dirty": true, "clean": true, "dug": true, "seedling": true, "tree": true, "dead": true}
-	patchToolFor = map[string]string{"tend": "patch_hoe", "dig": "shovel", "clear": "patch_hatchet", "water": "tree_can", "harvest": "hatchet"}
+	patchKeyRe  = regexp.MustCompile(`^(?:(patch|patch_dark|trant_[a-z]+_dead):(\d{1,2})|tree:(\d{1,2}))$`)
+	patchVerbs  = map[string]bool{"tend": true, "dig": true, "plant": true, "pet": true, "water": true, "harvest": true, "poison": true, "antidote": true, "clear": true, "trantsform": true}
+	deadTrants  = map[string]bool{"trant_bean_dead": true, "trant_bubble_dead": true, "trant_egg_dead": true, "trant_fruit_dead": true, "trant_gas_dead": true, "trant_spice_dead": true}
+	patchStages = map[string]bool{"dirty": true, "clean": true, "dug": true, "seedling": true, "tree": true, "dead": true}
+	// potion_trantsformation_fluid.js 595 this.replacements, in its order.
+	patchTrantsformInto = []string{"trant_bean", "trant_bubble", "trant_egg", "trant_fruit", "trant_gas", "trant_spice", "wood_tree"}
+	patchToolFor        = map[string]string{"tend": "patch_hoe", "dig": "shovel", "clear": "patch_hatchet", "water": "tree_can", "harvest": "hatchet"}
 )
 
 // ---------------------------------------------------------------------------
@@ -363,6 +393,9 @@ type pTree struct {
 	hday     int64
 	// Tree Poison: when it dies, and who poured it.
 	poisonEnd, poisonBy int64
+	// Rooked (a trant): the next step of the fruit it grows back while it waits (0: none, or it stopped
+	// changing; objects.go armRookFruit).
+	rookNext int64
 }
 
 func (t *pTree) wood() bool { return t.class == "wood_tree" }
@@ -506,9 +539,12 @@ func (g *patches) Register(r *Registry) {
 	r.OnDisconnect(func(cl *Client) { delete(g.limits, cl.ID()) })
 	r.OnShutdown(func() { g.save() })
 	r.Provide("patches.adopt", g.adopt)
-	// Slice 2: the Rook and Fertilidust reach no Patch tree yet.
-	r.Provide("patches.rookTree", func(street, id string) bool { return false })
-	r.Provide("patches.dust", func(street string) []string { return nil })
+	// Slice 2: the Rook (rook.go) and Fertilidust (objects.go handleDust) on Patch trees.
+	r.Provide("patches.rookable", g.rookable)
+	r.Provide("patches.rookTree", g.rookTree)
+	r.Provide("patches.dustSpot", g.dustSpot)
+	r.Provide("patches.dust", g.dust)
+	r.Provide("patches.revive", g.revive)
 }
 
 func (g *patches) nowMs() int64 { return g.h.Now().UnixMilli() }
@@ -637,6 +673,7 @@ func (g *patches) killTree(street string, p *pPlot, at int64) {
 		p.stage, p.since, p.due, p.tree, p.dead = "dead", at, 0, nil, t.class+"_dead"
 	}
 	log.Printf("patches: the %s in %s %s died (poisoned by %d)", t.class, street, p.spot.key, by)
+	g.unrook(street, t.class, p.spot.key)
 	g.save()
 	if t.wood() && by > 0 {
 		gr := g.grant(by, "plank", deadWoodPlanks)
@@ -690,6 +727,9 @@ func (g *patches) advance(street string, p *pPlot, now int64) bool {
 				return true
 			}
 		} else {
+			if g.rookFruit(street, p, now) {
+				changed = true
+			}
 			guard := 0
 			for guard < g.w.rules.Timers.CatchUp {
 				next := t.cycleAt + g.cycleMs(t.maturity)
@@ -747,6 +787,7 @@ func (g *patches) due(p *pPlot) int64 {
 	}
 	if t := p.tree; p.stage == "tree" && t != nil {
 		pick(t.poisonEnd)
+		pick(t.rookNext)
 		if t.wood() {
 			if t.maturity <= 0 && t.clearedAt > 0 {
 				pick(t.clearedAt + g.timers.wood)
@@ -941,6 +982,7 @@ type patchAct struct {
 	Grow  int    `json:"grow"`
 	Drop  bool   `json:"drop"`
 	Ms    int64  `json:"ms"`
+	K     *int   `json:"k"` // trantsform: the bottle (its place among the player's bottles in the pack)
 }
 
 // patchReply answers one act.
@@ -1060,8 +1102,8 @@ func (g *patches) handleAct(cl *Client, frame json.RawMessage) {
 		g.pour(rp, p)
 	case "clear":
 		g.clear(rp, p)
-	case "dust", "trantsform":
-		rp.no("later", patchLater)
+	case "trantsform":
+		g.trantsform(rp, p)
 	}
 }
 
@@ -1310,6 +1352,10 @@ func (g *patches) pet(rp *patchReply, p *pPlot) {
 		}
 		rp.ok(extra, grew)
 	case p.stage == "tree" && p.tree != nil:
+		if g.rooked(rp.street, p) {
+			rp.no("rooked", patchRooked)
+			return
+		}
 		g.care(rp, p, "pet")
 	default:
 		rp.no("not_tree", patchNotTree)
@@ -1321,6 +1367,10 @@ func (g *patches) water(rp *patchReply, p *pPlot) {
 		rp.no("not_tree", patchNotTree)
 		return
 	}
+	if g.rooked(rp.street, p) {
+		rp.no("rooked", patchRooked)
+		return
+	}
 	if v, no := g.careRefusal(p.tree, "water"); no {
 		rp.no(v.code, v.message)
 		return
@@ -1328,6 +1378,10 @@ func (g *patches) water(rp *patchReply, p *pPlot) {
 	g.withTool(rp, patchToolFor["water"], func(p *pPlot, _ bool) {
 		if p.stage != "tree" || p.tree == nil {
 			rp.no("not_tree", patchNotTree)
+			return
+		}
+		if g.rooked(rp.street, p) {
+			rp.no("rooked", patchRooked)
 			return
 		}
 		g.care(rp, p, "water")
@@ -1396,10 +1450,18 @@ func (g *patches) harvest(rp *patchReply, p *pPlot) {
 		return
 	}
 	who := rp.cl.ID()
+	if g.rooked(rp.street, p) {
+		rp.no("rooked", patchRooked)
+		return
+	}
 	if p.tree.wood() {
 		g.withTool(rp, patchToolFor["harvest"], func(p *pPlot, credit bool) {
 			if p.stage != "tree" || p.tree == nil || !p.tree.wood() {
 				rp.no("not_tree", patchNotTree)
+				return
+			}
+			if g.rooked(rp.street, p) {
+				rp.no("rooked", patchRooked)
 				return
 			}
 			t := p.tree

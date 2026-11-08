@@ -91,7 +91,8 @@ const (
 	useBalm            = "potion_rook_balm"
 	useSneezing        = "sneezing_powder"
 	useSparkle         = "sparkle_powder"
-	useKindness        = "random_kindness" // verbs.go: its 20 points (random_kindness.js points_capacity)
+	useKindness        = "random_kindness"              // verbs.go: its 20 points (random_kindness.js points_capacity)
+	useTrantsform      = "potion_trantsformation_fluid" // patches_trees.go: points_capacity 3 (potion_trantsformation_fluid.js:25)
 )
 
 // useOpRe is newUseOp's shape (the site's LedgerUse::isUse).
@@ -458,7 +459,7 @@ func (o *objects) askPour(cl *Client, m objAct, street string, spot *objSpot) {
 }
 
 // dustTrees is Fertilidust on targets: the trees it grew, everyone told, the user answered.
-func (o *objects) dustTrees(cl *Client, req int64, street string, targets []*objSpot) {
+func (o *objects) dustTrees(cl *Client, req int64, street string, targets []*objSpot, all bool, patchKey string, revived []string) {
 	ids := []string{}
 	var touched, changed []*liveObj
 	for _, spot := range targets {
@@ -470,6 +471,13 @@ func (o *objects) dustTrees(cl *Client, req int64, street string, targets []*obj
 		}
 	}
 	log.Printf("objects: Fertilidust on %s by %d grew %d of %d trees", street, cl.ID(), len(ids), len(targets))
+	// G564: the trees in the street's shared Patches take it too (the whole street, or the one named),
+	// but not the dead ones this jar brought back (they were not trees when it was used).
+	if all || patchKey != "" {
+		if dust, ok := o.h.ProvidedLocked("patches.dust").(func(string, string, []string) []string); ok {
+			ids = append(ids, dust(street, patchKey, revived)...)
+		}
+	}
 	if cl.Online() && cl.Street() == street {
 		o.h.SendLocked(cl, map[string]any{"t": "obj_dusted", "req": req, "ids": ids})
 	}

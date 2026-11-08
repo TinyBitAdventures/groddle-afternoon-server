@@ -49,7 +49,12 @@ package main
 // orb_start{by,name}, orb_join{by,id,name,count}, orb_cancel{by}, stun{by,name,joiners,damage,
 // stunned,first,text}, stun_failed{by,name,broke,first,text}, stun_recovery, primed{by,name},
 // prime_end{by}, strike{by,name,damage,beam,health,text}, defeated, clear{defeated},
-// revive{key,by,name,doses,done,balm}, rooked{n} (a sync added keys after a wing beat: none yet).
+// revive{key,by,name,doses,done,balm}, rooked{n} (a sync added keys after a wing beat: none yet),
+// unrooked{key} (a rooked tree in a shared Patch died, patches_trees.go: it is rooked no more).
+//
+// Trees grown in shared street Patches (G564 slice 2): keyed "<class>:p<plot key>" (rookPatchKeyRe), learned
+// from the patches module at each wing beat ("patches.rookable") and stripped there ("patches.rookTree");
+// clients never send them in rook_sync, but revive them with rook_revive as any other key.
 //
 // rook_you why: orb_start{energy}, orb_join{energy,xp}, stun_lead{xp}, stun_assist{xp,damage},
 // stun_fail{xp,mood,broke}, wing_beat{energy,mood}, prime{energy}, prime_done{xp,damage},
@@ -232,7 +237,22 @@ var rookableClasses = map[string]bool{
 var (
 	rookKeyRe  = regexp.MustCompile(`^([a-z_]{1,24}):(\d{1,3})$`)
 	rookItemRe = regexp.MustCompile(`^[a-z0-9_]{1,48}$`)
+	// A tree grown in a shared street Patch (G564 slice 2, patches_trees.go): its class and plot key,
+	// "<class>:p<plot key>" (js/rook-attack.js rookKeyFor). The Rook learns these from the patches
+	// module at each wing beat, never from a client's sync.
+	rookPatchKeyRe = regexp.MustCompile(`^(trant_[a-z]{1,8}|wood_tree):p((?:patch|patch_dark|trant_[a-z]{1,8}_dead):\d{1,2}|tree:\d{1,2})$`)
 )
+
+// rookKeyClass is the class a Rook key names ("" when it is not a key: a street thing's or a Patch tree's).
+func rookKeyClass(key string) string {
+	if sm := rookKeyRe.FindStringSubmatch(key); sm != nil {
+		return sm[1]
+	}
+	if sm := rookPatchKeyRe.FindStringSubmatch(key); sm != nil {
+		return sm[1]
+	}
+	return ""
+}
 
 // ---------------------------------------------------------------------------
 // Data (data/rook.json, tools/build-realtime-rook.mjs)
@@ -420,6 +440,7 @@ func (m *rook) Register(r *Registry) {
 	r.OnShutdown(func() { m.save() }) // rook_persist.go
 	r.Provide("rook.treeRooked", m.treeRooked)
 	r.Provide("rook.thingRooked", m.thingRooked)
+	r.Provide("rook.unrook", m.unrook)
 	r.Provide("rook.self", m) // the console's calls (rook_admin.go)
 }
 
@@ -442,6 +463,19 @@ func (m *rook) treeRooked(street, id string) bool {
 func (m *rook) thingRooked(street, key string) bool {
 	s := m.streets[street]
 	return s != nil && s.rooked[key] != nil
+}
+
+// unrook is a Patch tree gone (patches_trees.go: it died): its key is rooked no more, so a tree grown
+// in the plot later starts clean. Everyone on the street hears the rooked things as they stand.
+func (m *rook) unrook(street, key string) {
+	s := m.streets[street]
+	if s == nil || s.rooked[key] == nil {
+		return
+	}
+	delete(s.rooked, key)
+	m.save()
+	m.broadcast(street, map[string]any{"type": "unrooked", "key": key})
+	m.tidy(street)
 }
 
 // rookCreature tells the shared street objects a Chicken, Butterfly or Piggy was rooked or revived, so it
@@ -819,8 +853,23 @@ func (m *rook) wingBeat(a *rookAttack) {
 	m.stateChange(a, "build_up")
 	s := m.streets[a.street]
 	// Each rookable thing has a 50% chance (include/rook.js:35); one already rooked stays as it is.
-	keys := make([]string, 0, len(s.keys))
-	for key := range s.keys {
+	// The street's things as clients report them, and its shared Patch trees as the patches module
+	// has them now (G564 slice 2).
+	classes := make(map[string]string, len(s.keys))
+	for key, class := range s.keys {
+		if rookKeyRe.MatchString(key) {
+			classes[key] = class
+		}
+	}
+	if fn, ok := m.h.ProvidedLocked("patches.rookable").(func(string) map[string]string); ok {
+		for key, class := range fn(a.street) {
+			if rookableClasses[class] && rookKeyClass(key) == class {
+				classes[key] = class
+			}
+		}
+	}
+	keys := make([]string, 0, len(classes))
+	for key := range classes {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
@@ -830,8 +879,15 @@ func (m *rook) wingBeat(a *rookAttack) {
 			continue
 		}
 		if m.roll() < rookChance {
-			s.rooked[key] = &rookedThing{class: s.keys[key]}
+			s.rooked[key] = &rookedThing{class: classes[key]}
 			hit = append(hit, key)
+			// A Patch tree: stripped, or killed at health 1, for everyone (patches_trees.go rookTree).
+			if sm := rookPatchKeyRe.FindStringSubmatch(key); sm != nil {
+				if strip, ok := m.h.ProvidedLocked("patches.rookTree").(func(string, string) bool); ok {
+					strip(a.street, sm[2])
+				}
+				continue
+			}
 			// A rooked tree loses its fruit and health for everyone (objects.go rookTree).
 			if id := s.objs[key]; id != "" {
 				if strip, ok := m.h.ProvidedLocked("objects.rookTree").(func(string, string) bool); ok {
@@ -1330,7 +1386,7 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 		Balm bool   `json:"balm"`
 		K    *int   `json:"k"` // the tube poured: its place among the player's Rook Balms in the pack (objects_uses.go copyOf)
 	}
-	if json.Unmarshal(frame, &msg) != nil || !rookKeyRe.MatchString(msg.Key) {
+	if json.Unmarshal(frame, &msg) != nil || rookKeyClass(msg.Key) == "" {
 		m.no(cl, "revive", "bad", "That revive did not check out.")
 		return
 	}

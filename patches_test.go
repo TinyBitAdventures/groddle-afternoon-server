@@ -25,12 +25,19 @@ type patchRig struct {
 // bottles, and a fixed roll.
 func newPatchRig(t *testing.T, withObjects bool) *patchRig {
 	t.Helper()
+	return newPatchRigWith(t, withObjects)
+}
+
+// newPatchRigWith is newPatchRig with more modules after them (the Rook: patches_trees_test.go).
+func newPatchRigWith(t *testing.T, withObjects bool, extra ...moduleFactory) *patchRig {
+	t.Helper()
 	r := &patchRig{objRig: &objRig{t: t, now: time.UnixMilli(gameEpochMs + 2000*gameDayMs + 3_600_000)}}
 	saved := modules
 	modules = []moduleFactory{func(h *Hub) Module { r.g = newPatches(h).(*patches); return r.g }}
 	if withObjects {
 		modules = append(modules, func(h *Hub) Module { r.mod = newObjects(h).(*objects); return r.mod })
 	}
+	modules = append(modules, extra...)
 	defer func() { modules = saved }()
 	r.hub = NewHub(func() time.Time { return r.now })
 	r.hub.afterFunc = func(d time.Duration, fn func()) func() bool {
@@ -795,32 +802,14 @@ func TestPatchGrantsAreHeldUntilAcked(t *testing.T) {
 	}
 }
 
-func TestPatchSlice2StubsSayLater(t *testing.T) {
-	r := newPatchRig(t, false)
-	a := r.at(1, "Ada", oldMainStreet, "patch:0")
-	r.tree(a, "patch:0", "bean_spice")
-	r.pact(a, 1, "patch:0", "dust", nil)
-	if no := r.no(a, "later"); no["message"] != patchLater {
-		t.Fatal(no)
-	}
-	r.pact(a, 2, "patch:0", "trantsform", nil)
-	r.no(a, "later")
-	if fn := r.hub.ProvidedLocked("patches.rookTree").(func(string, string) bool); fn(oldMainStreet, "patch:0") {
-		t.Fatal("the Rook strips no Patch tree in slice 1")
-	}
-	if fn := r.hub.ProvidedLocked("patches.dust").(func(string) []string); fn(oldMainStreet) != nil {
-		t.Fatal("Fertilidust reaches no Patch tree in slice 1")
-	}
-}
-
 func TestPatchRateLimit(t *testing.T) {
 	r := newPatchRig(t, false)
 	a := r.at(1, "Ada", oldMainStreet, "patch:0")
 	for i := 0; i < 6; i++ {
-		r.send(a, map[string]any{"t": "patch_act", "req": i + 1, "id": "patch:0", "verb": "dust"})
-		r.no(a, "later")
+		r.send(a, map[string]any{"t": "patch_act", "req": i + 1, "id": "patch:0", "verb": "trantsform"})
+		r.no(a, "not_tree")
 	}
-	r.send(a, map[string]any{"t": "patch_act", "req": 7, "id": "patch:0", "verb": "dust"})
+	r.send(a, map[string]any{"t": "patch_act", "req": 7, "id": "patch:0", "verb": "trantsform"})
 	r.no(a, "slow_down")
 }
 

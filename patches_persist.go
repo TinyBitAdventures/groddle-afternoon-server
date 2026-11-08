@@ -57,6 +57,7 @@ type patchTreeRec struct {
 	HDay        int64          `json:"hday,omitempty"`
 	PoisonEnd   int64          `json:"poisonEnd,omitempty"`
 	PoisonBy    int64          `json:"poisonBy,omitempty"`
+	RookNext    int64          `json:"rookNext,omitempty"`
 }
 
 type patchRec struct {
@@ -96,7 +97,7 @@ func (g *patches) record(p *pPlot) *patchRec {
 	if t := p.tree; t != nil {
 		tr := &patchTreeRec{Class: t.class, Maturity: t.maturity, Health: t.health, Fruit: t.fruit, Cap: t.cap, Petted: t.petted, Watered: t.watered,
 			Day: t.day, GrownAt: t.grownAt, CycleAt: t.cycleAt, Count: t.count, WoodPetted: t.woodPetted, WoodWatered: t.woodWatered,
-			ClearedAt: t.clearedAt, HDay: t.hday, PoisonEnd: t.poisonEnd, PoisonBy: t.poisonBy}
+			ClearedAt: t.clearedAt, HDay: t.hday, PoisonEnd: t.poisonEnd, PoisonBy: t.poisonBy, RookNext: t.rookNext}
 		for id := range t.woodBy {
 			tr.WoodBy = append(tr.WoodBy, id)
 		}
@@ -134,7 +135,7 @@ func (g *patches) fromRecord(spot *patchSpot, r *patchRec) *pPlot {
 			return nil
 		}
 		t := &pTree{class: tr.Class, grownAt: tr.GrownAt, cycleAt: tr.CycleAt, count: tr.Count, woodPetted: tr.WoodPetted, woodWatered: tr.WoodWatered,
-			clearedAt: tr.ClearedAt, hday: tr.HDay, poisonEnd: tr.PoisonEnd, poisonBy: tr.PoisonBy}
+			clearedAt: tr.ClearedAt, hday: tr.HDay, poisonEnd: tr.PoisonEnd, poisonBy: tr.PoisonBy, rookNext: tr.RookNext}
 		t.maturity, t.health, t.fruit, t.cap, t.petted, t.watered, t.day = tr.Maturity, tr.Health, tr.Fruit, tr.Cap, tr.Petted, tr.Watered, tr.Day
 		if !t.wood() && (t.maturity < 1 || t.maturity > 10 || t.health < 1 || t.health > 10) {
 			return nil
