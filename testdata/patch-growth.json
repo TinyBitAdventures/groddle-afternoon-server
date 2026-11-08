@@ -1,0 +1,91 @@
+[
+ {
+  "name": "maturity 1, health 7: the first roll grows it",
+  "tree": "trant_spice",
+  "maturity": 1,
+  "health": 7,
+  "at": 1500000,
+  "rolls": [
+   0.7,
+   0.9
+  ],
+  "expect": {
+   "maturity": 2,
+   "cycleAt": 600000,
+   "rolls": 1
+  }
+ },
+ {
+  "name": "maturity 1, health 7: a miss, then another 10 minutes",
+  "tree": "trant_spice",
+  "maturity": 1,
+  "health": 7,
+  "at": 1500000,
+  "rolls": [
+   0.85,
+   0.95
+  ],
+  "expect": {
+   "maturity": 1,
+   "cycleAt": 1200000,
+   "rolls": 2
+  }
+ },
+ {
+  "name": "health 4 never grows and rolls nothing",
+  "tree": "trant_bean",
+  "maturity": 1,
+  "health": 4,
+  "at": 3600000,
+  "rolls": [],
+  "expect": {
+   "maturity": 1,
+   "cycleAt": 3600000,
+   "rolls": 0
+  }
+ },
+ {
+  "name": "maturity 10 holds",
+  "tree": "trant_fruit",
+  "maturity": 10,
+  "health": 10,
+  "at": 2400000,
+  "rolls": [],
+  "expect": {
+   "maturity": 10,
+   "cycleAt": 2400000,
+   "rolls": 0
+  }
+ },
+ {
+  "name": "health 10 climbs, then misses at maturity 4",
+  "tree": "trant_gas",
+  "maturity": 1,
+  "health": 10,
+  "at": 4200000,
+  "rolls": [
+   0.1,
+   0.1,
+   0.3,
+   0.5
+  ],
+  "expect": {
+   "maturity": 4,
+   "cycleAt": 4200000,
+   "rolls": 4
+  }
+ },
+ {
+  "name": "a long gap stops at 400 cycles and starts the clock again",
+  "tree": "trant_bubble",
+  "maturity": 5,
+  "health": 4,
+  "at": 481200000,
+  "rolls": [],
+  "expect": {
+   "maturity": 5,
+   "cycleAt": 481200000,
+   "rolls": 0
+  }
+ }
+]

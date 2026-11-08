@@ -6,7 +6,7 @@ package main
 // "off" for memory only, and a ForTest path (under go test the flags are
 // ignored): trade.go (-trade-journal), projects.go (-projects-file),
 // feats.go (-feats-file), hi.go (-hi-file), credits.go (-credits-file),
-// objects.go (-objects-file), gardens.go (-gardens-file), crowns.go (-crowns-file), party.go (-party-file), admin.go (-bans-file), im.go (-im-file), chatstore.go (-chat-store-file: chat lines waiting for the site); playtime.go (-play-time-file: players' play time waiting for the site); chatlog.go keeps a directory of daily files (-chatlog-dir, -chatlog-days). Whole-state files are written through
+// objects.go (-objects-file), gardens.go (-gardens-file), patches.go (-patches-file), crowns.go (-crowns-file), party.go (-party-file), admin.go (-bans-file), im.go (-im-file), chatstore.go (-chat-store-file: chat lines waiting for the site); playtime.go (-play-time-file: players' play time waiting for the site); chatlog.go keeps a directory of daily files (-chatlog-dir, -chatlog-days). Whole-state files are written through
 // writeFileSynced (projects.go: a temp file, fsync, rename), journals are
 // append-only and compacted. A file that is missing starts the module empty;
 // one that does not parse is moved aside (logged) and the module starts empty

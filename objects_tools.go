@@ -63,6 +63,10 @@ var (
 	// the source answers only with a talkback (include/garden.js 217-228 broken_watering_can, 326-330 broken_hoe).
 	toolGardenCan = toolNeed{"can", []string{"watering_can", "irrigator_9000"}, "You need a Watering Can to water plots."}
 	toolHoe       = toolNeed{"hoe", []string{"hoe", "high_class_hoe"}, "You need a Hoe to clear dirty plots."}
+	// A shared street Patch (patches.go): js/patches.js plotVerbs' lines (patch.js tend conditions,
+	// trant_*_dead.js clear).
+	toolPatchHoe     = toolNeed{"hoe", []string{"hoe", "high_class_hoe"}, "You need a working hoe."}
+	toolPatchHatchet = toolNeed{"hatchet", []string{"hatchet", "class_axe"}, "You'll need a working Hatchet."}
 
 	// toolClasses is every class asked about, once.
 	toolClasses = []string{"pick", "fancy_pick", "hatchet", "class_axe", "scraper", "super_scraper", "shovel", "ace_of_spades", "watering_can", "irrigator_9000", "hoe", "high_class_hoe"}
@@ -175,10 +179,23 @@ func (o *objects) withTool(cl *Client, street string, need *toolNeed, refuse fun
 
 // withGardenTool is withTool for a shared public garden's verbs (gardens.go, through the hook
 // "objects.withTool"): group "can" or "hoe", the same answers kept for the same street visit.
+// A shared street Patch (patches.go) names its own groups: "patch_hoe" (tend), "shovel" (dig),
+// "patch_hatchet" (clear a dead tree), "hatchet" (a Wood Tree's harvest) and "tree_can" (water a tree).
 func (o *objects) withGardenTool(cl *Client, street, group string, refuse func(code, message string), act func(credit bool)) {
 	need := &toolGardenCan
-	if group == "hoe" {
+	switch group {
+	case "hoe":
 		need = &toolHoe
+	case "patch_hoe":
+		need = &toolPatchHoe
+	case "shovel":
+		need = &toolShovel
+	case "patch_hatchet":
+		need = &toolPatchHatchet
+	case "hatchet":
+		need = &toolHatchet
+	case "tree_can":
+		need = &toolCan
 	}
 	o.withTool(cl, street, need, refuse, act)
 }
