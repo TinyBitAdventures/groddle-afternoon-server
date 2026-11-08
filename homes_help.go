@@ -36,6 +36,7 @@ package main
 // Client to server:
 //
 //	{"t":"butler_leave","owner":7,"item":{"c":"apple","n":3},"text":"…"}   item or text or both
+//	        a wrapped Gift Box: "item":{"c":"bag_gift_box_wrapped","n":1,"box":[{"c":"apple","n":3}],"ref":"w2"}
 //	{"t":"home_tend_tell","token":"…"}                                    the site's proof of tending done
 //
 // Server to client:
@@ -50,6 +51,11 @@ package main
 // A tend proof is base64url(JSON) "." base64url(HMAC-SHA256(secret, the first
 // part)), JSON {"k":"home_tend","sub":visitor,"o":owner,"acts":[…],"iat",
 // "exp","n"}, good once (n).
+//
+// A wrapped Gift Box (G332): leave_package lets bag_gift_box_wrapped through
+// though it is no_trade (bag_butler.js:1013, 1059); it goes as a give's box
+// does (gifts.go): the box and the one to three stacks inside it leave the
+// visitor's ledger, and the owner's Butler hands over the box with them in it.
 //
 // Ours: a visitor may leave a parcel only from the owner's home street (the
 // source's Butler stood there and took drops in reach, proximity_override
@@ -96,6 +102,9 @@ const (
 	butlerTextOff  = "The Butler can't take anything right now."         // ours: no ledger to carry it
 	butlerTextAway = "You need to be on their home street to leave something with their Butler."
 	butlerTextBad  = "Leave a package or a message."
+
+	giftBoxClass     = "bag_gift_box"         // the box a wrapped box is, in the ledger (gifts.go)
+	giftWrappedClass = "bag_gift_box_wrapped" // bag_butler.js:1013: the one no_trade class leave_package takes
 )
 
 var butlerClassRe = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
@@ -111,7 +120,7 @@ type butlerAnswer struct {
 
 // butlerSite is the site's Butler (httpLedger). Calls block; the module makes them off the hub lock.
 type butlerSite interface {
-	butler(op string, from, to int64, gave tradeGoods, text string) butlerAnswer
+	butler(op string, from, to int64, gave tradeGoods, box []tradeItem, text string) butlerAnswer
 }
 
 // butlerVisitAnswer is the site's word on a visit. Status "" means no answer came.
@@ -164,8 +173,12 @@ func (l *httpLedger) butlerVisitOnce(body []byte) (butlerVisitAnswer, error) {
 	return butlerVisitAnswer{}, fmt.Errorf("HTTP %d: %.200s", res.StatusCode, raw)
 }
 
-func (l *httpLedger) butler(op string, from, to int64, gave tradeGoods, text string) butlerAnswer {
-	body, _ := json.Marshal(map[string]any{"op": op, "from": from, "to": to, "gave": goodsJSON(gave), "text": text})
+func (l *httpLedger) butler(op string, from, to int64, gave tradeGoods, box []tradeItem, text string) butlerAnswer {
+	call := map[string]any{"op": op, "from": from, "to": to, "gave": goodsJSON(gave), "text": text}
+	if len(box) > 0 {
+		call["box"] = box // ButlerParcels::boxOf: the stacks inside, checked against gave
+	}
+	body, _ := json.Marshal(call)
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
 			l.pause(time.Duration(try) * 400 * time.Millisecond)
@@ -308,8 +321,10 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 	var msg struct {
 		Owner int64 `json:"owner"`
 		Item  *struct {
-			C string `json:"c"`
-			N int    `json:"n"`
+			C   string      `json:"c"`
+			N   int         `json:"n"`
+			Box []tradeItem `json:"box"`
+			Ref string      `json:"ref"`
 		} `json:"item"`
 		Text string `json:"text"`
 	}
@@ -318,13 +333,28 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 	text := filterWords(cleanButlerText(msg.Text)) // wordfilter.go: the owner reads the message filtered
 	var item any
 	gave := tradeGoods{Items: []tradeItem{}}
+	var box []tradeItem
 	if msg.Item != nil {
 		if !butlerClassRe.MatchString(msg.Item.C) || msg.Item.N < 1 || msg.Item.N > butlerCountMax {
 			m.refuse(cl, owner, "bad", butlerTextBad, nil, text != "")
 			return
 		}
-		gave.Items = []tradeItem{{C: msg.Item.C, N: msg.Item.N}}
-		item = map[string]any{"c": msg.Item.C, "n": msg.Item.N}
+		if msg.Item.C == giftWrappedClass {
+			box = butlerBox(msg.Item.Box)
+			if box == nil || msg.Item.N != 1 {
+				m.refuse(cl, owner, "bad", butlerTextBad, nil, text != "")
+				return
+			}
+			gave.Items = append([]tradeItem{{C: giftBoxClass, N: 1}}, box...)
+			it := map[string]any{"c": msg.Item.C, "n": 1, "box": box}
+			if verbRefRe.MatchString(msg.Item.Ref) {
+				it["ref"] = msg.Item.Ref
+			}
+			item = it
+		} else {
+			gave.Items = []tradeItem{{C: msg.Item.C, N: msg.Item.N}}
+			item = map[string]any{"c": msg.Item.C, "n": msg.Item.N}
+		}
 	}
 	if owner <= 0 || owner == visitor || (item == nil && text == "") {
 		m.refuse(cl, owner, "bad", butlerTextBad, item, text != "")
@@ -351,7 +381,7 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 	site := m.site
 	name := cl.Name()
 	m.spawn(func() {
-		a := site.butler(op, visitor, owner, gave, text)
+		a := site.butler(op, visitor, owner, gave, box, text)
 		m.h.After(0, func() {
 			if m.busy[owner] == visitor {
 				delete(m.busy, owner)
@@ -517,4 +547,27 @@ func (m *homeHelp) disconnected(cl *Client) {
 			delete(m.busy, owner)
 		}
 	}
+}
+
+// butlerBox checks the stacks inside a wrapped box left with a Butler (gifts.go's
+// rules: one to three stacks, one of each class, never a box): nil when they are not.
+func butlerBox(in []tradeItem) []tradeItem {
+	if len(in) < 1 || len(in) > giftBoxSlots {
+		return nil
+	}
+	seen := map[string]bool{}
+	out := make([]tradeItem, 0, len(in))
+	for _, it := range in {
+		if !butlerClassRe.MatchString(it.C) || giftNoBoxRe.MatchString(it.C) || seen[it.C] || it.N < 1 || it.N > butlerCountMax {
+			return nil
+		}
+		seen[it.C] = true
+		row := tradeItem{C: it.C, N: it.N}
+		if it.R != nil && *it.R >= 0 && *it.R <= 1_000_000 {
+			r := *it.R
+			row.R = &r
+		}
+		out = append(out, row)
+	}
+	return out
 }

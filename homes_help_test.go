@@ -13,8 +13,8 @@ type fakeButler struct {
 	hold   func()
 }
 
-func (f *fakeButler) butler(op string, from, to int64, gave tradeGoods, text string) butlerAnswer {
-	f.calls = append(f.calls, map[string]any{"op": op, "from": from, "to": to, "gave": gave, "text": text})
+func (f *fakeButler) butler(op string, from, to int64, gave tradeGoods, box []tradeItem, text string) butlerAnswer {
+	f.calls = append(f.calls, map[string]any{"op": op, "from": from, "to": to, "gave": gave, "box": box, "text": text})
 	if f.hold != nil {
 		f.hold()
 	}
@@ -393,7 +393,9 @@ func TestTheButlerGivesWhileTheOwnerIsAwayButNeverToTheOwnerOrTheBlocked(t *test
 		t.Fatalf("a blocked visitor is not asked about: %v", site.calls)
 	}
 	// The site refusing (no Butler) sends nothing.
-	site.answer = func(string, int64, int64) butlerVisitAnswer { return butlerVisitAnswer{Status: "refused", Why: "no_butler"} }
+	site.answer = func(string, int64, int64) butlerVisitAnswer {
+		return butlerVisitAnswer{Status: "refused", Why: "no_butler"}
+	}
 	di := r.connect(12, "Di")
 	r.pass(di, 7, "Ada", false)
 	drain(di)
@@ -412,5 +414,45 @@ func TestNoVisitsWithoutTheSite(t *testing.T) {
 	}
 	if got := kinds(drain(bo), "butler_gift"); len(got) != 0 {
 		t.Fatalf("no gift: %v", got)
+	}
+}
+
+// G332: bag_butler.js:1013, a wrapped Gift Box goes to the Butler whole.
+func TestAVisitorLeavesAWrappedGiftBoxWithTheButler(t *testing.T) {
+	r := newHelpRig(t)
+	ada, bo := r.visiting()
+	r.do(bo, map[string]any{"t": "butler_leave", "owner": 7, "item": map[string]any{"c": "bag_gift_box_wrapped", "n": 1, "ref": "w2", "box": []map[string]any{{"c": "cherry", "n": 3}, {"c": "pick", "n": 1, "r": 40}}}})
+	r.settle()
+	if len(r.site.calls) != 1 {
+		t.Fatalf("one call: %v", r.site.calls)
+	}
+	c := r.site.calls[0]
+	g := c["gave"].(tradeGoods)
+	box := c["box"].([]tradeItem)
+	if len(g.Items) != 3 || g.Items[0].C != "bag_gift_box" || g.Items[0].N != 1 || g.Items[1].C != "cherry" || g.Items[2].C != "pick" || len(box) != 2 || box[1].R == nil || *box[1].R != 40 {
+		t.Fatalf("the box and what is inside: %+v %+v", g, box)
+	}
+	f := only(t, drain(bo), "butler_left")
+	it := f["item"].(map[string]any)
+	if f["status"] != "settled" || it["c"] != "bag_gift_box_wrapped" || it["ref"] != "w2" || len(it["box"].([]any)) != 2 {
+		t.Fatalf("Bo is told: %v", f)
+	}
+	only(t, drain(ada), "butler_parcel")
+
+	// Not a box: empty, four stacks, a box inside, a doubled class.
+	for _, bad := range [][]map[string]any{
+		{},
+		{{"c": "a", "n": 1}, {"c": "b", "n": 1}, {"c": "c", "n": 1}, {"c": "d", "n": 1}},
+		{{"c": "bag_gift_box", "n": 1}},
+		{{"c": "cherry", "n": 1}, {"c": "cherry", "n": 2}},
+	} {
+		r.now = r.now.Add(butlerEvery * 2) // past the rate limit
+		r.do(bo, map[string]any{"t": "butler_leave", "owner": 7, "item": map[string]any{"c": "bag_gift_box_wrapped", "n": 1, "box": bad}})
+		if f := only(t, drain(bo), "butler_left"); f["status"] != "refused" || f["why"] != "bad" {
+			t.Fatalf("not a box %v: %v", bad, f)
+		}
+	}
+	if len(r.site.calls) != 1 {
+		t.Fatalf("no call for a bad box: %d", len(r.site.calls))
 	}
 }
