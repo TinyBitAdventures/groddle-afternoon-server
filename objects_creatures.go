@@ -19,6 +19,9 @@ package main
 // and the street sees it (obj_ev). What each verb gives stays the player's own, and so does a Crab's
 // memory of the tunes it heard (Austin 2026-11-08: position only).
 //
+// Fire Dragons (dragon:<i>, slice 3) are walkers the same way (the game's dragonWalkAt), held by a
+// pet; none is laid out yet (the made animal lives only in a draft zone, and zones are solo only).
+//
 // Where they are (the remake's own paths, shared): every client draws each animal on the same path
 // from the same clock, so the server never moves them and an animal nobody touched costs nothing.
 // A Chicken walks to and fro across its spot, a Butterfly rests or flies across the street, a
@@ -136,15 +139,15 @@ var creatureVerbs = map[string]map[string]string{
 // creatureItem is what a landed verb gives (js/animal-kinship.js performAnimalKinship).
 var creatureItem = map[string]string{"squeeze": "grain", "milk": "milk_butterfly", "nibble": "meat"}
 
-var creatureLabel = map[string]string{"chicken": "Chicken", "butterfly": "Butterfly", "batterfly": "Batterfly", "pig": "Piggy", "kitty": "Heli Kitty", "crab": "Crab"}
+var creatureLabel = map[string]string{"chicken": "Chicken", "butterfly": "Butterfly", "batterfly": "Batterfly", "pig": "Piggy", "kitty": "Heli Kitty", "crab": "Crab", "dragon": "Fire Dragon"}
 
 func isCreature(kind string) bool {
-	return kind == "chicken" || kind == "butterfly" || kind == "batterfly" || kind == "kitty" || kind == "crab"
+	return kind == "chicken" || kind == "butterfly" || kind == "batterfly" || kind == "kitty" || kind == "crab" || kind == "dragon"
 }
 
-// walker: a street animal that walks the whole run of its floor (a Heli Kitty, a Crab), so a
-// player may meet it anywhere along the street.
-func walker(kind string) bool { return kind == "kitty" || kind == "crab" }
+// walker: a street animal that walks the whole run of its floor (a Heli Kitty, a Crab, a Fire
+// Dragon), so a player may meet it anywhere along the street.
+func walker(kind string) bool { return kind == "kitty" || kind == "crab" || kind == "dragon" }
 
 // holdFor is a rule's hold (data/objects.json rules.holds), or def when the layout has none.
 func (o *objects) holdFor(key string, def time.Duration) time.Duration {
@@ -165,6 +168,9 @@ func (o *objects) tendWalker(ob *liveObj, m objAct) verdict {
 		o.hold(ob, o.holdFor("kittyPet", 2810*time.Millisecond))
 	case ob.spot.kind == "crab" && (m.Verb == "flatter" || m.Verb == "hug" || m.Verb == "insult" || m.Verb == "pinch"):
 		o.hold(ob, o.holdFor("crabVerb", 1500*time.Millisecond))
+	case ob.spot.kind == "dragon" && m.Verb == "pet":
+		// The made Fire Dragon (slice 3): a pet stops it 2 s to lean into your hand (js/fire-dragon.js).
+		o.hold(ob, o.holdFor("dragonPet", 2000*time.Millisecond))
 	default:
 		return refuse("bad_verb", "You can't do that to a "+creatureLabel[ob.spot.kind]+".")
 	}

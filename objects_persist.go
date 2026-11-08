@@ -191,7 +191,7 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 			ob.trip = &trip
 			ob.eatingFood = trip.Stack
 		}
-	case "chicken", "butterfly", "batterfly", "kitty", "crab":
+	case "chicken", "butterfly", "batterfly", "kitty", "crab", "dragon":
 		ob.lag, ob.holdEnd = max(0, r.Lag), timeOf(r.HoldEnd)
 		ob.food = max(0, r.Food)
 		if _, egg := o.w.rules.Incubate.Hatches[r.IncEgg]; egg && spot.kind == "chicken" && r.IncBy > 0 && r.IncEnd > 0 {

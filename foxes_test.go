@@ -156,6 +156,7 @@ func TestAFourthFoxNeedsTenPlayersAndCountsTheFlurry(t *testing.T) {
 
 func TestThreeBrushersSendTheFoxAwayAndAnotherComes(t *testing.T) {
 	r := newFoxRig(t)
+	r.m.t.Layouts = nil // a preserve the layout file does not know: each page runs its foxes
 	ps := r.players(4)
 	r.ignite(ps[0])
 	r.fire(foxSpawn)
@@ -208,6 +209,7 @@ func TestTwentyOneBrushesAndTheCooldown(t *testing.T) {
 
 func TestEatingTheLastBaitSendsEveryFoxAway(t *testing.T) {
 	r := newFoxRig(t)
+	r.m.t.Layouts = nil // a preserve the layout file does not know: the first page to see it eat reports it
 	ps := r.players(4)
 	r.ignite(ps[0])
 	r.fire(foxSpawn)

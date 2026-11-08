@@ -117,3 +117,30 @@ func TestACrabsVerbHoldsItForEveryoneAndItsMemoryStaysEachPlayers(t *testing.T) 
 		t.Fatalf("a petted crab answered %v", no)
 	}
 }
+
+// A Fire Dragon (slice 3) is a walker like a Crab, held by a pet; none is on a shared street yet.
+func TestAFireDragonIsAWalkerHeldByAPet(t *testing.T) {
+	if ms := sharedWorld.rules.Holds["dragonPet"]; ms != 2000 {
+		t.Fatalf("a pet holds a Fire Dragon 2 s (js/fire-dragon.js menuWaitMs), not %d", ms)
+	}
+	r := newObjRig(t)
+	street := defaultStreet
+	spot := &objSpot{id: "dragon:0", kind: "dragon", class: "npc_fire_dragon", x: 2000, y: 850}
+	sharedWorld.streets[street]["dragon:0"] = spot
+	defer delete(sharedWorld.streets[street], "dragon:0")
+	a := r.player(1, "Ada", street, 3500, 850)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	snap := r.only(a, "objs")
+	spots, _ := snap["spots"].(map[string]any)
+	if at, _ := spots["dragon:0"].([]any); len(at) != 2 {
+		t.Fatalf("its spot rides the snapshot: %v", spots)
+	}
+	r.act(a, 1, "dragon:0", "pet", nil)
+	if st := objOf(r.only(a, "obj_ok"), "dragon:0"); num(st["hold"]) != 2000 {
+		t.Fatalf("a pet holds it 2 s: %v", st)
+	}
+	r.act(a, 2, "dragon:0", "hug", nil)
+	if no := r.only(a, "obj_no"); no["code"] != "bad_verb" {
+		t.Fatalf("a hugged dragon answered %v", no)
+	}
+}

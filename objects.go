@@ -186,24 +186,25 @@ const (
 )
 
 var (
-	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
+	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab|dragon):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true, "flatter": true, "hug": true, "insult": true, "pinch": true}
+		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true}
 )
 
 // The source's refusals (items/*.js), with the remake's copy where the source
 // only hides the verb.
 var notReady = map[string]string{
-	"mortar_barnacle": "This barnacle is not ready yet!",           // mortar_barnacle.js:64
-	"ice_knob":        "This Ice Nubbin is not ready yet!",         // ice_knob.js:63
-	"jellisac":        "This Jellisac is not ready yet!",           // jellisac.js:54
-	"dirt_pile":       "There isn't enough dirt left to dig.",      // dirt_pile.js:113
-	"peat_1":          "No more peat here!",                        // peat_1.js:143
-	"paper_tree":      "There's nothing to pick, cowboy!",          // paper_tree.js:252
-	"rock":            "This is not the rock you are looking for.", // include/mining.js:216
-	"tree":            "There's nothing to pick, cowboy.",          // include/trants.js:235
+	"mortar_barnacle": "This barnacle is not ready yet!",                // mortar_barnacle.js:64
+	"ice_knob":        "This Ice Nubbin is not ready yet!",              // ice_knob.js:63
+	"jellisac":        "This Jellisac is not ready yet!",                // jellisac.js:54
+	"dirt_pile":       "There isn't enough dirt left to dig.",           // dirt_pile.js:113
+	"peat_1":          "No more peat here!",                             // peat_1.js:143
+	"paper_tree":      "There's nothing to pick, cowboy!",               // paper_tree.js:252
+	"npc_salmon":      "The Salmon is gone. Another will turn up soon.", // js/resource-nodes.js (apiDelete on pocket)
+	"rock":            "This is not the rock you are looking for.",      // include/mining.js:216
+	"tree":            "There's nothing to pick, cowboy.",               // include/trants.js:235
 }
 
 // Tree Poison copy (js/tree-poison.js POISON_COPY, from trant_base and the potions; the remake's
@@ -315,6 +316,7 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			Bat   [][]any   `json:"batterflies"`
 			Kitty [][]any   `json:"kitties"`
 			Crab  [][]any   `json:"crabs"`
+			Drag  [][]any   `json:"dragons"`
 			Trunk []float64 `json:"trunks"`
 			Sad   bool      `json:"sad"`
 		} `json:"streets"`
@@ -390,7 +392,7 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			id := "pig:" + strconv.Itoa(int(i))
 			spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y, index: int(i), rng: rng}
 		}
-		for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat, "kitty": row.Kitty, "crab": row.Crab} {
+		for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat, "kitty": row.Kitty, "crab": row.Crab, "dragon": row.Drag} {
 			for _, r := range rows {
 				if len(r) < 3 {
 					return nil, fmt.Errorf("%s: bad %s %v", tsid, kind, r)
@@ -408,8 +410,11 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 				}
 				id := kind + ":" + strconv.Itoa(int(i))
 				class := "npc_" + kind
-				if kind == "kitty" {
+				switch kind {
+				case "kitty":
 					class = "npc_kitty_chicken"
+				case "dragon":
+					class = "npc_fire_dragon"
 				}
 				spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, fly: fly, index: int(i)}
 			}
@@ -818,7 +823,7 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		return m
 	case "wood":
 		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
-	case "chicken", "butterfly", "batterfly", "kitty", "crab":
+	case "chicken", "butterfly", "batterfly", "kitty", "crab", "dragon":
 		return o.creatureState(ob)
 	default:
 		return o.deathState(ob, map[string]any{"id": s.id, "fruit": ob.fruit, "cap": ob.cap, "health": ob.health, "maturity": ob.maturity, "petted": ob.petted, "watered": ob.watered})
@@ -947,12 +952,13 @@ var objFruit = map[string]string{"trant_fruit": "cherry", "trant_egg": "egg_plai
 
 // objNodeYield is a resource node's yield with no skill package bonus
 // (js/resource-nodes.js:1377-1420: mortar_barnacle 1, ice_knob at least 1,
-// jellisac 1, dirt_pile 2 earth unless a drop rolls, peat_1 3). More than
-// this, and a dirt pile's drops, go through the budget.
+// jellisac 1, dirt_pile 2 earth unless a drop rolls, peat_1 3; a pocketed
+// npc_salmon one Pocket Salmon, npc_salmon.js verbs.pocket). More than this,
+// a dirt pile's drops and a Salmon's 10% boot go through the budget.
 var objNodeYield = map[string]struct {
 	c string
 	n int
-}{"mortar_barnacle": {"barnacle", 1}, "ice_knob": {"ice", 1}, "jellisac": {"jellisac_clump", 1}, "dirt_pile": {"earth", 2}, "peat_1": {"peat", 3}}
+}{"mortar_barnacle": {"barnacle", 1}, "ice_knob": {"ice", 1}, "jellisac": {"jellisac_clump", 1}, "dirt_pile": {"earth", 2}, "peat_1": {"peat", 3}, "npc_salmon": {"salmon", 1}}
 
 // woodPlanks is items/wood_tree.js:880 plankProdMap, the planks by maturity (endHarvest 766).
 var woodPlanks = [6]int{25, 30, 40, 50, 60, 80}

@@ -23,21 +23,24 @@ package main
 //     startMoving with no bait at all: "No more bait remains, so the Fox
 //     leaves..."; a brush within 2 s of your last one does nothing (212).
 //
-// Each player's game still runs the foxes along the street with the solo rules
-// (js/foxes.js), reports when a fox it draws reaches a bait (the first report
-// eats it for everyone) and applies its own brush rewards; the server counts
-// brushes and brushers. Constants and the preserve list are data/foxes.json,
+// The server runs the foxes along the street too (foxes_walk.go, slice 3 of
+// research/plans/street-animals-shared.md): every page draws each leg it sends,
+// so a fox is in the same place for everyone and reaches a bait at the same
+// moment, when the server eats it. Each game applies its own brush rewards; the
+// server counts brushes and brushers. Constants and the preserve list are data/foxes.json,
 // written by the game's tools/build-realtime-foxes.mjs.
 //
 // Client to server:
 //
 //	{"t":"fox_ignite","baits":[x,x,x]}       you ignited a Fox Bait; where its three baits fall
 //	{"t":"fox_brush","fox":"…"}              you brushed this fox
-//	{"t":"fox_eat","fox":"…","bait":"…"}     on your screen this fox reached that bait
+//	{"t":"fox_eat","fox":"…","bait":"…"}     on your screen this fox reached that bait (only a preserve
+//	                                          the layout file does not know: the server eats for the rest)
 //
 // Server to client:
 //
-//	{"t":"fox_state","foxes":[{"id":"…","leaving":false}],"baits":[{"id":"…","x":0}]}  on joining a preserve
+//	{"t":"fox_state","foxes":[{"id":"…","leaving":false,"walk":{…}}],"baits":[{"id":"…","x":0}],"now":…}  on joining a preserve
+//	{"t":"fox_walk","fox":"…","x0":0,"x1":0,"t0":…,"ms":0,"pose":"run","now":…}  a fox's next leg (foxes_walk.go)
 //	{"t":"fox_baits","by":7,"baits":[{"id":"…","x":0}]}   three baits fall
 //	{"t":"fox_bait_gone","bait":"…"}         eaten or gone stale
 //	{"t":"fox_spawn","fox":"…","n":2,"text":"A fox appears!"}
@@ -58,6 +61,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"strconv"
 	"time"
 )
@@ -89,7 +93,9 @@ type foxTable struct {
 	MaxBrushes          int      `json:"maxBrushes"`
 	MaxBrushers         int      `json:"maxBrushers"`
 	BrushCooldownMs     int      `json:"brushCooldownMs"`
-	Text                struct {
+	// Layouts is each preserve as every page lays it out (foxes_walk.go: where its foxes run).
+	Layouts map[string]foxLayout `json:"layouts"`
+	Text    struct {
 		Appears      string `json:"appears"`
 		Leaves       string `json:"leaves"`
 		LeavesNoBait string `json:"leavesNoBait"`
@@ -104,6 +110,11 @@ type preserveFox struct {
 	brushers map[int64]bool
 	leaving  bool
 	gone     func() bool
+	// Where it runs (foxes_walk.go): its x at the end of its last leg, its heading, the leg, the timer.
+	x    float64
+	dir  int
+	leg  foxLeg
+	step func() bool
 }
 
 type preserveBait struct {
@@ -128,6 +139,7 @@ type foxes struct {
 	ignites   map[int64]*bucket
 	eats      map[int64]*bucket
 	lastBrush map[int64]time.Time
+	roll      func() float64 // a fox's turn at a bait or a marker (foxes_walk.go)
 }
 
 func init() { modules = append(modules, newFoxes) }
@@ -138,7 +150,7 @@ func newFoxes(h *Hub) Module {
 		panic(fmt.Sprintf("realtime: data/foxes.json: %v", err))
 	}
 	m := &foxes{h: h, t: t, preserves: map[string]bool{}, at: map[string]*preserve{},
-		ignites: map[int64]*bucket{}, eats: map[int64]*bucket{}, lastBrush: map[int64]time.Time{}}
+		ignites: map[int64]*bucket{}, eats: map[int64]*bucket{}, lastBrush: map[int64]time.Time{}, roll: rand.Float64}
 	for _, s := range t.Preserves {
 		m.preserves[s] = true
 	}
@@ -183,10 +195,15 @@ func (m *foxes) newID(kind string) string {
 	return kind + "-" + strconv.FormatInt(m.seq, 36)
 }
 
-func foxesJSONList(p *preserve) []map[string]any {
+func foxesJSONList(p *preserve, now time.Time) []map[string]any {
 	out := make([]map[string]any, 0, len(p.foxes))
 	for _, f := range p.foxes {
-		out = append(out, map[string]any{"id": f.id, "leaving": f.leaving})
+		row := map[string]any{"id": f.id, "leaving": f.leaving}
+		if !f.leg.t0.IsZero() {
+			// Where it runs now (foxes_walk.go), so a newcomer draws it in the same place.
+			row["walk"] = f.leg.json(f.id, now)
+		}
+		out = append(out, row)
 	}
 	return out
 }
@@ -211,7 +228,7 @@ func (m *foxes) joined(cl *Client) {
 		m.at[cl.Street()] = p
 	}
 	// location.js onPlayerEnter: a newcomer sees the foxes and baits already there.
-	m.h.SendLocked(cl, map[string]any{"t": "fox_state", "foxes": foxesJSONList(p), "baits": baitsJSONList(p.baits)})
+	m.h.SendLocked(cl, map[string]any{"t": "fox_state", "foxes": foxesJSONList(p, m.h.Now()), "baits": baitsJSONList(p.baits), "now": m.h.Now().UnixMilli()})
 }
 
 func (m *foxes) left(street string) {
@@ -226,6 +243,9 @@ func (m *foxes) left(street string) {
 	for _, f := range p.foxes {
 		if f.gone != nil {
 			f.gone()
+		}
+		if f.step != nil {
+			f.step()
 		}
 	}
 	for _, b := range p.baits {
@@ -313,7 +333,11 @@ func (m *foxes) spawnFox(street string, p *preserve) {
 	if float64(before) >= float64(len(players))/m.t.PlayersPerFox {
 		return
 	}
-	f := &preserveFox{id: m.newID("f"), brushers: map[int64]bool{}}
+	f := &preserveFox{id: m.newID("f"), brushers: map[int64]bool{}, dir: -1}
+	lay, walks := m.t.Layouts[street]
+	if walks {
+		f.x = lay.Spawner // npc_walkable: it sets off from the spawner heading left
+	}
 	p.foxes = append(p.foxes, f)
 	m.h.BroadcastStreetLocked(street, map[string]any{"t": "fox_spawn", "fox": f.id, "n": len(p.foxes), "text": m.t.Text.Appears}, 0)
 	log.Printf("foxes: %s: %s appears, %d foxes for %d players", street, f.id, len(p.foxes), len(players))
@@ -325,6 +349,9 @@ func (m *foxes) spawnFox(street string, p *preserve) {
 	// A fox that finds no bait leaves at once (startMoving).
 	if len(p.baits) == 0 {
 		m.leave(street, p, f, m.t.Text.LeavesNoBait)
+	}
+	if walks {
+		m.foxGo(street, p, f, lay)
 	}
 }
 
@@ -343,6 +370,10 @@ func (m *foxes) leave(street string, p *preserve, f *preserveFox, text string) {
 	}
 	f.leaving = true
 	m.h.BroadcastStreetLocked(street, map[string]any{"t": "fox_leave", "fox": f.id, "text": text}, 0)
+	if _, walks := m.t.Layouts[street]; walks {
+		// It goes when it reaches the exit (foxes_walk.go foxArrived).
+		return
+	}
 	f.gone = m.h.After(m.ms(m.t.LeaveMs), func() {
 		if m.at[street] != p {
 			return
@@ -386,6 +417,8 @@ func (m *foxes) brush(cl *Client, frame json.RawMessage) {
 	}
 	f.brushes++
 	f.brushers[cl.ID()] = true
+	// A brushed fox stands a moment where it is, for everyone (foxes_walk.go).
+	m.foxBrushed(street, p, f)
 	// npc_fox.js:425-434.
 	if len(f.brushers) >= m.t.MaxBrushers || f.brushes >= m.t.MaxBrushes || len(p.baits) == 0 {
 		m.leave(street, p, f, m.t.Text.Leaves)
@@ -409,6 +442,9 @@ func (m *foxes) eat(cl *Client, frame json.RawMessage) {
 	if p == nil || m.findFox(p, msg.Fox) == nil {
 		return
 	}
+	if _, walks := m.t.Layouts[cl.Street()]; walks {
+		return // the server runs this preserve's foxes and eats for them (foxes_walk.go)
+	}
 	m.removeBait(cl.Street(), msg.Bait)
 }
 
@@ -430,6 +466,8 @@ func (m *foxes) removeBait(street, id string) {
 			// startMoving finds no bait: every fox there goes.
 			for _, f := range append([]*preserveFox{}, p.foxes...) {
 				m.leave(street, p, f, m.t.Text.LeavesNoBait)
+				// Running toward bait that is gone: it heads for the exit now (startMoving).
+				m.foxTurnToExit(street, p, f)
 			}
 		}
 		return
