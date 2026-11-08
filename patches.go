@@ -1,6 +1,6 @@
 package main
 
-// Shared street Patches (register G564, slices 0 to 2): a street Patch, the Seedling planted in it,
+// Shared street Patches (register G564, slices 0 to 3): a street Patch, the Seedling planted in it,
 // the tree it grows into and the dead tree that tree leaves are the same for everyone on the street,
 // as in the original, where a Patch was an item in the location (items/patch.js, patch_dark.js,
 // patch_seedling.js, include/trants.js, wood_tree.js, trant_*_dead.js). The server keeps each plot
@@ -101,7 +101,9 @@ package main
 //     and talkback stay the page's (through the earning budget), as on every shared object.
 //
 // Easy to change, named here (Austin's open calls, built with the plan's recommendations):
-//   - The shared streets are data/patches.json's "pilot" list (slice 1: Old Main Street).
+//   - The shared streets: data/patches.json's "pilot", one data value. null (slice 3, Austin 2026-11-08:
+//     "all 100 streets", "no pilot: every street at once") shares every street laid out; a list (slice 1
+//     had Old Main Street, GM4103L52ID23) shares only those.
 //   - Poisoning: anyone with Botany, as the original (the page checks Botany and the guilt).
 //   - Growth at the original's (today's) speed: rules.timers and rules.chance, data.
 //   - Neglect off (G45); the per-player harvest limit on (rules.harvestLimit).
@@ -140,6 +142,13 @@ package main
 // Patches); -patches-file (default realtime-patches.json beside -secret-file; off: memory only). Plant,
 // grow, death, clear and grants write the file at once, the rest within a second.
 // GRODDLE_PATCHES_DEV=1 takes patch_dev (shorter timers, a forced roll, a game day turn).
+//
+// The one-time hand-over of players' own Patch trees (slice 3, the plan's section 10, Austin's pick
+// "decide by the count" = option B, one winner per Patch): -patches-seed names a file the site's payout
+// wrote (site src/PatchPayout.php through the game's tools/patches/payout.mjs --seed-out); at the
+// first connect after a start each winner's Seedling or tree lands in its plot with them as planter
+// (patches_seed.go). Each is applied once (the state file remembers it), and one that can't land is
+// refunded to its planter as a grant (its bean, and the fruit or Planks on it).
 
 import (
 	"crypto/rand"
@@ -191,7 +200,7 @@ const (
 )
 
 var (
-	patchesFlag     = flag.String("patches", "off", "on: street Patches are shared (patches.go, data/patches.json's pilot streets); off: pages keep their own, as before")
+	patchesFlag     = flag.String("patches", "off", "on: street Patches are shared (patches.go: every street data/patches.json lays out, or its pilot list); off: pages keep their own, as before")
 	patchesFileFlag = flag.String("patches-file", "", "file that keeps the shared street Patches and the grants not yet saved (default: realtime-patches.json beside -secret-file; off: memory only)")
 	// patchesFileForTest gives the module a state file under go test; patchesOffForTest turns it off.
 	patchesFileForTest string
@@ -481,6 +490,11 @@ type patches struct {
 	saveDue bool
 	resumed bool
 	savedAt int64
+
+	// The payout's winners waiting for the first connect, and every seed id applied or refunded
+	// (patches_seed.go).
+	seeds  []patchSeed
+	seeded map[string]int64
 }
 
 func newPatches(h *Hub) Module {
@@ -489,7 +503,7 @@ func newPatches(h *Hub) Module {
 	w := patchWorldData
 	t := w.rules.Timers
 	g := &patches{h: h, w: w, ow: sharedWorld, plots: map[string]map[string]*pPlot{}, parked: map[string]map[string]*patchRec{},
-		holding: map[string]bool{}, limits: map[int64]*objBucket{}, boot: hex.EncodeToString(b[:]), roll: mrand.Float64, devRoll: -1,
+		holding: map[string]bool{}, limits: map[int64]*objBucket{}, seeded: map[string]int64{}, boot: hex.EncodeToString(b[:]), roll: mrand.Float64, devRoll: -1,
 		timers: patchTimers{clean: t.Clean, dug: t.Dug, min: t.Min, max: t.Max, cycle1: t.Cycle1, cycle: t.Cycle, wood: t.Wood}, resumed: true}
 	if testing.Testing() {
 		g.off = patchesOffForTest
@@ -508,6 +522,7 @@ func newPatches(h *Hub) Module {
 			g.path = ""
 		}
 	}
+	g.loadSeeds()
 	log.Printf("patches: on, %d shared streets", len(g.sharedStreets()))
 	return g
 }
@@ -859,6 +874,7 @@ func (g *patches) resume() {
 	}
 	g.resumed = true
 	now := g.nowMs()
+	g.applySeeds(now)
 	for street, room := range g.plots {
 		for _, p := range room {
 			if s := p.seed; p.stage == "seedling" && s != nil && g.savedAt > 0 {

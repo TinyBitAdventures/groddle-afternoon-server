@@ -10,8 +10,11 @@ import (
 	"time"
 )
 
-// Old Main Street (Ix, hub 27), the pilot: four Patches and a Dead Spice Plant (data/patches.json).
+// Old Main Street (Ix, hub 27), slice 1's pilot: four Patches and a Dead Spice Plant (data/patches.json).
 const oldMainStreet = "GM4103L52ID23"
+
+// Pental Leave (hub 98), a street the pilot never had: one Patch (data/patches.json).
+const pentalLeave = "GA9118S28492QCL"
 
 type patchRig struct {
 	*objRig
@@ -73,10 +76,20 @@ func (r *patchRig) flush() {
 	r.advance(0)
 }
 
-// shareAll shares every laid-out street (a test world without the pilot list).
+// shareAll shares every laid-out street (a test world without a pilot list: the shipped data's own).
 func (r *patchRig) shareAll() {
 	w := *r.g.w
 	w.pilot = nil
+	r.g.w = &w
+}
+
+// pilotOnly narrows the test world to these streets (the data value slice 1 shipped).
+func (r *patchRig) pilotOnly(streets ...string) {
+	w := *r.g.w
+	w.pilot = map[string]bool{}
+	for _, s := range streets {
+		w.pilot[s] = true
+	}
 	r.g.w = &w
 }
 
@@ -182,8 +195,12 @@ func TestPatchTheLayoutIsThePagesOwn(t *testing.T) {
 	if st.hub != 27 || len(st.spots) != 5 || st.spots["patch:3"] == nil || st.spots["trant_spice_dead:0"] == nil {
 		t.Fatalf("Old Main Street is %+v", st)
 	}
-	if !w.shared(oldMainStreet) || w.shared("GLI11B92BD71UJA") || len(w.pilot) != 1 {
-		t.Fatalf("the pilot is %v, want Old Main Street only", w.pilot)
+	// Slice 3 (Austin 2026-11-08: "all 100 streets", "no pilot: every street at once"): no pilot list.
+	if w.pilot != nil || !w.shared(oldMainStreet) || !w.shared("GLI11B92BD71UJA") || !w.shared(pentalLeave) || w.shared("GLI2V0UN7RD1T2J") {
+		t.Fatalf("the pilot is %v, want none: every laid-out street shared", w.pilot)
+	}
+	if b, err := loadPatchWorld([]byte(strings.Replace(string(patchesJSON), `"pilot":null`, `"pilot":["GM4103L52ID23"]`, 1))); err != nil || !b.shared(oldMainStreet) || b.shared(pentalLeave) {
+		t.Fatalf("a pilot list narrows it again: %v", err)
 	}
 	if w.plantingHub(28) != 56 || w.plantingHub(52) != 56 || w.plantingHub(27) != 27 {
 		t.Fatal("the archived Groddle hubs plant as Groddle Forest")
@@ -197,7 +214,7 @@ func TestPatchTheLayoutIsThePagesOwn(t *testing.T) {
 	}
 }
 
-func TestPatchOffAnswersBadFrameAndOffThePilotNothingIsShared(t *testing.T) {
+func TestPatchOffAnswersBadFrameAndOffAPilotListNothingIsShared(t *testing.T) {
 	patchesOffForTest = true
 	r := newPatchRig(t, false)
 	patchesOffForTest = false
@@ -208,6 +225,7 @@ func TestPatchOffAnswersBadFrameAndOffThePilotNothingIsShared(t *testing.T) {
 	}
 
 	r = newPatchRig(t, false)
+	r.pilotOnly(oldMainStreet)
 	b := r.player(2, "Bo", "GLI11B92BD71UJA", 3527, 922)
 	r.send(b, map[string]any{"t": "patch_sync"})
 	if snap := r.only(b, "patches"); snap["none"] != true {
@@ -776,8 +794,8 @@ func TestPatchADeadStreetTreeBecomesASharedPlot(t *testing.T) {
 	if p := r.live(st, "tree:1"); p == nil || p.stage != "dirty" || p.spot.class != "patch" {
 		t.Fatalf("a dead Wood Tree's plot is %+v", p)
 	}
-	// On a street whose Patches are not shared, nothing is adopted.
-	r.g.w = patchWorldData
+	// On a street whose Patches are not shared (a pilot list without it), nothing is adopted.
+	r.pilotOnly(oldMainStreet)
 	const other = "GA9KL58B1D82CDV"
 	t0 := sharedWorld.streets[other]["tree:0"]
 	r.mod.killTree(other, r.mod.get(other, t0), 0)

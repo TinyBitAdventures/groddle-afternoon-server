@@ -81,6 +81,8 @@ type patchFile struct {
 	Streets map[string]map[string]*patchRec `json:"streets"`
 	Parked  map[string]map[string]*patchRec `json:"parked,omitempty"`
 	Grants  []patchGrant                    `json:"grants"`
+	// Seeded: the payout's seed ids applied or refunded, and whose (patches_seed.go).
+	Seeded map[string]int64 `json:"seeded,omitempty"`
 }
 
 var patchTrees = map[string]bool{"trant_bean": true, "trant_bubble": true, "trant_egg": true, "trant_fruit": true, "trant_gas": true, "trant_spice": true, "wood_tree": true}
@@ -221,6 +223,11 @@ func (g *patches) load() error {
 			g.grants = append(g.grants, gr)
 		}
 	}
+	for id, user := range f.Seeded {
+		if id != "" && user > 0 {
+			g.seeded[id] = user
+		}
+	}
 	g.seq, g.savedAt, g.resumed = f.Seq, f.Saved, false
 	log.Printf("patches %s: %d plots on %d streets, %d parked, %d dropped, %d grants not yet saved", g.path, n, len(g.plots), parked, bad, len(g.grants))
 	return nil
@@ -248,6 +255,9 @@ func (g *patches) save() {
 	}
 	if len(g.parked) > 0 {
 		f.Parked = g.parked
+	}
+	if len(g.seeded) > 0 {
+		f.Seeded = g.seeded
 	}
 	b, _ := json.Marshal(f)
 	if err := writeFileSynced(g.path, b); err != nil {
