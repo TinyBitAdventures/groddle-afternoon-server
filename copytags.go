@@ -11,7 +11,10 @@ package main
 //
 //   - name: the characters a Cubimal name keeps (letters, digits, spaces and the word filter's
 //     symbols), at most max of them, the word filter, spaces trimmed (npc_cubimal_chick.js
-//     onInputBoxResponse 41).
+//     onInputBoxResponse 41). A figure that has won a battle (G40, cubimal_battle.go) keeps
+//     {"name","level","xp"} (its instance props level and xp): the name as above ("" for none),
+//     level a whole number from 1 to levelMax, xp from 0 to xpMax; at level 1 with no xp it is
+//     just the name again.
 //   - phrases: at most max; each one line with no control characters or angle brackets, spaces
 //     trimmed, at most len characters, the word filter, trimmed; empty ones dropped (lit_pumpkin_base).
 //     U+FFFD (what an invalid character becomes) is dropped too.
@@ -39,7 +42,9 @@ const copyTagMax = 2048
 
 type copyTagRules struct {
 	Name struct {
-		Max int `json:"max"`
+		Max      int   `json:"max"`
+		LevelMax int64 `json:"levelMax"`
+		XPMax    int64 `json:"xpMax"`
 	} `json:"name"`
 	Phrases struct {
 		Max int `json:"max"`
@@ -57,6 +62,12 @@ type copyTagRules struct {
 		Len   int   `json:"len"`
 		Coord int64 `json:"coord"`
 	} `json:"script"`
+}
+
+type cubimalTag struct {
+	Name  string `json:"name"`
+	Level int64  `json:"level"`
+	XP    int64  `json:"xp"`
 }
 
 type stillTag struct {
@@ -95,11 +106,25 @@ func (r *copyTagRules) clean(kind string, raw json.RawMessage, now time.Time) js
 	switch kind {
 	case "name":
 		var s string
-		if json.Unmarshal(raw, &s) != nil {
+		if json.Unmarshal(raw, &s) == nil {
+			if v := cleanCopyName(s, r.Name.Max); v != "" {
+				out = v
+			}
+			break
+		}
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil || m == nil {
 			return nil
 		}
-		if v := cleanCopyName(s, r.Name.Max); v != "" {
+		name := ""
+		if json.Unmarshal(m["name"], &s) == nil {
+			name = cleanCopyName(s, r.Name.Max)
+		}
+		v := cubimalTag{Name: name, Level: max(1, copyTagWhole(m["level"], r.Name.LevelMax)), XP: copyTagWhole(m["xp"], r.Name.XPMax)}
+		if v.Level > 1 || v.XP > 0 {
 			out = v
+		} else if name != "" {
+			out = name
 		}
 	case "phrases":
 		var list []json.RawMessage

@@ -80,6 +80,91 @@
    "out": "Tabhere"
   },
   {
+   "kind": "name",
+   "in": {
+    "name": "Sprocket",
+    "level": 3,
+    "xp": 12
+   },
+   "out": {
+    "name": "Sprocket",
+    "level": 3,
+    "xp": 12
+   }
+  },
+  {
+   "kind": "name",
+   "in": {
+    "level": 2,
+    "xp": 0
+   },
+   "out": {
+    "name": "",
+    "level": 2,
+    "xp": 0
+   }
+  },
+  {
+   "kind": "name",
+   "in": {
+    "name": "Bob",
+    "level": 1,
+    "xp": 0
+   },
+   "out": "Bob"
+  },
+  {
+   "kind": "name",
+   "in": {
+    "name": "fuck",
+    "level": 1.9,
+    "xp": -5
+   },
+   "out": "#!@$"
+  },
+  {
+   "kind": "name",
+   "in": {
+    "name": 7,
+    "level": 500,
+    "xp": 1000000000000
+   },
+   "out": {
+    "name": "",
+    "level": 99,
+    "xp": 1000000000
+   }
+  },
+  {
+   "kind": "name",
+   "in": {
+    "name": "Bob",
+    "level": "3",
+    "xp": "9"
+   },
+   "out": "Bob"
+  },
+  {
+   "kind": "name",
+   "in": {
+    "level": 1
+   },
+   "out": null
+  },
+  {
+   "kind": "name",
+   "in": {
+    "name": "  <b>Zed</b> ",
+    "level": 2.7,
+    "xp": 4.5
+   },
+   "out": {
+    "name": "bZedb",
+    "level": 2,
+    "xp": 4
+   }
+  },
+  {
    "kind": "phrases",
    "in": [
     "Hello",
