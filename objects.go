@@ -24,6 +24,9 @@ package main
 //	{"t":"obj_act","req":9,"id":"pig:0","verb":"pet","skill":"animalkinship_2"}  a Piggy (objects_pigs.go):
 //	                                                       pet, nibble, feed (perks ["sate"]), eat
 //	                                                       ("on":"tree:3" when it ate a tree's fruit)
+//	{"t":"obj_act","req":13,"id":"tree:3","verb":"food"}   a player harvested, watered or petted this
+//	                                                       fruiting tree: hungry Piggies go for it (no answer;
+//	                                                       objects_pigs.go pigsToTree)
 //	{"t":"obj_act","req":12,"id":"chicken:1","verb":"squeeze","skill":"animalkinship_2"}  a street animal
 //	                                                       (objects_creatures.go): squeeze, incubate
 //	                                                       ("c":"chicken_egg"); butterfly:<i> massage,
@@ -50,7 +53,8 @@ package main
 //	{"t":"obj_mine","id":"rock:2","helping":true}             your swing joined someone else's
 //	{"t":"obj_dig","id":"node:dirt_pile:0","helping":true}    your dig joined someone else's
 //	{"t":"obj_ev","street":"GA5…","id":"pig:0","ev":"happy"}  a Piggy's twice-daily tick ("croak", or
-//	                                                       "ate" with "on":"tree:3": it ate that fruit)
+//	                                                       "ate" with "on":"tree:3": it got to that tree
+//	                                                       and ate a fruit)
 //	{"t":"obj_ev","street":"GA5…","id":"chicken:1","ev":"squeeze","by":7}  someone's verb landed on a
 //	                                                       street animal ("massage", "milk", "feed",
 //	                                                       "incubate"; "hatched" or "lost" at 60 s)
@@ -93,7 +97,8 @@ package main
 // Tree adds "petted","watered","reset"; a Dirt Pile "diggers"), {"id":"tree:1","fruit":40,"cap":98,
 // "health":8,"maturity":7,"petted":true,"watered":false}, {"id":"pig:0","mood":1,"hunger":3,
 // "petted":false,"daily":true,"croak":false,"in":3600000,"lag":0,"hold":0} (in: ms to its next
-// twice-daily tick; lag and hold: its shared path, as a Chicken's),
+// twice-daily tick; lag and hold: its shared path, as a Chicken's; "trip":{"x0","x1","c0","leg","eat"}
+// while it walks to food and home, objects_pigs.go pigTrip),
 // {"id":"chicken:0","lag":2500,"hold":0,"sq":1,"inc":{…}} (objects_creatures.go).
 //
 // Ids are the client's own (js/street-objects.js): rock:<i>, tree:<i>,
@@ -184,7 +189,7 @@ var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true}
+		"wait": true, "food": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true}
 )
 
@@ -265,6 +270,9 @@ type objRules struct {
 		Hatches map[string]string `json:"hatches"`
 		Ms      int64             `json:"ms"`
 	} `json:"incubate"`
+	// PigTrip is a street Piggy's walk to food and home (the game's js/street-creatures.js
+	// PIGGY_TRIP, objects_pigs.go startTrip).
+	PigTrip pigTripRule `json:"pigtrip"`
 }
 
 // objSpot is one object as laid out: its kind, class, place and (trees) its fresh maturity and health.
@@ -275,12 +283,16 @@ type objSpot struct {
 	x, y     float64
 	maturity int
 	health   int
-	fly      bool // a flying Butterfly (objects_creatures.go)
+	fly      bool    // a flying Butterfly (objects_creatures.go)
+	index    int     // pig: its spawn index (the seed its stops are rolled from, pigpath.go)
+	rng      float64 // pig: how far it walks each way of its spot (animalPatrolRange)
 }
 
 type objWorld struct {
 	rules   objRules
 	streets map[string]map[string]*objSpot
+	// trunks: each street's tree x, where a Piggy never stops to root (pigpath.go).
+	trunks map[string][]float64
 	// sad: streets where a Piggy is sad (include/animal_sadness.js locationIsDepressing); its tick
 	// waits and its verbs refuse (npc_piggy.js onTwiceDaily 1834, verb conditions).
 	sad map[string]bool
@@ -290,20 +302,22 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 	var file struct {
 		Rules   objRules `json:"rules"`
 		Streets map[string]struct {
-			Rocks [][]any `json:"rocks"`
-			Trees [][]any `json:"trees"`
-			Nodes [][]any `json:"nodes"`
-			Pigs  [][]any `json:"pigs"`
-			Chick [][]any `json:"chickens"`
-			Bfly  [][]any `json:"butterflies"`
-			Bat   [][]any `json:"batterflies"`
-			Sad   bool    `json:"sad"`
+			Rocks [][]any   `json:"rocks"`
+			Trees [][]any   `json:"trees"`
+			Nodes [][]any   `json:"nodes"`
+			Pigs  [][]any   `json:"pigs"`
+			Chick [][]any   `json:"chickens"`
+			Bfly  [][]any   `json:"butterflies"`
+			Bat   [][]any   `json:"batterflies"`
+			Trunk []float64 `json:"trunks"`
+			Sad   bool      `json:"sad"`
 		} `json:"streets"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}, sad: map[string]bool{}}
+	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}, sad: map[string]bool{}, trunks: map[string][]float64{}}
+	w.rules.PigTrip.fill()
 	num := func(v any) (float64, bool) { f, ok := v.(float64); return f, ok }
 	str := func(v any) (string, bool) { s, ok := v.(string); return s, ok }
 	for tsid, row := range file.Streets {
@@ -360,8 +374,15 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			if !(ok1 && ok2 && ok3) {
 				return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
 			}
+			// Its walk each way (an older layout has none: ANIMAL_PATROL.piggies).
+			rng := float64(pigPatrol)
+			if len(r) > 3 {
+				if v, ok := num(r[3]); ok && v >= 0 {
+					rng = v
+				}
+			}
 			id := "pig:" + strconv.Itoa(int(i))
-			spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y}
+			spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y, index: int(i), rng: rng}
 		}
 		for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat} {
 			for _, r := range rows {
@@ -385,6 +406,9 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 		}
 		if row.Sad {
 			w.sad[tsid] = true
+		}
+		if len(row.Trunk) > 0 {
+			w.trunks[tsid] = row.Trunk
 		}
 		w.streets[tsid] = spots
 	}
@@ -455,7 +479,9 @@ type liveObj struct {
 	croak        bool
 	tickAt       time.Time
 	petters      map[int64]int64
-	eatingFood   string // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
+	eatingFood   string      // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
+	trip         *pigTrip    // pig: its walk to food and home (objects_pigs.go startTrip)
+	tripStop     func() bool // pig: the timer for the trip's next step
 
 	// chicken, butterfly, batterfly (objects_creatures.go) and a Piggy's uses: each player's uses of
 	// each verb on usesDay (package_intervals[day][pc]) and today's tally by anyone; lag and holdEnd
@@ -720,7 +746,10 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 	}
 	if spot.kind == "chicken" || spot.kind == "butterfly" || spot.kind == "pig" {
 		// Rooked: it lies where the Rook struck it until it is revived (objects_creatures.go rookHoldCreature).
-		o.rookHoldCreature(street, ob)
+		if o.rookHoldCreature(street, ob) && ob.trip != nil {
+			// A Piggy on its way to food stops there and walks on when revived: its trip's clock moved.
+			o.armTrip(street, ob)
+		}
 	}
 	if spot.kind == "wood" && ob.day < o.today() {
 		// A new game day: everyone may harvest it again (canHarvest by intervals[today]).
@@ -771,7 +800,12 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		if now := o.h.Now(); ob.holdEnd.After(now) {
 			hold = ob.holdEnd.Sub(now).Milliseconds()
 		}
-		return map[string]any{"id": s.id, "mood": ob.mood, "hunger": ob.hunger, "petted": ob.petted, "daily": ob.daily, "croak": ob.croak, "in": left(ob.tickAt), "lag": ob.lag, "hold": hold}
+		m := map[string]any{"id": s.id, "mood": ob.mood, "hunger": ob.hunger, "petted": ob.petted, "daily": ob.daily, "croak": ob.croak, "in": left(ob.tickAt), "lag": ob.lag, "hold": hold}
+		if t := ob.trip; t != nil {
+			// Its walk to food and home, on its path's clock (objects_pigs.go startTrip).
+			m["trip"] = map[string]any{"x0": t.X0, "x1": t.X1, "c0": t.C0, "leg": t.Leg, "eat": t.Eat}
+		}
+		return m
 	case "wood":
 		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
 	case "chicken", "butterfly", "batterfly":
@@ -848,9 +882,26 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	}
 	sort.Strings(animals)
 	// "pigpaths": this server keeps street Piggies' paths (lag, hold in their state), so the page walks them on the shared clock (G334).
-	msg := map[string]any{"t": "objs", "street": street, "snap": true, "creatures": true, "pigpaths": true, "animals": animals, "now": o.h.Now().UnixMilli(), "objs": list}
+	// "pigtrips": it walks them to food and home too ("trip" in their state, objects_pigs.go startTrip),
+	// from "homes" (each Piggy's spot and walk, {"pig:0":[x,range]}) and the street's "trunks", so every
+	// page and the server put a Piggy in the same place.
+	msg := map[string]any{"t": "objs", "street": street, "snap": true, "creatures": true, "pigpaths": true, "pigtrips": true, "animals": animals, "now": o.h.Now().UnixMilli(), "objs": list}
 	if len(places) > 0 {
 		msg["spots"] = places
+	}
+	homes := map[string][]float64{}
+	for id, spot := range spots {
+		if spot.kind == "pig" {
+			homes[id] = []float64{spot.x, spot.rng}
+		}
+	}
+	if len(homes) > 0 {
+		msg["homes"] = homes
+		if t := o.w.trunks[street]; len(t) > 0 {
+			msg["trunks"] = t
+		} else {
+			msg["trunks"] = []float64{}
+		}
 	}
 	o.h.SendLocked(cl, msg)
 }
@@ -933,6 +984,16 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	}
 	if x, y := cl.Pos(); math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY {
 		no("far", "You need to be closer.", nil)
+		return
+	}
+	if m.Verb == "food" {
+		// A player harvested, watered or petted a fruiting tree: the street's hungry Piggies go for it
+		// (objects_pigs.go pigsToTree). No answer: everyone sees them set off ("trip" in their state).
+		if spot.kind != "tree" {
+			no("bad_verb", "That is not something here.", nil)
+			return
+		}
+		o.pigsToTree(street, spot)
 		return
 	}
 	if m.Verb == "wait" {

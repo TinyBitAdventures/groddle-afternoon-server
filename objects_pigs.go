@@ -20,14 +20,15 @@ package main
 //     call G63: only owned piggies die, and those are each player's own). A hungry Piggy goes for
 //     food, dropped food first (onTwiceDaily 1879-1913 and 1975-1990: food_nearby before
 //     trants_nearby): a stack dropped for everyone on the street (drops.go) it walks to and eats one
-//     of (pigFood below); else one fruit from the nearest tree on its level with fruit
-//     (onFoodPathing 1482-1533) at once, as the remake's replay of a tick while nobody watched does,
-//     and the street hears "ate" so it can walk there.
+//     of (pigFood below); else the nearest tree on its level with fruit, which it walks to and eats
+//     one fruit of on arrival (onFoodPathing 1482-1533), when the street hears "ate".
 //   - Food dropped for everyone (onContainerItemAdded 1393-1411): a hungry Piggy that is not sad goes
 //     for it at once if it lies in reach (its move_limits; here pigReachX across, pigEatDY up or
 //     down), and on arrival eats one of the stack (onFoodPathing 1489-1500: apiConsume(1), hunger 0,
 //     "Yum!"). The walk takes the source's walk speed over the distance (npc_walk_speed 30-55,
-//     onCreate 1442; pigWalkPx), and the stack may be picked up meanwhile, as in the source.
+//     onCreate 1442; rules.pigtrip.speed), and the stack may be picked up meanwhile, as in the source.
+//   - A fruiting tree a player harvests, waters or pets (onContainerItemStateChanged; the client
+//     sends "food" on the tree): every hungry Piggy of the street in reach goes for it (pigsToTree).
 //     Petters from an earlier game day are forgotten (1857-1867).
 //   - A sad Piggy (a depressing street, include/animal_sadness.js) skips its tick and refuses.
 //   - pet (onPetComplete 1709-1735): the ak_piggy_pet success roll by rank; on success mood +1
@@ -58,7 +59,11 @@ package main
 // what it keeps is "lag" and "hold", so an untouched Piggy costs nothing more. A player at it holds it
 // for everyone ("wait", onInteractionStarting), a landed pet, nibble or feed holds it too and the
 // street sees it (obj_ev "pet", "nibble", "feed"), and the Rook stops its path (rookHoldCreature).
-// A walk to food stays each page's own from the same event ("ate"), and then it walks back on.
+// Its walk to food and home is the server's too (slice 1 of research/plans/street-animals-shared.md,
+// pigTrip): the server knows where the path has it (pigpath.go, the game's piggyPlan ported number
+// for number, from the snapshot's "homes" and "trunks" every page walks it from), sets it off from
+// there to beside the food, eats on arrival and lets its path take it on where it left it. The trip
+// runs on the path's clock, so a player at it, a landed verb and the Rook freeze it for everyone.
 // A nibble is held to each player's daily limit of this Piggy (ak_piggy_nibble interval_limit) and
 // its Meat is credited to the ledger (credits.go "take").
 // A street Piggy outlives a restart of the server (objects_persist.go, -objects-file): its mood,
@@ -84,8 +89,7 @@ const (
 	pigReachY     = 1000
 	pigEatDY      = 100 // EAT_RADIUS: food much higher or lower is out of reach (apiFindPath)
 	pigWalkPx     = 42  // npc_piggy.js onCreate 1442: npc_walk_speed randInt(30,55) px/s, the middle
-	pigWalkMin    = time.Second
-	pigWalkMax    = 20 * time.Second
+	pigPatrol     = 90  // ANIMAL_PATROL.piggies: a Piggy's walk each way of its spot
 )
 
 // Copy from npc_piggy.js.
@@ -271,21 +275,21 @@ func (o *objects) pigTwiceDaily(street string, ob *liveObj, pigs []*liveObj) []m
 		ob.croak = true
 		out = append(out, ev("croak"))
 	}
-	// Dropped food first (goForFood: the Piggy walks to it), else a tree's fruit.
-	if scanned && ob.hunger > 0 && ob.eatingFood == "" && !o.goForFood(street, ob, "") {
-		if tree := o.fruitNear(street, ob.spot); tree != nil {
-			tree.fruit--
-			ob.hunger, ob.croak = 0, false
-			e := ev("ate")
-			e["on"], e["tree"] = tree.spot.id, tree
-			out = append(out, e)
+	// Dropped food first (goForFood), else a tree's fruit: either way it walks there on its shared
+	// path's clock (startTrip) and eats on arrival (onFoodPathing), and everyone sees the same walk.
+	if scanned && ob.hunger > 0 && ob.trip == nil && !o.pigRooked(street, ob) && !o.goForFood(street, ob, "") {
+		x := o.pigX(street, ob)
+		if tree := o.fruitNear(street, x, ob.spot.y); tree != nil {
+			o.startTrip(street, ob, tree.spot.x, tree.spot.id, "")
+			o.forget(street, tree)
 		}
 	}
 	return out
 }
 
 // pigFood is onContainerItemAdded for a stack dropped for everyone (drops.go calls it once the
-// site has it): the nearest hungry Piggy on the street that is not sad and has it in reach goes for it.
+// site has it): the nearest hungry Piggy on the street that is not sad, not rooked, not already on
+// its way to food and has it in reach goes for it.
 func (o *objects) pigFood(street, id string, x, y float64) {
 	if o.w.sad[street] {
 		return
@@ -297,53 +301,43 @@ func (o *objects) pigFood(street, id string, x, y float64) {
 			continue
 		}
 		ob := o.streets[street][spot.id]
-		if ob == nil || ob.hunger <= 0 || ob.eatingFood != "" || math.Abs(spot.y-y) > pigEatDY || math.Abs(spot.x-x) > pigReachX {
+		if ob == nil || ob.hunger <= 0 || ob.trip != nil || math.Abs(spot.y-y) > pigEatDY || o.pigRooked(street, ob) {
 			continue
 		}
-		if d := math.Abs(spot.x - x); d < bestD || (d == bestD && spot.id < best.spot.id) {
+		px := o.pigX(street, ob)
+		if math.Abs(px-x) > pigReachX {
+			continue
+		}
+		if d := math.Abs(px - x); d < bestD || (d == bestD && spot.id < best.spot.id) {
 			best, bestD = ob, d
 		}
 	}
-	if best != nil {
-		o.goForFood(street, best, id)
+	if best != nil && o.goForFood(street, best, id) {
+		o.broadcast(street, 0, best)
+		o.saveSoon()
 	}
 }
 
 // goForFood sends a Piggy for a stack on the ground (id, or the nearest food in reach when ""): it
-// walks there, then eats one if the stack is still there (onFoodPathing). False when there is none.
+// walks there (startTrip), then eats one if the stack is still there (onFoodPathing). False when
+// there is none.
 func (o *objects) goForFood(street string, ob *liveObj, id string) bool {
 	food, _ := o.h.ProvidedLocked("drops.food").(func(string, string, float64, float64, float64, float64) (string, float64))
-	eat, _ := o.h.ProvidedLocked("drops.eat").(func(string, string, func(bool)))
-	if food == nil || eat == nil {
+	if food == nil || o.h.ProvidedLocked("drops.eat") == nil {
 		return false
 	}
-	id, at := food(street, id, ob.spot.x, ob.spot.y, pigReachX, pigEatDY)
+	id, at := food(street, id, o.pigX(street, ob), ob.spot.y, pigReachX, pigEatDY)
 	if id == "" {
 		return false
 	}
-	walk := time.Duration(math.Abs(at-ob.spot.x) / pigWalkPx * float64(time.Second))
-	walk = min(pigWalkMax, max(pigWalkMin, walk))
-	ob.eatingFood = id
-	o.h.After(walk, func() {
-		if ob.eatingFood != id {
-			return
-		}
-		eat(id, ob.spot.id, func(ok bool) {
-			ob.eatingFood = ""
-			if !ok || ob.hunger <= 0 {
-				return
-			}
-			ob.hunger, ob.croak = 0, false
-			o.broadcast(street, 0, ob)
-			o.saveSoon()
-		})
-	})
+	o.startTrip(street, ob, at, "", id)
 	return true
 }
 
-// fruitNear is the nearest living, unrooked tree on the Piggy's level with fruit (onTwiceDaily's
-// trant scan, then the pathing, js/animal-mood-feature.js findFoodFor), or nil.
-func (o *objects) fruitNear(street string, pig *objSpot) *liveObj {
+// fruitNear is the nearest living, unrooked tree on the Piggy's level (y) with fruit from where it
+// stands (x) (onTwiceDaily's trant scan, then the pathing, js/animal-mood-feature.js findFoodFor),
+// or nil.
+func (o *objects) fruitNear(street string, x, y float64) *liveObj {
 	var best *liveObj
 	bestD := math.Inf(1)
 	ids := make([]string, 0)
@@ -355,7 +349,7 @@ func (o *objects) fruitNear(street string, pig *objSpot) *liveObj {
 	sort.Strings(ids)
 	for _, id := range ids {
 		spot := o.w.streets[street][id]
-		if math.Abs(spot.y-pig.y) > pigEatDY || o.rooked(street, id) {
+		if math.Abs(spot.y-y) > pigEatDY || math.Abs(spot.x-x) > pigReachX || o.rooked(street, id) {
 			continue
 		}
 		tree := o.get(street, spot)
@@ -363,11 +357,296 @@ func (o *objects) fruitNear(street string, pig *objSpot) *liveObj {
 			o.forget(street, tree)
 			continue
 		}
-		if d := math.Abs(spot.x - pig.x); d < bestD {
+		if d := math.Abs(spot.x - x); d < bestD {
 			best, bestD = tree, d
 		}
 	}
 	return best
+}
+
+// ---------------------------------------------------------------------------
+// Walks to food (slice 1 of research/plans/street-animals-shared.md)
+// ---------------------------------------------------------------------------
+
+// pigTripRule is the game's PIGGY_TRIP (data/objects.json rules.pigtrip): the walk's pace (px a
+// second), the pause at the food (onFoodPathing 1485-1531: chew, then startMoving 3 s on), and where
+// it stops: beside a tree's foot (treeStop: half the tree's footprint and half its body), each Piggy
+// on its own spot (gap apart, body wide; lane PIGSTUCK).
+type pigTripRule struct {
+	Speed    float64 `json:"speed"`
+	EatMs    int64   `json:"eatMs"`
+	TreeStop float64 `json:"treeStop"`
+	Gap      float64 `json:"gap"`
+	Body     float64 `json:"body"`
+}
+
+func (r *pigTripRule) fill() {
+	if r.Speed <= 0 {
+		r.Speed = pigWalkPx
+	}
+	if r.EatMs <= 0 {
+		r.EatMs = 3000
+	}
+	if r.TreeStop <= 0 {
+		r.TreeStop = 120
+	}
+	if r.Body <= 0 {
+		r.Body = 60
+	}
+	if r.Gap <= 0 {
+		r.Gap = r.Body + 8
+	}
+}
+
+// pigTrip is a street Piggy's walk to food and back to where it left its path. In the original the
+// server walked the one npc_piggy item to the food (npc_animal goForFood: apiFindPath(item.x, item.y,
+// 0, 'onFoodPathing'), npc_piggy.js 1404, 1428, 1986-2002), it chewed, idled 3 s and walked on
+// (onFoodPathing 1482-1533), and every client drew it where the server said. Here the walk is laid
+// on the Piggy's shared path's clock (C0: the path's clock, server ms minus lag, when it set off), so
+// a player at it (wait), a landed verb or the Rook freezes the walk where it is, for everyone, the way
+// it freezes its path: X0 to X1 in Leg ms, Eat ms at the food, X1 back to X0 in Leg ms. Its path stood
+// still meanwhile, and runs on from X0 when it is back (the trip's whole length goes on its lag).
+type pigTrip struct {
+	X0      float64 `json:"x0"`
+	X1      float64 `json:"x1"`
+	C0      int64   `json:"c0"`
+	Leg     int64   `json:"leg"`
+	Eat     int64   `json:"eat"`
+	Tree    string  `json:"tree,omitempty"`  // tree:<i> whose fruit it goes for
+	Stack   string  `json:"stack,omitempty"` // or the shared ground stack (drops.go)
+	Arrived bool    `json:"arrived,omitempty"`
+}
+
+func (t *pigTrip) total() int64 { return 2*t.Leg + t.Eat }
+
+// pathClock is the Piggy's path clock now: server ms minus lag, frozen while it is held.
+func (o *objects) pathClock(ob *liveObj) int64 {
+	at := o.h.Now()
+	if ob.holdEnd.After(at) {
+		at = ob.holdEnd
+	}
+	return at.UnixMilli() - ob.lag
+}
+
+func (o *objects) pigHome(street string, spot *objSpot) pigHome {
+	dir := 1
+	if spot.index%2 != 0 {
+		dir = -1
+	}
+	return pigHome{baseX: spot.x, rng: spot.rng, dir: dir, trunks: o.w.trunks[street], trunkPx: o.w.rules.PigTrip.TreeStop}
+}
+
+// pigX is where the Piggy stands now, as every page draws it: on its trip, else on its path.
+func (o *objects) pigX(street string, ob *liveObj) float64 {
+	pc := o.pathClock(ob)
+	if t := ob.trip; t != nil {
+		if e := pc - t.C0; e >= 0 && e < t.total() {
+			switch {
+			case e < t.Leg:
+				return t.X0 + (t.X1-t.X0)*float64(e)/float64(t.Leg)
+			case e < t.Leg+t.Eat:
+				return t.X1
+			default:
+				return t.X1 + (t.X0-t.X1)*float64(e-t.Leg-t.Eat)/float64(t.Leg)
+			}
+		}
+		if pc >= t.C0+t.total() {
+			pc -= t.total()
+		} else {
+			pc = t.C0
+		}
+	}
+	x, _, _ := pigAt(o.pigHome(street, ob.spot), creatureSeed(ob.spot.index, ob.spot.x), float64(pc-gameEpochMs))
+	return x
+}
+
+// pigRooked: the Rook has this Piggy (it goes after no food, npc_animal onContainerItemAdded 1394, 1419).
+func (o *objects) pigRooked(street string, ob *liveObj) bool {
+	fn, ok := o.h.ProvidedLocked("rook.thingRooked").(func(string, string) bool)
+	return ok && fn(street, rookCreatureKey(ob.spot))
+}
+
+// tripStop is where a Piggy going for food at fx stops (the game's animal-mood-feature stopFor):
+// beside a tree's foot (or on a stack), on its own side, the first spot no other Piggy walking to
+// food has taken (a body further out each time; the far side when its own side is full).
+func (o *objects) tripStop(street string, ob *liveObj, x0, fx float64, tree bool) float64 {
+	rule := o.w.rules.PigTrip
+	near := 1.0
+	switch {
+	case x0 < fx:
+		near = -1
+	case x0 == fx && ob.spot.index%2 == 0:
+		near = -1
+	}
+	first := 0.0
+	if tree {
+		first = rule.TreeStop
+	}
+	var taken []float64
+	for _, other := range o.streets[street] {
+		if other != ob && other.spot.kind == "pig" && other.trip != nil {
+			taken = append(taken, other.trip.X1)
+		}
+	}
+	free := func(x float64) bool {
+		for _, t := range taken {
+			if math.Abs(t-x) < rule.Body {
+				return false
+			}
+		}
+		return true
+	}
+	for _, side := range []float64{near, -near} {
+		for k := 0; k < 4; k++ {
+			if x := fx + side*(first+float64(k)*rule.Gap); free(x) {
+				return x
+			}
+		}
+	}
+	return fx + near*(first+4*rule.Gap)
+}
+
+// startTrip sets a Piggy off for food at fx (a tree's fruit, or a stack on the ground) from where
+// its path has it now. The caller tells the street (its state carries "trip").
+func (o *objects) startTrip(street string, ob *liveObj, fx float64, tree, stack string) {
+	rule := o.w.rules.PigTrip
+	x0 := o.pigX(street, ob)
+	x1 := o.tripStop(street, ob, x0, fx, tree != "")
+	leg := int64(mathRoundJS(math.Abs(x1-x0) / rule.Speed * 1000))
+	ob.trip = &pigTrip{X0: math.Round(x0*10) / 10, X1: math.Round(x1*10) / 10, C0: o.pathClock(ob), Leg: leg, Eat: rule.EatMs, Tree: tree, Stack: stack}
+	ob.eatingFood = stack
+	o.armTrip(street, ob)
+}
+
+// armTrip sets the timer for the trip's next step (arriving at the food, then back on its path), on
+// the path's clock: a hold pushes it on, so the timer checks the clock again when it fires.
+func (o *objects) armTrip(street string, ob *liveObj) {
+	if ob.tripStop != nil {
+		ob.tripStop()
+		ob.tripStop = nil
+	}
+	t := ob.trip
+	if t == nil {
+		return
+	}
+	next := t.C0 + t.Leg
+	if t.Arrived {
+		next = t.C0 + t.total()
+	}
+	pc := o.pathClock(ob)
+	if pc >= next {
+		o.tripStep(street, ob)
+		return
+	}
+	now := o.h.Now()
+	wait := time.Duration(next-pc) * time.Millisecond
+	if ob.holdEnd.After(now) {
+		wait += ob.holdEnd.Sub(now)
+	}
+	ob.tripStop = o.h.After(wait, func() {
+		ob.tripStop = nil
+		o.tripStep(street, ob)
+		o.saveSoon()
+	})
+}
+
+// tripStep is the trip's next step once its clock got there: it eats at the food (onFoodPathing
+// 1482-1533), then, back where it left its path, the path takes it on.
+func (o *objects) tripStep(street string, ob *liveObj) {
+	t := ob.trip
+	if t == nil {
+		return
+	}
+	pc := o.pathClock(ob)
+	if !t.Arrived && pc >= t.C0+t.Leg {
+		t.Arrived = true
+		o.tripEat(street, ob, t)
+	}
+	if t.Arrived && pc >= t.C0+t.total() {
+		// Back where it set off: its path runs on from there (the whole trip goes on its lag).
+		ob.trip = nil
+		ob.lag += t.total()
+		o.broadcast(street, 0, ob)
+		return
+	}
+	o.armTrip(street, ob)
+}
+
+// tripEat is the arrival: one fruit off the tree it walked to, or one of the stack, while it is
+// still hungry and the food is still there (it may have been taken meanwhile, as in the source).
+func (o *objects) tripEat(street string, ob *liveObj, t *pigTrip) {
+	if t.Stack != "" {
+		eat, _ := o.h.ProvidedLocked("drops.eat").(func(string, string, func(bool)))
+		if eat == nil {
+			ob.eatingFood = ""
+			return
+		}
+		eat(t.Stack, ob.spot.id, func(ok bool) {
+			if ob.eatingFood == t.Stack {
+				ob.eatingFood = ""
+			}
+			if !ok || ob.hunger <= 0 {
+				return
+			}
+			ob.hunger, ob.croak = 0, false
+			o.broadcast(street, 0, ob)
+			o.saveSoon()
+		})
+		return
+	}
+	spot := o.w.streets[street][t.Tree]
+	if spot == nil || ob.hunger <= 0 || o.rooked(street, t.Tree) {
+		return
+	}
+	tree := o.get(street, spot)
+	if tree.dead || tree.fruit <= 0 {
+		o.forget(street, tree)
+		return
+	}
+	tree.fruit--
+	ob.hunger, ob.croak = 0, false
+	o.broadcast(street, 0, ob, tree)
+	o.h.BroadcastStreetLocked(street, map[string]any{"t": "obj_ev", "street": street, "id": ob.spot.id, "ev": "ate", "on": tree.spot.id}, 0)
+	o.forget(street, tree)
+}
+
+// pigsToTree is onContainerItemStateChanged on a fruiting tree a player harvested, watered or petted
+// (the game's animal-mood-feature onEvent): every hungry Piggy of the street on the tree's level and
+// in reach that is not sad, rooked or already on its way to food goes for it.
+func (o *objects) pigsToTree(street string, treeSpot *objSpot) {
+	if o.w.sad[street] || o.rooked(street, treeSpot.id) {
+		return
+	}
+	tree := o.get(street, treeSpot)
+	alive := !tree.dead && tree.fruit > 0
+	o.forget(street, tree)
+	if !alive {
+		return
+	}
+	o.wakePigs(street)
+	ids := make([]string, 0)
+	for id, spot := range o.w.streets[street] {
+		if spot.kind == "pig" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var sent []*liveObj
+	for _, id := range ids {
+		ob := o.streets[street][id]
+		if ob == nil || ob.hunger <= 0 || ob.trip != nil || math.Abs(ob.spot.y-treeSpot.y) > pigEatDY || o.pigRooked(street, ob) {
+			continue
+		}
+		if math.Abs(o.pigX(street, ob)-treeSpot.x) > pigReachX {
+			continue
+		}
+		o.startTrip(street, ob, treeSpot.x, treeSpot.id, "")
+		sent = append(sent, ob)
+	}
+	if len(sent) > 0 {
+		o.broadcast(street, 0, sent...)
+		o.saveSoon()
+	}
 }
 
 // tendPig is a player's verb on a street Piggy.

@@ -76,6 +76,8 @@ type objRec struct {
 	IncBy   int64                    `json:"incBy,omitempty"`
 	IncEnd  int64                    `json:"incEnd,omitempty"`
 	Food    int                      `json:"food,omitempty"`
+	// A street Piggy on its way to food (objects_pigs.go pigTrip), on its path's clock.
+	Trip *pigTrip `json:"trip,omitempty"`
 }
 
 type objFile struct {
@@ -104,6 +106,10 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
 		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
 		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food}
+	if ob.trip != nil {
+		t := *ob.trip
+		r.Trip = &t
+	}
 	if len(ob.uses) > 0 {
 		r.Uses = make(map[int64]map[string]int, len(ob.uses))
 		for id, verbs := range ob.uses {
@@ -179,6 +185,11 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 				ob.petters = map[int64]int64{}
 			}
 			ob.petters[id] = day
+		}
+		if t := r.Trip; t != nil && t.Leg >= 0 && t.Eat >= 0 && t.Leg < 3_600_000 && t.Eat < 3_600_000 {
+			trip := *t
+			ob.trip = &trip
+			ob.eatingFood = trip.Stack
 		}
 	case "chicken", "butterfly", "batterfly":
 		ob.lag, ob.holdEnd = max(0, r.Lag), timeOf(r.HoldEnd)
@@ -333,6 +344,11 @@ func (o *objects) resume() {
 				}
 			case "pig":
 				pigs = true
+				// On its way to food when the server stopped: the trip carries on from its clock
+				// (a step it missed while the server was down runs now).
+				if ob.trip != nil {
+					o.armTrip(street, ob)
+				}
 			case "chicken":
 				// A Chicken on an egg: it hatches when it was due (its owner is not here after a
 				// restart until they connect again, so an egg due while the server was down is lost).

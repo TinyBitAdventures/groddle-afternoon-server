@@ -85,13 +85,17 @@ func TestAHungryStreetPiggyWalksToSharedFoodAndEatsOne(t *testing.T) {
 	if ob.eatingFood != op {
 		t.Fatalf("the hungry Piggy goes for the apples (onContainerItemAdded): %q", ob.eatingFood)
 	}
-	// It walks 150 px at 42 px/s: nothing is eaten before it gets there.
-	r.advance(3 * time.Second)
+	// It walks from where its path had it to the stack at 42 px/s: nothing is eaten before it gets there.
+	leg := time.Duration(ob.trip.Leg) * time.Millisecond
+	if ob.trip.X1 != math.Round(r.drops.stacks[op].X*10)/10 || leg <= 0 {
+		t.Fatalf("its walk: %+v", ob.trip)
+	}
+	r.advance(leg - 100*time.Millisecond)
 	r.settle()
 	if len(r.site.eats) != 0 {
 		t.Fatalf("eaten before it arrived: %v", r.site.eats)
 	}
-	r.advance(time.Second)
+	r.advance(200 * time.Millisecond)
 	r.settle()
 	if len(r.site.eats) != 1 || r.site.eats[0] != op+":3" {
 		t.Fatalf("one bite asked of the site: %v", r.site.eats)
@@ -130,7 +134,7 @@ func TestAPiggyEatsTheLastOfAStackAndNotWhatIsNotFood(t *testing.T) {
 	}
 	op := r.dropAt(a, "apple", 1, pig.x+40, pig.y-20)
 	r.drain(a)
-	r.advance(pigWalkMin)
+	r.advance(20 * time.Second)
 	r.settle()
 	got := []string{}
 	for _, m := range r.drain(a) {
@@ -162,7 +166,7 @@ func TestAStackPickedUpBeforeThePiggyArrivesIsNotEaten(t *testing.T) {
 	r.send(a, map[string]any{"t": "move", "x": pig.x + 1400, "y": pig.y})
 	r.send(b, map[string]any{"t": "ground_pickup", "id": op})
 	r.settle()
-	r.advance(pigWalkMax)
+	r.advance(time.Minute)
 	r.settle()
 	if len(r.site.eats) != 0 || ob.hunger != 4 || ob.eatingFood != "" {
 		t.Fatalf("nothing left to eat: eats %v, hunger %d, eating %q", r.site.eats, ob.hunger, ob.eatingFood)
@@ -177,7 +181,7 @@ func TestATwiceDailyTickPrefersDroppedFoodToFruit(t *testing.T) {
 	r.send(a, map[string]any{"t": "obj_sync"})
 	r.drain(a)
 	ob := r.mod.streets[street]["pig:2"]
-	tree := r.mod.fruitNear(street, ob.spot)
+	tree := r.mod.fruitNear(street, r.mod.pigX(street, ob), ob.spot.y)
 	if tree == nil {
 		t.Fatal("no tree near pig:2")
 	}
@@ -197,7 +201,7 @@ func TestATwiceDailyTickPrefersDroppedFoodToFruit(t *testing.T) {
 	if ob.eatingFood != op || tree.fruit != fruit || len(evs) != 0 {
 		t.Fatalf("the tick goes for the food first (food_nearby): eating %q, fruit %d -> %d, events %v", ob.eatingFood, fruit, tree.fruit, evs)
 	}
-	r.advance(pigWalkMax)
+	r.advance(time.Minute)
 	r.settle()
 	if ob.hunger != 0 || r.drops.stacks[op].N != 1 {
 		t.Fatalf("it ate one: hunger %d, n %d", ob.hunger, r.drops.stacks[op].N)

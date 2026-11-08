@@ -377,7 +377,9 @@ func TestAPiggysTwiceDailyTick(t *testing.T) {
 	// Ada pets it: the next daily half keeps its mood (PIGGY_PET_PROTECTS_MOOD); hungry Piggies eat fruit.
 	r.act(a, 1, "pig:2", "pet", nil)
 	r.drain(a)
+	// The tick sends the hungry ones walking to fruit (startTrip); they eat when they get there.
 	r.advance(pigTick + 20*time.Millisecond)
+	r.advance(time.Minute)
 	var p map[string]any
 	ate := []string{}
 	for _, m := range r.drain(a) {
@@ -405,14 +407,29 @@ func TestAPiggyEatsTheNearestFruitOnItsLevel(t *testing.T) {
 	r.mod.wakePigs(street)
 	ob := r.mod.streets[street]["pig:2"]
 	ob.hunger = 3
-	tree := r.mod.fruitNear(street, ob.spot)
+	tree := r.mod.fruitNear(street, r.mod.pigX(street, ob), ob.spot.y)
 	if tree == nil {
 		t.Fatal("no tree near pig:2")
 	}
 	before := tree.fruit
+	// The tick sends it walking to the tree (onTwiceDaily 1975-1990 goForFood): nothing eaten yet.
 	evs := r.mod.pigTwiceDaily(street, ob, []*liveObj{ob})
-	if len(evs) != 1 || evs[0]["ev"] != "ate" || evs[0]["on"] != tree.spot.id || tree.fruit != before-1 || ob.hunger != 0 {
-		t.Fatalf("events %v, fruit %d -> %d, hunger %d", evs, before, tree.fruit, ob.hunger)
+	if len(evs) != 0 || ob.trip == nil || ob.trip.Tree != tree.spot.id || tree.fruit != before || ob.hunger == 0 {
+		t.Fatalf("events %v, trip %+v, fruit %d -> %d, hunger %d", evs, ob.trip, before, tree.fruit, ob.hunger)
+	}
+	// It stops beside the tree's foot (TREE_FOOTPRINT / 2 + half its body), not in the trunk.
+	if d := math.Abs(ob.trip.X1 - tree.spot.x); d < 119 || d > 121 {
+		t.Fatalf("it stops %v px from the trunk: %+v", d, ob.trip)
+	}
+	// On arrival (onFoodPathing) one fruit is gone and it is sated.
+	r.advance(time.Duration(ob.trip.Leg) * time.Millisecond)
+	tree = r.mod.streets[street][tree.spot.id]
+	if tree == nil || tree.fruit != before-1 || ob.hunger != 0 || !ob.trip.Arrived {
+		t.Fatalf("after its walk: fruit %d -> %v, hunger %d, trip %+v", before, tree, ob.hunger, ob.trip)
+	}
+	r.advance(time.Duration(ob.trip.Leg+ob.trip.Eat) * time.Millisecond)
+	if ob.trip != nil {
+		t.Fatalf("it is not back on its path: %+v", ob.trip)
 	}
 	// Mood 0 with happy neighbours comes back to 1 on the daily half; at 10 it croaks and lives.
 	ob.mood, ob.daily, ob.hunger = 1, false, 10
@@ -530,6 +547,7 @@ func TestPigDevOnlyWithTheFlag(t *testing.T) {
 	}
 	tree := fruitTreeFor(t, r, defaultStreet, pig)
 	r.send(a, map[string]any{"t": "obj_dev", "id": "pig:3", "hunger": 2, "tick": true})
+	r.advance(time.Minute)
 	var ate bool
 	for _, m := range r.drain(a) {
 		if m["t"] == "obj_ev" && m["id"] == "pig:3" && m["ev"] == "ate" && m["on"] == tree {
@@ -545,7 +563,7 @@ func TestPigDevOnlyWithTheFlag(t *testing.T) {
 // so the tests follow data/objects.json's layout when the planner moves things.
 func fruitTreeFor(t *testing.T, r *objRig, street string, pig *objSpot) string {
 	t.Helper()
-	tree := r.mod.fruitNear(street, pig)
+	tree := r.mod.fruitNear(street, pig.x, pig.y)
 	if tree == nil || math.Abs(tree.spot.x-pig.x) > pigReachX {
 		t.Fatalf("no fruiting tree in a Piggy's reach on %s", street)
 	}
