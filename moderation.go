@@ -28,12 +28,10 @@ package main
 //	        moment ago is marked there too. The chat log keeps what was said, as for a deletion, and
 //	        records the purge (deleted.jsonl, "purge": true): the evidence stays for 30 days. A
 //	        purge is final: there is no call to bring lines back.
-//	im_delete {"a":7,"b":9,"line":12,"at":1730000000000,"by":1}
-//	        200 {"status":"deleted","held":true}   one IM line (a reported one: the site sends only
-//	        lines a recipient reported) out of the conversation kept here; both players are told
-//	          {"t":"im_deleted","with":<the other>,"line":12,"at":1730000000000}
-//	        (a line is its id and time: ids start again when both close a conversation)
-//	        404 {"status":"unknown"} when the conversation is not kept here (the site's copy is marked anyway)
+//
+// No call names an IM line, and none reads one (Austin 2026-11-09: "maybe scrap looking at IMs";
+// the privacy policy promises only an IM's two players read it): a purge empties the player's own
+// side of their conversations by their id, without anyone seeing the words.
 //
 // A ticket (RealtimeTicket.php) carries the restrictions that stand when it is made
 // ("mod":{"s":"chat","su":ms,"im":"all","iu":ms}), so they hold from the first frame after a
@@ -53,7 +51,6 @@ func init() {
 	modules = append(modules, newModeration)
 	serviceHandlers["mod_restrict"] = modRestrictService
 	serviceHandlers["mod_purge"] = modPurgeService
-	serviceHandlers["im_delete"] = imDeleteService
 }
 
 // modClaim is a ticket's word on a player's restrictions (RealtimeTicket.php "mod").
@@ -320,58 +317,4 @@ func (h *Hub) purgeLocked(player, since int64) map[string]int {
 		}
 	}
 	return n
-}
-
-type imDeleteCall struct {
-	A    int64 `json:"a"`
-	B    int64 `json:"b"`
-	Line int64 `json:"line"`
-	At   int64 `json:"at"`
-	By   int64 `json:"by"`
-}
-
-func imDeleteService(h *Hub, body []byte) (int, any) {
-	var c imDeleteCall
-	if json.Unmarshal(body, &c) != nil || c.A <= 0 || c.B <= c.A || c.Line <= 0 || c.At <= 0 || c.By <= 0 {
-		return http.StatusBadRequest, map[string]string{"status": "bad"}
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	im, _ := h.provided["ims.self"].(*ims)
-	if im == nil {
-		return http.StatusServiceUnavailable, map[string]string{"status": "bad"}
-	}
-	conv := im.convs[[2]int64{c.A, c.B}]
-	held := false
-	if conv != nil {
-		kept := conv.Lines[:0:0]
-		for _, l := range conv.Lines {
-			if (l.ID == c.Line && l.At == c.At) || (l.Parent == c.Line && l.At >= c.At) {
-				held = true
-				continue
-			}
-			kept = append(kept, l)
-		}
-		conv.Lines = kept
-		if held {
-			im.prune()
-			im.saveSoon()
-		}
-	}
-	for _, side := range [][2]int64{{c.A, c.B}, {c.B, c.A}} {
-		msg := map[string]any{"t": "im_deleted", "with": side[1], "line": c.Line, "at": c.At}
-		if cl := h.clients[side[0]]; cl != nil {
-			h.queueLocked(cl, msg)
-		}
-		for _, w := range h.WebLocked(side[0]) {
-			h.queueLocked(w, msg)
-		}
-	}
-	if !testing.Testing() {
-		log.Printf("moderation: IM line %d between %d and %d deleted by %d", c.Line, c.A, c.B, c.By) // never the words
-	}
-	if conv == nil {
-		return http.StatusNotFound, map[string]string{"status": "unknown"}
-	}
-	return http.StatusOK, map[string]any{"status": "deleted", "held": held}
 }

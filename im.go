@@ -47,7 +47,6 @@ package main
 //	        ("self", "ignoring you", "on your ignore list", "offline") or ours ("full": imUnreadMax waiting
 //	        unread, "slow_down", "restricted": a moderator paused this player's IMs, moderation.go); the
 //	        client says "<Name> is <reason>" as the source's did (RightSideManager.as:600)
-//	{"t":"im_deleted","with":9,"line":12,"at":…}   a moderator deleted a reported line (moderation.go im_delete)
 //	{"t":"chat_purged","player":9,"since":…}       a moderator took everything player 9 said since then away
 //	        (moderation.go mod_purge): their lines leave every IM pane, as every chat pane
 //
@@ -76,8 +75,8 @@ package main
 // change and at shutdown. IM text is private: it is never written to the chat
 // log (chatlog.go) or the server's log, and the administrators' console has no
 // call that reads it (nor does the site's: its groddle_im_lines answer only the
-// conversation's two players, and a moderator only the lines a recipient
-// reported, groddle-afternoon-site src/Moderation.php). What moderation learns
+// conversation's two players; no moderator route reads them either,
+// groddle-afternoon-site src/Moderation.php). What moderation learns
 // here has no words in it (modsignals.go: counts per sender). Rates: imBurst lines then one each imEvery; imNewBurst new
 // conversations then one each imNewEvery.
 

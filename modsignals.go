@@ -1,7 +1,7 @@
 package main
 
 // Moderation signals with no words in them (Austin 2026-11-09: IM abuse is caught from
-// content-free signals; a moderator reads an IM only when its recipient reports it). Per
+// content-free signals; no moderator ever reads an IM, 2026-11-09). Per
 // sender, this server counts what it sees anyway and keeps no text:
 //
 //   - im_fanout: IMs to many different players in a short window (spam goes wide);

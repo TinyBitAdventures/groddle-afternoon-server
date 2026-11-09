@@ -251,36 +251,38 @@ func TestPurgeSinceKeepsWhatCameBefore(t *testing.T) {
 	}
 }
 
-func TestIMDeleteTakesOneReportedLineFromBothSides(t *testing.T) {
+// No call names or reads an IM line (Austin 2026-11-09: the privacy policy promises only an IM's
+// two players read it). The purge is the one IM action, by player id, and its answer is counts.
+func TestNoModeratorCallReachesAnIMLine(t *testing.T) {
+	for _, call := range []string{"im_delete", "im_read", "im_report", "im_lines"} {
+		if _, ok := serviceHandlers[call]; ok {
+			t.Fatalf("%s is a call", call)
+		}
+	}
+	h := NewHub(nil)
+	t.Cleanup(h.Shutdown)
+	srv := httptest.NewServer(NewServer(NewTickets(testSecret, nil), h, nil))
+	t.Cleanup(srv.Close)
+	code, out := siteCall(t, srv.URL, "im_delete", map[string]any{"a": 7, "b": 9, "line": 1, "at": 1, "by": 1}, "")
+	mustStatus(t, code, out, 404, "bad")
+
 	r := newModRig(t)
 	ada := r.game(7, "Ada", lists{})
 	bo := r.game(9, "Bo", lists{})
-	r.do(ada, map[string]any{"t": "im_send", "to": 9, "text": "nasty words"})
-	r.do(ada, map[string]any{"t": "im_send", "to": 9, "text": "fine words"})
-	msgs := kinds(drain(bo), "im")
-	line := msgs[0]["line"].(map[string]any)
-	id, at := int64(line["id"].(float64)), int64(line["at"].(float64))
+	r.do(ada, map[string]any{"t": "im_send", "to": 9, "text": "secret spam words"})
 	drain(ada)
-	code, out := callService(t, imDeleteService, r.hub, map[string]any{"a": 7, "b": 9, "line": id, "at": at, "by": 1})
-	if code != 200 || out["held"] != true {
-		t.Fatalf("%d %v", code, out)
+	drain(bo)
+	_, purged := callService(t, modPurgeService, r.hub, map[string]any{"player": 7, "since": 0, "by": 1})
+	b, _ := json.Marshal(purged)
+	if purged["ims"].(float64) != 1 || strings.Contains(string(b), "secret") || strings.Contains(string(b), "spam") {
+		t.Fatalf("the purge answer must be counts only: %s", b)
 	}
 	for who, cl := range map[string]*Client{"Ada": ada, "Bo": bo} {
-		m := one(t, drain(cl), "im_deleted")
-		if int64(m["line"].(float64)) != id || int64(m["at"].(float64)) != at {
-			t.Fatalf("%s: %v", who, m)
+		for _, m := range drain(cl) {
+			if mb, _ := json.Marshal(m); strings.Contains(string(mb), "secret") {
+				t.Fatalf("%s heard the words: %s", who, mb)
+			}
 		}
-	}
-	r.do(bo, map[string]any{"t": "im_sync"})
-	b, _ := json.Marshal(one(t, drain(bo), "im_state"))
-	if strings.Contains(string(b), "nasty") || !strings.Contains(string(b), "fine words") {
-		t.Fatalf("%s", b)
-	}
-	if code, _ := callService(t, imDeleteService, r.hub, map[string]any{"a": 9, "b": 7, "line": id, "at": at, "by": 1}); code != 400 {
-		t.Fatal("a must be the smaller id")
-	}
-	if code, out := callService(t, imDeleteService, r.hub, map[string]any{"a": 7, "b": 13, "line": 1, "at": 1, "by": 1}); code != 404 || out["status"] != "unknown" {
-		t.Fatalf("%d %v", code, out)
 	}
 }
 
