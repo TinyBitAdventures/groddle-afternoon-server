@@ -239,7 +239,7 @@ func TestChatIsRateLimitedAndCleaned(t *testing.T) {
 	if r := []rune(m["text"].(string)); len(r) != maxChat {
 		t.Fatalf("a long line kept %d characters", len(r))
 	}
-	if cleanName("  \u0000  ") != "Glitchen" {
+	if cleanName("  \u0000  ") != "Someone" {
 		t.Fatal("an empty name has a stand-in")
 	}
 }

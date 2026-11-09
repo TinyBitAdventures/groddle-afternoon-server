@@ -274,7 +274,7 @@ func (m *parties) revive(pr partyRec, now time.Time) string {
 		}
 		name := mr.Name
 		if name == "" {
-			name = "Someone"
+			name = unnamedPlayer
 		}
 		mem := &partyMember{id: mr.ID, name: name, leader: mr.Leader && !leader, online: mr.Online}
 		leader = leader || mem.leader

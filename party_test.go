@@ -249,8 +249,8 @@ func TestInvitesFailForTheSourceReasons(t *testing.T) {
 	_, _ = e1, e2
 	r.now = r.now.Add(partyInviteEvery)
 	r.do(a, map[string]any{"t": "party_invite", "name": "Echo"})
-	if got := texts(drain(a)); !strings.HasPrefix(got, "More than one player online is called Echo.") {
-		t.Fatalf("ambiguous: %q", got)
+	if got := texts(drain(a)); !strings.HasPrefix(got, "More than one player online is called Echo.") || strings.Contains(got, "Glitch") {
+		t.Fatalf("ambiguous: %q (our own line never says the game's name)", got)
 	}
 }
 

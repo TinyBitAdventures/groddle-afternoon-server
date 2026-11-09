@@ -76,6 +76,13 @@ func (t *Tickets) Check(ticket string) (Claims, error) {
 	return c, nil
 }
 
+// unnamedPlayer is the name shown for a player whose ticket names nobody (a
+// blank display name). The original always had a pc.label, so no fallback
+// survives; "Someone" is the word boards.go, drops.go and party_persist.go
+// already use, and the game's own fallback (js/player-names.js UNNAMED_PLAYER).
+// Ours: never the game's name in our own copy (was "Glitchen").
+const unnamedPlayer = "Someone"
+
 // cleanName keeps a display name to one short line.
 func cleanName(name string) string {
 	name = strings.TrimSpace(stripControl(name))
@@ -83,7 +90,7 @@ func cleanName(name string) string {
 		name = string(r[:40])
 	}
 	if name == "" {
-		name = "Glitchen"
+		name = unnamedPlayer
 	}
 	return name
 }

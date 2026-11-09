@@ -438,7 +438,7 @@ func (m *drops) addRow(row dropRow) *groundStack {
 		s.T = it.T
 	}
 	if s.ByName == "" {
-		s.ByName = "Someone"
+		s.ByName = unnamedPlayer
 	}
 	m.stacks[s.ID] = s
 	if m.byStreet[s.Street] == nil {

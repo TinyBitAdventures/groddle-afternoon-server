@@ -371,7 +371,7 @@ func (m *parties) invite(cl *Client, frame json.RawMessage) {
 		case 1:
 			target = m.h.ClientLocked(found[0])
 		default:
-			m.activity(cl.ID(), "More than one player online is called "+name+". Click their Glitch to invite them.")
+			m.activity(cl.ID(), "More than one player online is called "+name+". Click the one you mean to invite them.") // ours: inc_party.js has no such line
 			return
 		}
 		if target == nil {

@@ -343,7 +343,7 @@ func (m *boards) addRow(row boardRow) *boardNote {
 	}
 	n := &boardNote{ID: row.ID, Street: row.Street, Board: row.Board, Title: row.Title, Body: row.Body, Author: row.Author, AuthorName: row.Name, Remake: row.Remake, At: time.Unix(row.At, 0)}
 	if n.Author > 0 && n.AuthorName == "" {
-		n.AuthorName = "Someone"
+		n.AuthorName = unnamedPlayer
 	}
 	k := boardKey(n.Street, n.Board)
 	m.notes[n.ID] = n
