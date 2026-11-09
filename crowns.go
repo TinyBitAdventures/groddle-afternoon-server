@@ -95,6 +95,12 @@ package main
 // holds those, Ledger::catchUp). A ledger call left unanswered by a restart
 // is asked again when the winner connects (idempotent per id).
 //
+// The Crown Game Teleporter (G387, crowns_teleporter.go) is the other way in:
+// 50 currants through the site's ledger and a seat in the fullest open game,
+// as the shared instance manager seated a player (playerJoinInstance). Those
+// games stay open while they wait, and under three they wait for more
+// rather than end.
+//
 // Client to server:
 //
 //	{"t":"crown_challenge"}                  activated a Game of Crowns Ticket
@@ -181,6 +187,8 @@ var crownsFileForTest string
 var (
 	crownsMatchRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 	crownsIDRe    = regexp.MustCompile(`^crowns-[0-9a-f]{16}-[0-9]{1,3}-[0-9]{1,12}$`)
+	// What else is owed until acked: the teleporter's spend (crown_paid) and its refund (crown_paid_back), crowns_teleporter.go.
+	crownsOwedRe = regexp.MustCompile(`^(crowns-[0-9a-f]{16}-[0-9]{1,3}-[0-9]{1,12}|gtele-[0-9a-f]{16}(-r)?)$`)
 	// Streets a challenge can't start from: instances and homes (race_ticket.js activate is a street verb).
 	crownsPrivatePrefix = []string{"CROWNS_", "MAYHEM_", "RACE_", "PARTY_", "HOME_", "HOUSE_"}
 )
@@ -244,6 +252,7 @@ type crownMember struct {
 	crownRef
 	slot      int
 	ready     bool // clicked start (or Play Again) for the coming round
+	fresh     bool // came in by the teleporter and has not clicked start yet (holds the start, can_start_game 593-597)
 	playing   bool // in the round under way
 	gone      bool
 	ms        int64 // crown time this round, below the play line
@@ -267,6 +276,8 @@ type crownMatch struct {
 	timers     []func() bool
 	ticker     func() bool
 	life       func() bool
+	open       bool // made by the Crown Game Teleporter: others join it while it waits (crowns_teleporter.go)
+	closed     bool // ended for want of players or time: nobody joins it again
 }
 
 // crownsLedger is the site's ledger for a winner's currants: put them in, once per id.
@@ -301,6 +312,7 @@ type crownCredit struct {
 type crownsSaved struct {
 	Owed    map[int64][]crownOwed   `json:"owed"`
 	Credits map[string]*crownCredit `json:"credits"`
+	Refunds map[string]*crownRefund `json:"refunds,omitempty"` // teleporter spends to give back (crowns_teleporter.go)
 }
 
 // crownFate is what became of a player's own challenge, for a page that went away before it heard.
@@ -320,9 +332,13 @@ type crowns struct {
 	owed    map[int64][]crownOwed
 	credits map[string]*crownCredit
 	fates   map[int64]crownFate
-	path    string       // -crowns-file; "" keeps it in memory
-	ledger  crownsLedger // nil: no ledger (see trusted)
-	trusted bool         // -trade-ledger off: the winner's currants are the client's (development only)
+	paying  map[int64]string        // teleporter spends asked of the ledger, until the player is in a game
+	refunds map[string]*crownRefund // teleporter spends owed back, until the ledger answers
+	spender crownsSpender           // the site's ledger/spend (nil: -trade-ledger off, the client's word)
+	noSpend bool                    // the ledger is on but not set up: the teleporter refuses
+	path    string                  // -crowns-file; "" keeps it in memory
+	ledger  crownsLedger            // nil: no ledger (see trusted)
+	trusted bool                    // -trade-ledger off: the winner's currants are the client's (development only)
 	spawn   func(func())
 	newID   func() string
 	pick    func(n int) int
@@ -341,8 +357,10 @@ func newCrowns(h *Hub) Module {
 		site, missing := newLedgerFromFlags()
 		if hl, ok := site.(*httpLedger); ok && hl != nil {
 			m.ledger = hl
+			m.spender = hl
 		}
 		m.trusted = site == nil && !missing
+		m.noSpend = missing
 	}
 	return m
 }
@@ -354,6 +372,7 @@ func newCrownsWith(h *Hub, a *crownsArena) *crowns {
 		matches: map[string]*crownMatch{}, matchOf: map[int64]*crownMatch{},
 		asks: map[int64]*crownsAsk{}, owed: map[int64][]crownOwed{},
 		credits: map[string]*crownCredit{}, fates: map[int64]crownFate{},
+		paying: map[int64]string{}, refunds: map[string]*crownRefund{},
 		spawn: func(fn func()) { go fn() },
 		newID: func() string {
 			b := make([]byte, 8)
@@ -372,6 +391,7 @@ func (m *crowns) Register(r *Registry) {
 	r.Handle("crown_leave", m.leave)
 	r.Handle("crown_ack", m.ack)
 	r.Handle("crown_pending", m.pending)
+	r.Handle("crown_teleport", m.teleport) // crowns_teleporter.go
 	r.OnConnect(m.onConnect)
 	r.OnJoin(m.onJoin)
 	r.OnLeave(m.onLeave)
@@ -425,6 +445,9 @@ func (m *crowns) busy(id int64) bool {
 		return true
 	}
 	if m.matchOf[id] != nil {
+		return true
+	}
+	if _, ok := m.paying[id]; ok {
 		return true
 	}
 	// In a Math Mayhem game (mayhem.go).
@@ -795,6 +818,7 @@ func (m *crowns) readyIDs(mt *crownMatch) []int64 {
 // markReady is dismissOverlaysAndStart 231-342 with can_start_game 579-602.
 func (m *crowns) markReady(mt *crownMatch, mem *crownMember, name string) {
 	mem.ready = true
+	mem.fresh = false
 	if mem.autoLeave != nil {
 		mem.autoLeave()
 		mem.autoLeave = nil
@@ -802,11 +826,11 @@ func (m *crowns) markReady(mt *crownMatch, mem *crownMember, name string) {
 	ready := m.readyIDs(mt)
 	// Before the first round everyone in the arena must click; after one, Play Again is a choice (ours).
 	unready := 0
-	if mt.round == 1 && mt.lastTick.IsZero() {
-		for _, o := range mt.members {
-			if !o.gone && !o.ready {
-				unready++
-			}
+	first := mt.round == 1 && mt.lastTick.IsZero()
+	for _, o := range mt.members {
+		// A teleporter arrival who has not clicked holds the start in any round (can_start_game 593-597).
+		if !o.gone && !o.ready && (first || o.fresh) {
+			unready++
 		}
 	}
 	need := m.a.Players.Retry - len(ready)
@@ -1114,6 +1138,7 @@ func (m *crowns) end(mt *crownMatch, winner *crownRef, why string) {
 	}
 	if why == "short" || why == "empty" || why == "timeout" {
 		// Nobody can play again in a game that ran out of players or time.
+		mt.closed = true
 		for _, mem := range mt.members {
 			if !mem.gone && mem.autoLeave != nil {
 				mem.autoLeave()
@@ -1227,8 +1252,8 @@ func (m *crowns) useFile(path string) {
 	for _, l := range m.owed {
 		n += len(l)
 	}
-	if n > 0 || len(m.credits) > 0 {
-		log.Printf("crowns %s: %d rewards owed, %d wins to credit", path, n, len(m.credits))
+	if n > 0 || len(m.credits) > 0 || len(m.refunds) > 0 {
+		log.Printf("crowns %s: %d rewards owed, %d wins to credit, %d teleporter spends to give back", path, n, len(m.credits), len(m.refunds))
 	}
 }
 
@@ -1237,7 +1262,7 @@ func (m *crowns) keep(st crownsSaved) {
 	for player, list := range st.Owed {
 		kept := []crownOwed{}
 		for _, o := range list {
-			if player > 0 && crownsIDRe.MatchString(o.ID) && json.Valid(o.Msg) {
+			if player > 0 && crownsOwedRe.MatchString(o.ID) && json.Valid(o.Msg) {
 				kept = append(kept, o)
 			}
 		}
@@ -1250,6 +1275,11 @@ func (m *crowns) keep(st crownsSaved) {
 			m.credits[id] = c
 		}
 	}
+	for op, rf := range st.Refunds {
+		if rf != nil && rf.Op == op && rf.User > 0 && crownsSpendRe.MatchString(op) {
+			m.refunds[op] = rf
+		}
+	}
 }
 
 // save writes the whole state now; false when it could not (it stays in memory).
@@ -1257,7 +1287,7 @@ func (m *crowns) save() bool {
 	if m.path == "" {
 		return true
 	}
-	b, err := json.Marshal(crownsSaved{Owed: m.owed, Credits: m.credits})
+	b, err := json.Marshal(crownsSaved{Owed: m.owed, Credits: m.credits, Refunds: m.refunds})
 	if err == nil {
 		err = writeFileSynced(m.path, b)
 	}
@@ -1320,7 +1350,7 @@ func (m *crowns) ack(cl *Client, frame json.RawMessage) {
 	var msg struct {
 		ID string `json:"id"`
 	}
-	if json.Unmarshal(frame, &msg) != nil || !crownsIDRe.MatchString(msg.ID) {
+	if json.Unmarshal(frame, &msg) != nil || !crownsOwedRe.MatchString(msg.ID) {
 		return
 	}
 	list := m.owed[cl.ID()]
@@ -1413,8 +1443,21 @@ func (m *crowns) drop(mt *crownMatch, id int64) {
 			m.sendMatch(mt, m.stateJSON(mt, "crown_state"))
 		}
 	case "waiting", "soon", "countdown":
-		// Nobody else can join a ticket instance: under three, the game is off (ours).
-		if live < m.a.Players.Retry {
+		if mt.open {
+			// A teleporter's game waits for more (shared_instance_manager.js: it stays open to
+			// playerJoinInstance); a start under way checks again (startWithMinimumPlayers 345-358),
+			// a countdown runs on (startGame does not look). The last one out ends it (below).
+			if mt.status == "waiting" {
+				for _, o := range mt.members {
+					if !o.gone && o.ready {
+						o.ready = false
+						m.markReady(mt, o, o.Name)
+						break
+					}
+				}
+			}
+		} else if live < m.a.Players.Retry {
+			// Nobody else can join a ticket instance: under three, the game is off (ours).
 			m.end(mt, nil, "short")
 		} else if mt.status == "waiting" && mt.round == 1 && mt.lastTick.IsZero() {
 			// Everyone left may already be ready.
@@ -1468,6 +1511,12 @@ func (m *crowns) onConnect(cl *Client) {
 			if c.Player == cl.ID() && !c.busy {
 				m.askCredit(c)
 			}
+		}
+	}
+	// A teleporter spend a restart left owed back: ask again (crowns_teleporter.go).
+	for _, rf := range m.refunds {
+		if rf.User == cl.ID() {
+			m.askRefund(rf)
 		}
 	}
 }
