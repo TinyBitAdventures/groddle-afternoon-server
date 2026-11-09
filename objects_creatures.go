@@ -279,11 +279,16 @@ func rookCreatureKey(spot *objSpot) string {
 	case "pig":
 		_, n, _ := strings.Cut(spot.id, ":")
 		return "npc_piggy:" + n
+	case "kitty":
+		// A Heli Kitty (G593): npc_kitty_chicken includes items/include/rook.js (npc_kitty_chicken.js 1)
+		// and lies rooked where it was struck like the others (onRooked 1239-1248, rookedCollision 1207-1210).
+		_, n, _ := strings.Cut(spot.id, ":")
+		return "npc_kitty_chicken:" + n
 	}
 	return ""
 }
 
-// rookHoldCreature keeps a shared Chicken or Butterfly where the Rook struck it, for everyone, until
+// rookHoldCreature keeps a shared Chicken, Butterfly, Piggy or Heli Kitty where the Rook struck it, for everyone, until
 // it is revived, and lets it go on from that same point when it is. In the source a rooked animal is
 // one item that stays where it is: include/rook.js rookAttack 53-63 fullStop, then the class's
 // onRooked drops it to the platform line under it (npc_butterfly.js 1395-1404, npc_chicken.js
@@ -329,7 +334,7 @@ func (o *objects) rookHoldCreature(street string, ob *liveObj) bool {
 
 // rookCreature is the Rook's word that a shared animal was rooked or revived (rook.go wingBeat,
 // revive): its path stops or runs on (rookHoldCreature) and everyone on the street is told. False
-// when the id names no Chicken or Butterfly there.
+// when the id names no Chicken, Butterfly, Piggy or Heli Kitty there.
 func (o *objects) rookCreature(street, id string) bool {
 	o.resume()
 	spot := o.w.streets[street][id]
@@ -343,7 +348,7 @@ func (o *objects) rookCreature(street, id string) bool {
 	return true
 }
 
-// rookedCreatures is the street's rooked Chickens and Butterflies that nobody has touched yet (not in
+// rookedCreatures is the street's rooked animals (Chickens, Butterflies, Piggies, Heli Kitties) that nobody has touched yet (not in
 // o.streets), sorted: a snapshot carries their stopped paths too.
 func (o *objects) rookedCreatures(street string, spots map[string]*objSpot) []string {
 	fn, ok := o.h.ProvidedLocked("rook.thingRooked").(func(string, string) bool)

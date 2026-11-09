@@ -759,7 +759,7 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 			o.armRookFruit(street, ob, rookFruitEvery)
 		}
 	}
-	if spot.kind == "chicken" || spot.kind == "butterfly" || spot.kind == "pig" {
+	if spot.kind == "chicken" || spot.kind == "butterfly" || spot.kind == "pig" || spot.kind == "kitty" {
 		// Rooked: it lies where the Rook struck it until it is revived (objects_creatures.go rookHoldCreature).
 		if o.rookHoldCreature(street, ob) && ob.trip != nil {
 			// A Piggy on its way to food stops there and walks on when revived: its trip's clock moved.

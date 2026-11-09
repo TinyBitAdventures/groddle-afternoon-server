@@ -478,16 +478,25 @@ func (m *rook) unrook(street, key string) {
 	m.tidy(street)
 }
 
-// rookCreature tells the shared street objects a Chicken, Butterfly or Piggy was rooked or revived, so it
-// lies where it was struck for everyone and goes on from there (objects_creatures.go rookCreature).
+// rookCreatureKinds is the street objects' kind for each animal class the Rook stops for everyone.
+var rookCreatureKinds = map[string]string{
+	"npc_chicken":       "chicken",
+	"npc_butterfly":     "butterfly",
+	"npc_piggy":         "pig",   // js/street-objects.js pigId
+	"npc_kitty_chicken": "kitty", // G593: heli-kitties-feature kittyKey
+}
+
+// rookCreature tells the shared street objects a Chicken, Butterfly, Piggy or Heli Kitty was rooked or
+// revived, so it lies where it was struck for everyone and goes on from there (objects_creatures.go
+// rookCreature).
 func (m *rook) rookCreature(street, key string) {
 	sm := rookKeyRe.FindStringSubmatch(key)
-	if sm == nil || (sm[1] != "npc_chicken" && sm[1] != "npc_butterfly" && sm[1] != "npc_piggy") {
+	if sm == nil {
 		return
 	}
-	kind := strings.TrimPrefix(sm[1], "npc_")
-	if kind == "piggy" {
-		kind = "pig" // the street objects' id for it (js/street-objects.js pigId)
+	kind := rookCreatureKinds[sm[1]]
+	if kind == "" {
+		return
 	}
 	if fn, ok := m.h.ProvidedLocked("objects.rookCreature").(func(string, string) bool); ok {
 		fn(street, kind+":"+sm[2])
