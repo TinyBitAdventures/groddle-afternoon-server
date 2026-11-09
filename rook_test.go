@@ -702,3 +702,69 @@ func TestRookALonePlayersStreetJoinsTheOrb(t *testing.T) {
 		t.Fatalf("joiners %d", got)
 	}
 }
+
+// G605: doses in progress count (include/rook.js startRevive 128-133, canRevive 359-375): three
+// players reviving at once leave no room for a fourth; a cancel or a hold running out frees it.
+func TestRookReviveCountsDosesInProgress(t *testing.T) {
+	r := newRookRig(t, true)
+	var cls []*Client
+	for i := int64(1); i <= 4; i++ {
+		cls = append(cls, r.player(i, "P"+string(rune('a'+i))))
+	}
+	r.send(cls[0], map[string]any{"t": "rook_sync", "keys": []string{"npc_piggy:0", "npc_piggy:1"}})
+	r.send(cls[0], map[string]any{"t": "rook_dev", "do": "attack"})
+	r.roll = 0
+	r.send(cls[0], map[string]any{"t": "rook_dev", "do": "wingbeat"})
+	for _, c := range cls {
+		r.drain(c)
+	}
+	start := func(c *Client) { r.send(c, map[string]any{"t": "rook_revive_start", "key": "npc_piggy:0"}) }
+	for _, c := range cls[:3] {
+		start(c)
+	}
+	f := r.drain(cls[3])
+	last := f[len(f)-1]["rooked"].(map[string]any)["npc_piggy:0"].(map[string]any)
+	if busy, _ := last["busy"].([]any); len(busy) != 3 {
+		t.Fatalf("three under way: %v", last)
+	}
+	start(cls[3])
+	f = r.drain(cls[3])
+	if code := rookLastNo(f); code != "full" {
+		t.Fatalf("a fourth start: %q", code)
+	}
+	for _, fr := range f {
+		if fr["t"] == "rook_no" && fr["message"] != "Enough people are already helping to revive this Piggy." {
+			t.Fatalf("a fourth start says %q", fr["message"])
+		}
+	}
+	// The first dose lands: still three (one given, two under way).
+	r.send(cls[0], map[string]any{"t": "rook_revive", "key": "npc_piggy:0"})
+	start(cls[3])
+	if code := rookLastNo(r.drain(cls[3])); code != "full" {
+		t.Fatalf("one given and two under way: %q", code)
+	}
+	// One is cancelled: room for the fourth.
+	r.send(cls[1], map[string]any{"t": "rook_revive_stop", "key": "npc_piggy:0"})
+	r.drain(cls[3])
+	start(cls[3])
+	if code := rookLastNo(r.drain(cls[3])); code != "" {
+		t.Fatalf("after a cancel: %q", code)
+	}
+	// The one who gave a dose cannot start another.
+	start(cls[0])
+	if code := rookLastNo(r.drain(cls[0])); code != "done" {
+		t.Fatalf("a second dose: %q", code)
+	}
+	// A dose whose hold runs out stops counting, and the street hears it.
+	r.drain(cls[1])
+	r.advance(rookReviveHold + time.Second)
+	f = r.drain(cls[1])
+	last = f[len(f)-1]["rooked"].(map[string]any)["npc_piggy:0"].(map[string]any)
+	if busy, _ := last["busy"].([]any); len(busy) != 0 {
+		t.Fatalf("held past its time: %v", last)
+	}
+	start(cls[1])
+	if code := rookLastNo(r.drain(cls[1])); code != "" {
+		t.Fatalf("a fresh start after the holds ran out: %q", code)
+	}
+}

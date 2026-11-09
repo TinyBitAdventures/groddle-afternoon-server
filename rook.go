@@ -29,6 +29,8 @@ package main
 //	{"t":"rook_prime","bonus":1}            prime the street's shrine (bonus: your Shrine On card, 0-2)
 //	{"t":"rook_strike","item":"plank","count":40}  offer to the primed shrine
 //	{"t":"rook_revive","key":"npc_piggy:0","balm":false}  one revive dose (balm: a full revive)
+//	{"t":"rook_revive_start","key":"npc_piggy:0"}  a dose's 10 s began (startRevive: in_progress)
+//	{"t":"rook_revive_stop","key":"npc_piggy:0"}   it was cancelled (doReviveCancel)
 //	{"t":"rook_dev","do":"start"}           start | attack | wingbeat | stun; only with GRODDLE_ROOK_DEV=1
 //
 // Server to client:
@@ -43,7 +45,7 @@ package main
 // "health","maxHealth","stun","maxStun","crowd","wingBeats","clock":ms to the phase's next turn,
 // "orbs":[{"by":7,"name":"Ada","joiners":[8],"in":ms}],"primed":{"by":7,"name":"Ada","in":ms}|null,
 // "shrine":{"x":865.6,"y":940.6,"giant":"spriggan"}}.
-// Rooked: {"class":"npc_piggy","doses":1,"by":[7]}.
+// Rooked: {"class":"npc_piggy","doses":1,"by":[7],"busy":[8]} (busy: doses in progress, G605).
 //
 // ev types: herald_warning{n}, attack_start, angry2, angry3, wing_beat{n,hit:[keys]}, depart,
 // orb_start{by,name}, orb_join{by,id,name,count}, orb_cancel{by}, stun{by,name,joiners,damage,
@@ -123,6 +125,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -394,6 +397,27 @@ type rookTimer struct{ stop func() bool }
 type rookedThing struct {
 	class   string
 	healers []int64
+	// reviving: doses in progress, each until its hold runs out (include/rook.js startRevive 128-133
+	// in_progress, canRevive 359-375 counts them with the successful ones).
+	reviving map[int64]time.Time
+}
+
+// rookReviveHold is how long a started dose counts without landing: the source's 10 s
+// (getReviveEffects seconds 10) and slack for the landing frame (ours).
+const rookReviveHold = 15 * time.Second
+
+// busy is who is giving a dose now (not yet landed), oldest first; expired ones are dropped.
+func (r *rookedThing) busy(now time.Time) []int64 {
+	out := []int64{}
+	for id, until := range r.reviving {
+		if !until.After(now) || slices.Contains(r.healers, id) {
+			delete(r.reviving, id)
+			continue
+		}
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 type rookStreet struct {
@@ -457,6 +481,8 @@ func (m *rook) Register(r *Registry) {
 	r.Handle("rook_prime", m.handlePrime)
 	r.Handle("rook_strike", m.handleStrike)
 	r.Handle("rook_revive", m.handleRevive)
+	r.Handle("rook_revive_start", m.handleReviveStart)
+	r.Handle("rook_revive_stop", m.handleReviveStop)
 	r.Handle("rook_dev", m.handleDev)
 	r.OnJoin(m.joined)
 	r.OnLeave(m.left)
@@ -623,7 +649,7 @@ func (m *rook) rookedState(s *rookStreet) map[string]any {
 		return out
 	}
 	for key, r := range s.rooked {
-		out[key] = map[string]any{"class": r.class, "doses": len(r.healers), "by": append([]int64{}, r.healers...)}
+		out[key] = map[string]any{"class": r.class, "doses": len(r.healers), "by": append([]int64{}, r.healers...), "busy": r.busy(m.h.Now())}
 	}
 	return out
 }
@@ -1469,7 +1495,9 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 				return
 			}
 		}
-		if len(r.healers) >= rookHealers {
+		// canRevive 365-372: the successful and the ones in progress, three at most; this player's
+		// own dose in progress is the one landing.
+		if busy := r.busy(m.h.Now()); len(r.healers)+len(busy)-boolInt(slices.Contains(busy, cl.ID())) >= rookHealers {
 			m.no(cl, "revive", "full", rookReviveFull(r.class))
 			return
 		}
@@ -1477,10 +1505,90 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 	m.revive(cl, cl.Street(), s, msg.Key, msg.Balm, nil)
 }
 
+// handleReviveStart is a dose's 10 s beginning (include/rook.js startRevive 111-134): refused when
+// this player already gave one (112-121) or three are given or under way (canRevive 359-375);
+// else it counts as in progress for everyone until it lands, is stopped or its hold runs out.
+func (m *rook) handleReviveStart(cl *Client, frame json.RawMessage) {
+	var msg struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal(frame, &msg) != nil || rookKeyClass(msg.Key) == "" {
+		m.no(cl, "revive_start", "bad", "That revive did not check out.")
+		return
+	}
+	if !m.allow(cl) {
+		m.no(cl, "revive_start", "slow_down", "Slow down a little.")
+		return
+	}
+	street := cl.Street()
+	s := m.streets[street]
+	if s == nil || s.rooked[msg.Key] == nil {
+		m.no(cl, "revive_start", "not_rooked", "That is not rooked any more.")
+		return
+	}
+	r := s.rooked[msg.Key]
+	if slices.Contains(r.healers, cl.ID()) {
+		m.no(cl, "revive_start", "done", rookReviveDone(r.class))
+		return
+	}
+	now := m.h.Now()
+	busy := r.busy(now)
+	if !slices.Contains(busy, cl.ID()) && len(r.healers)+len(busy) >= rookHealers {
+		m.no(cl, "revive_start", "full", rookReviveFull(r.class))
+		return
+	}
+	if r.reviving == nil {
+		r.reviving = map[int64]time.Time{}
+	}
+	r.reviving[cl.ID()] = now.Add(rookReviveHold)
+	m.broadcast(street, map[string]any{"type": "revive_start", "key": msg.Key, "by": cl.ID()})
+	// When the hold runs out without a landing, the street hears the dose is no longer under way.
+	key := msg.Key
+	id := cl.ID()
+	m.h.After(rookReviveHold+10*time.Millisecond, func() {
+		s := m.streets[street]
+		if s == nil || s.rooked[key] == nil {
+			return
+		}
+		if until, ok := s.rooked[key].reviving[id]; ok && !until.After(m.h.Now()) {
+			delete(s.rooked[key].reviving, id)
+			m.broadcast(street, map[string]any{"type": "revive_stop", "key": key, "by": id})
+		}
+	})
+}
+
+// handleReviveStop is a dose cancelled before it landed (doReviveCancel 138-151).
+func (m *rook) handleReviveStop(cl *Client, frame json.RawMessage) {
+	var msg struct {
+		Key string `json:"key"`
+	}
+	if json.Unmarshal(frame, &msg) != nil || rookKeyClass(msg.Key) == "" {
+		return
+	}
+	street := cl.Street()
+	s := m.streets[street]
+	if s == nil || s.rooked[msg.Key] == nil {
+		return
+	}
+	if _, ok := s.rooked[msg.Key].reviving[cl.ID()]; !ok {
+		return
+	}
+	delete(s.rooked[msg.Key].reviving, cl.ID())
+	m.broadcast(street, map[string]any{"type": "revive_stop", "key": msg.Key, "by": cl.ID()})
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // revive is one dose (or a balm's full revive) landing on a rooked thing; use is the ledger's word on
 // the balm's charge (nil without a ledger, or for a dose).
 func (m *rook) revive(cl *Client, street string, s *rookStreet, key string, balm bool, use map[string]any) {
 	r := s.rooked[key]
+	delete(r.reviving, cl.ID())
 	r.healers = append(r.healers, cl.ID())
 	doses := len(r.healers)
 	done := balm || doses >= rookHealers
@@ -1577,6 +1685,13 @@ func (m *rook) left(cl *Client, tsid string) {
 	s := m.streets[tsid]
 	if s == nil {
 		return
+	}
+	// A dose in progress ends with its player leaving (checkConversations 330-346 cancels a healer gone).
+	for key, r := range s.rooked {
+		if _, ok := r.reviving[cl.ID()]; ok {
+			delete(r.reviving, cl.ID())
+			m.broadcast(tsid, map[string]any{"type": "revive_stop", "key": key, "by": cl.ID()})
+		}
 	}
 	if a := s.attack; a != nil {
 		// An orb's initiator who walks off takes the orb along; a primer's shrine completes.
