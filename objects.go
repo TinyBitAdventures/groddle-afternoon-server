@@ -189,8 +189,8 @@ var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab|dragon):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true}
-	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true}
+		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true}
+	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true, "herd": true}
 )
 
 // The source's refusals (items/*.js), with the remake's copy where the source
@@ -494,12 +494,17 @@ type liveObj struct {
 	croak        bool
 	tickAt       time.Time
 	petters      map[int64]int64
-	eatingFood   string      // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
-	trip         *pigTrip    // pig: its walk to food and home (objects_pigs.go startTrip)
-	userName     string      // pig, chicken, butterfly, batterfly: its name, everyone's (animal_naming.js user_name; objects_pigs.go nameAnimal)
-	namer        int64       // who named it (pc_namer)
-	namedAt      time.Time   // when (named_on)
-	tripStop     func() bool // pig: the timer for the trip's next step
+	eatingFood   string         // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
+	trip         *pigTrip       // pig: its walk to food and home (objects_pigs.go startTrip)
+	userName     string         // pig, chicken, butterfly, batterfly: its name, everyone's (animal_naming.js user_name; objects_pigs.go nameAnimal)
+	namer        int64          // who named it (pc_namer)
+	namedAt      time.Time      // when (named_on)
+	goneDay      int64          // pig: the game day a capture or a youth potion took it off the street (0: here; objects_pigs_gone.go)
+	goneWhy      string         // pig: "capture" | "youth"
+	crops        map[string]int // pig: crops fed per seed class, toward a Plop (npc_piggy.js feed 685-693; objects_pigs_plops.go)
+	plops        []plopEntry    // pig: Plops still to come, oldest first (doPlop 1315-1350)
+	plopStop     func() bool    // pig: the timer for the next Plop
+	tripStop     func() bool    // pig: the timer for the trip's next step
 
 	// chicken, butterfly, batterfly (objects_creatures.go) and a Piggy's uses: each player's uses of
 	// each verb on usesDay (package_intervals[day][pc]) and today's tally by anyone; lag and holdEnd
@@ -541,10 +546,12 @@ type objects struct {
 	w       *objWorld
 	roll    func() float64
 	streets map[string]map[string]*liveObj
-	limits  map[int64]*objBucket
-	dayStop func() bool
-	pigStop func() bool // the one timer for the next Piggy tick (objects_pigs.go)
-	pigDue  time.Time
+	// captures: each player's last Piggy capture per street (objects_pigs_gone.go, G605).
+	captures map[string]map[int64]time.Time
+	limits   map[int64]*objBucket
+	dayStop  func() bool
+	pigStop  func() bool // the one timer for the next Piggy tick (objects_pigs.go)
+	pigDue   time.Time
 	// dev (GRODDLE_TREES_DEV=1): a poison pour may name its own die time ("ms"), for QA.
 	dev bool
 	// Fertilidust, Tree Poison and Antidote through the site's ledger (objects_uses.go).
@@ -755,6 +762,9 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 			o.armPigs()
 		}
 	}
+	if spot.kind == "pig" {
+		o.pigBackIfDue(ob) // G605: a gone Piggy is back after the game day turned (objects_pigs_gone.go)
+	}
 	if spot.kind == "tree" {
 		o.newDay(ob)
 		// A rooked tree whose fruit push is not running (a restart, or a change since it settled).
@@ -825,6 +835,9 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		}
 		if ob.userName != "" {
 			o.nameState(ob, m)
+		}
+		if ob.pigGone() {
+			m["gone"] = true // a capture or a youth potion took it off the street until the next game day (G605)
 		}
 		return m
 	case "wood":
@@ -941,6 +954,7 @@ type objAct struct {
 	N     int      `json:"n"`    // feed: how many of it, one stack at most
 	At    int64    `json:"at"`   // wait: the path's clock (server ms minus lag) where the player's screen stopped the animal
 	Name  string   `json:"name"` // name: what the player typed for a street animal (objects_pigs.go nameAnimal)
+	K     *int     `json:"k"`    // youth: the bottle poured, its place among the player's bottles (objects_uses.go copyOf)
 }
 
 // verdict is what one verb decided: ok, or a refusal code and line; extra rides on obj_ok.
@@ -1027,6 +1041,9 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 			no("bad_verb", "That is not something here.", nil)
 			return
 		}
+		if spot.kind == "pig" && o.get(street, spot).pigGone() {
+			return
+		}
 		o.waitCreature(street, spot, m.At)
 		return
 	}
@@ -1039,6 +1056,14 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	if (spot.kind == "tree" || spot.kind == "wood") && (m.Verb == "poison" || m.Verb == "antidote") && o.uses.ledger != nil {
 		// G335: the bottle is the ledger's to confirm and use first (objects_uses.go).
 		o.askPour(cl, m, street, spot)
+		return
+	}
+	if spot.kind == "pig" && m.Verb == "capture" {
+		o.askCapture(cl, m, street, spot, perks) // G605 (objects_pigs_gone.go)
+		return
+	}
+	if spot.kind == "pig" && m.Verb == "youth" {
+		o.askYouth(cl, m, street, spot)
 		return
 	}
 	if spot.kind == "pig" && m.Verb == "feed" && o.uses.ledger != nil {
@@ -1707,12 +1732,15 @@ func (o *objects) rollDay() bool {
 			o.forget(street, ob)
 		}
 	}
+	if o.pigsBack() {
+		trees = true // a Piggy still away keeps the day timer armed (objects_pigs_gone.go)
+	}
 	o.saveSoon()
 	return trees
 }
 
 // dayDev is GRODDLE_TREES_DEV=1 only, for QA: {"t":"obj_day_dev"} turns the game day for every
-// shared tree now, as armDay's timer does at the real turn.
+// shared tree now, as armDay's timer does at the real turn (and brings gone Piggies back, G605).
 func (o *objects) dayDev(cl *Client, _ json.RawMessage) {
 	if !o.dev || cl.Street() == "" {
 		return
@@ -1722,6 +1750,9 @@ func (o *objects) dayDev(cl *Client, _ json.RawMessage) {
 		for _, ob := range room {
 			if ob.spot.kind == "tree" && ob.day >= today {
 				ob.day = today - 1
+			}
+			if ob.pigGone() && ob.goneDay >= today {
+				ob.goneDay = today - 1 // G605: a gone Piggy is due back at this dev turn too
 			}
 		}
 	}

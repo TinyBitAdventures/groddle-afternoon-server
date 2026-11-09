@@ -25,6 +25,9 @@ package main
 //     (teleportation_script.js 298-319): tsid and hubId letters, digits, _ and -, at most id; x and y
 //     whole numbers within coord (null when not known); label and hubName as one phrase of len. No
 //     tsid is no words.
+//   - plop: a Piggy Plop's seeds {"seed","n"} (plop.js instanceProps seed_class, seed_count; npc_animal
+//     doPlop 1315-1350): seed one of the crop seed classes (seeds), n a whole number from 1 to max
+//     (doPlop's randInt(2, 7)). G605: its seeds ride with a shared Plop (objects_pigs_plops.go).
 //
 // Words a class does not keep, words on a stack of more than one, or words that come out empty are
 // dropped: the copy goes without them, as before. Only the side giving a copy sends its words; a
@@ -32,6 +35,7 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -62,6 +66,15 @@ type copyTagRules struct {
 		Len   int   `json:"len"`
 		Coord int64 `json:"coord"`
 	} `json:"script"`
+	Plop struct {
+		Seeds []string `json:"seeds"`
+		Max   int64    `json:"max"`
+	} `json:"plop"`
+}
+
+type plopTag struct {
+	Seed string `json:"seed"`
+	N    int64  `json:"n"`
 }
 
 type cubimalTag struct {
@@ -169,6 +182,18 @@ func (r *copyTagRules) clean(kind string, raw json.RawMessage, now time.Time) js
 		}
 		if v.Hopper > 0 || v.Hooch > 0 || v.WorkingSince > 0 {
 			out = v
+		}
+	case "plop":
+		var m map[string]json.RawMessage
+		if json.Unmarshal(raw, &m) != nil || m == nil {
+			return nil
+		}
+		var seed string
+		if json.Unmarshal(m["seed"], &seed) != nil || !slices.Contains(r.Plop.Seeds, seed) {
+			return nil
+		}
+		if n := copyTagWhole(m["n"], r.Plop.Max); n >= 1 {
+			out = plopTag{Seed: seed, N: n}
 		}
 	case "script":
 		var m map[string]json.RawMessage

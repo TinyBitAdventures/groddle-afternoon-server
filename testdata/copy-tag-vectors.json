@@ -634,6 +634,67 @@
    "kind": "script",
    "in": {},
    "out": null
+  },
+  {
+   "kind": "plop",
+   "in": {
+    "seed": "seed_potato",
+    "n": 5
+   },
+   "out": {
+    "seed": "seed_potato",
+    "n": 5
+   }
+  },
+  {
+   "kind": "plop",
+   "in": {
+    "seed": "herb_seed_rookswort",
+    "n": 2.7
+   },
+   "out": {
+    "seed": "herb_seed_rookswort",
+    "n": 2
+   }
+  },
+  {
+   "kind": "plop",
+   "in": {
+    "seed": "seed_pumpkin",
+    "n": 40
+   },
+   "out": {
+    "seed": "seed_pumpkin",
+    "n": 7
+   }
+  },
+  {
+   "kind": "plop",
+   "in": {
+    "seed": "seed_potato",
+    "n": 0
+   },
+   "out": null
+  },
+  {
+   "kind": "plop",
+   "in": {
+    "seed": "apple",
+    "n": 3
+   },
+   "out": null
+  },
+  {
+   "kind": "plop",
+   "in": "seed_potato",
+   "out": null
+  },
+  {
+   "kind": "plop",
+   "in": {
+    "n": 3
+   },
+   "out": null
   }
  ]
 }

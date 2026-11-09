@@ -69,6 +69,15 @@ package main
 // not asked whether it has room: the client asks only for what fits
 // (takeable.js 84-93 addItemStack's remainder stays on the ground).
 //
+// Placed by the street (G605): a Plop a fed street Piggy leaves (npc_animal doPlop 1315-1350:
+// apiPutItemIntoPosition beside the Piggy) and the Piglet a Potion of Animal Youth leaves where its
+// Piggy stood (potion_animal_youth.js onPour 547-569, replaceWithPoofIfOnGround) come from no one's
+// pack, so the objects module places them (Provide "drops.place"): the site records the stack under
+// the player whose act made it (POST groddle/v1/ledger/drop/place: no ledger gives it up; the site
+// counts it as an outcome of that act), and from there it is any stack: the 100 px guard is that
+// player's (ours, Austin 2026-11-09: the feeder gets first chance; the source's plop had no dropper),
+// the first pickup has it, and one left for dropKeep goes back to that player.
+//
 // Pick up how many (G560): a pickup may name a part of the stack (main.js
 // 3227-3240 splits the stack, takeable_pickup takes the split part and the
 // rest stays down for everyone). The site records each part once under
@@ -99,6 +108,7 @@ const (
 	ledgerRouteDropTake = "/groddle/v1/ledger/drop/take"
 	ledgerRouteDrops    = "/groddle/v1/ledger/drops"
 	ledgerRouteDropEat  = "/groddle/v1/ledger/drop/eat"
+	ledgerRouteDropPut  = "/groddle/v1/ledger/drop/place"
 
 	dropLockRadius = 100.0 // takeable.js:38 distanceFromPlayer(dropper) < 100, measured across (dropLockHeight)
 	dropLockHeight = 200.0 // ours: the game draws a stack 74 px above the feet (game.js dropPackItem), the source 20
@@ -205,6 +215,7 @@ type dropSite interface {
 	dropTake(op string, id int64, why string, n, from int) dropAnswer // n > 0: n of the from held (a part)
 	dropsOnGround() ([]dropRow, error)
 	dropEat(op string, from int) dropAnswer
+	dropPlace(c dropCall) dropAnswer // G605: a stack the street makes (a Plop, a Piglet), under the player whose act made it
 }
 
 func (l *httpLedger) dropPost(route string, body []byte, out any) error {
@@ -266,6 +277,11 @@ func (l *httpLedger) dropEat(op string, from int) dropAnswer {
 	return l.dropAsk(ledgerRouteDropEat, body)
 }
 
+func (l *httpLedger) dropPlace(c dropCall) dropAnswer {
+	body, _ := json.Marshal(c)
+	return l.dropAsk(ledgerRouteDropPut, body)
+}
+
 func (l *httpLedger) dropsOnGround() ([]dropRow, error) {
 	var out struct {
 		Stacks []dropRow `json:"stacks"`
@@ -325,6 +341,39 @@ func (m *drops) Register(r *Registry) {
 	// A street Piggy's food (objects_pigs.go goForFood) and its bite.
 	r.Provide("drops.food", m.food)
 	r.Provide("drops.eat", m.eat)
+	// G605: a stack the street makes (objects_pigs_gone.go: a Plop, a Piglet).
+	r.Provide("drops.place", m.place)
+}
+
+// place puts a stack the street made on the ground for everyone (see the header, "Placed by the
+// street"), under the player by whose act made it: the site records it, then the street hears it as
+// any drop. Off (no ledger, not loaded, a private place, a full street, a class the ledger does not
+// carry): false, and nothing is placed.
+func (m *drops) place(street string, by int64, name string, x, y float64, it tradeItem) bool {
+	cls, ok := m.table.Items[it.C]
+	if m.site == nil || !m.loaded || !dropShared(street) || !ok || it.N < 1 || it.N > cls.Max || len(m.byStreet[street]) >= dropStreetMax {
+		return false
+	}
+	m.table.cleanTag(&it, m.h.Now())
+	call := dropCall{Op: "drop-" + m.newID(), ID: by, Street: street, X: int(math.Round(x)), Y: int(math.Round(y)), Item: it}
+	site := m.site
+	m.spawn(func() {
+		a := site.dropPlace(call)
+		m.h.After(0, func() {
+			if a.Status != "settled" {
+				log.Printf("drops: placing %d %s on %s for %d: %q %s", it.N, it.C, street, by, a.Status, a.Why)
+				return
+			}
+			s := m.addRow(dropRow{ID: call.Op, By: by, Name: name, Street: street, X: float64(call.X), Y: float64(call.Y), C: it.C, N: it.N, R: it.R, T: it.T, At: m.h.Now().Unix()})
+			if s == nil {
+				return
+			}
+			log.Printf("drops: the street placed %d %s on %s for %d (%s)", s.N, s.C, s.Street, by, s.ID)
+			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_added", "stack": s.view()}, 0)
+			m.sweepSoon()
+		})
+	})
+	return true
 }
 
 // food is the stack id names on street if it is food a Piggy at (x, y) can reach and nobody is

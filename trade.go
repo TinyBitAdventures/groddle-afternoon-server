@@ -173,7 +173,8 @@ type tradeClass struct {
 	Food   bool   `json:"food,omitempty"`  // include/food.js is_food: a street Piggy eats it off the ground (drops.go)
 	Sates  bool   `json:"sates,omitempty"` // food of base cost 5 or more: feeding it sates a hungry Piggy (npc_piggy.js 672-676)
 	Cost   int    `json:"cost,omitempty"`  // a food's base_cost: what it adds to a Batterfly's food counter (npc_batterfly.js 796-797)
-	Tag    string `json:"tag,omitempty"`   // the kind of words a copy carries as t (copytags.go): name, phrases, giant, still
+	Tag    string `json:"tag,omitempty"`   // the kind of words a copy carries as t (copytags.go): name, phrases, giant, still, script, plop
+	Seed   string `json:"seed,omitempty"`  // a crop's seed class (crop_base produced_by_class): fed to a street Piggy it counts toward a Plop (objects_pigs_plops.go)
 }
 
 type tradeTable struct {

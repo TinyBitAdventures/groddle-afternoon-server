@@ -225,7 +225,7 @@ func (o *objects) armPigs() {
 	var due time.Time
 	for _, room := range o.streets {
 		for _, ob := range room {
-			if ob.spot.kind == "pig" && (due.IsZero() || ob.tickAt.Before(due)) {
+			if ob.spot.kind == "pig" && !ob.pigGone() && (due.IsZero() || ob.tickAt.Before(due)) {
 				due = ob.tickAt
 			}
 		}
@@ -256,7 +256,7 @@ func (o *objects) tickPigs() {
 	for _, street := range streets {
 		var pigs []*liveObj
 		for _, ob := range o.streets[street] {
-			if ob.spot.kind == "pig" {
+			if ob.spot.kind == "pig" && !ob.pigGone() {
 				pigs = append(pigs, ob)
 			}
 		}
@@ -373,7 +373,7 @@ func (o *objects) pigFood(street, id string, x, y float64) {
 			continue
 		}
 		ob := o.streets[street][spot.id]
-		if ob == nil || ob.hunger <= 0 || ob.trip != nil || math.Abs(spot.y-y) > pigEatDY || o.pigRooked(street, ob) {
+		if ob == nil || ob.pigGone() || ob.hunger <= 0 || ob.trip != nil || math.Abs(spot.y-y) > pigEatDY || o.pigRooked(street, ob) {
 			continue
 		}
 		px := o.pigX(street, ob)
@@ -723,6 +723,9 @@ func (o *objects) pigsToTree(street string, treeSpot *objSpot) {
 
 // tendPig is a player's verb on a street Piggy.
 func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
+	if ob.pigGone() {
+		return refuse("gone", pigTextGone) // G605 (objects_pigs_gone.go)
+	}
 	if m.Verb == "name" {
 		return o.nameAnimal(street, ob, m, perks, user)
 	}
@@ -838,12 +841,14 @@ func (o *objects) askFeed(cl *Client, m objAct, street string, spot *objSpot, pe
 	case !isFood || m.N < 1 || m.N > food.Max:
 		o.finishAct(cl, m, street, ob, before, refuse("not_food", "That Piggy doesn't want to eat that."))
 		return
-	case !food.Sates || ob.hunger == 0:
+	case (!food.Sates || ob.hunger == 0) && o.plopSeed(m.C) == "":
 		// Nothing but the feed itself changes: the food is the player's own to lose.
 		o.hold(ob, creatureHold)
 		o.finishAct(cl, m, street, ob, before, verdict{ok: true, ev: "feed"})
 		return
 	}
+	// A crop always goes through the ledger, hungry or not: its count queues Plops for the street (G605).
+	name := cl.Name()
 	o.uses.ask(cl, m.C, m.N, func(use map[string]any, code, message string) {
 		ob := o.get(street, spot)
 		before := o.state(ob)
@@ -851,9 +856,10 @@ func (o *objects) askFeed(cl *Client, m objAct, street string, spot *objSpot, pe
 			o.finishAct(cl, m, street, ob, before, refuse(code, message))
 			return
 		}
-		if ob.hunger != 0 {
+		if food.Sates && ob.hunger != 0 {
 			ob.hunger, ob.croak = 0, false
 		}
+		o.feedCrops(street, ob, m.C, m.N, cl.ID(), name)
 		o.hold(ob, creatureHold)
 		v := verdict{ok: true, ev: "feed"}
 		if use != nil {

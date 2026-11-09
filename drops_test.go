@@ -15,6 +15,7 @@ import (
 // fakeDropSite stands in for the site's groddle/v1/ledger/drop routes.
 type fakeDropSite struct {
 	drops  []dropCall
+	placed []dropCall // G605: stacks the street made
 	takes  []string
 	eats   []string
 	ground []dropRow
@@ -85,6 +86,14 @@ func (f *fakeDropSite) dropTakePart(op string, id int64, n, from int) dropAnswer
 }
 
 func (f *fakeDropSite) dropsOnGround() ([]dropRow, error) { return f.ground, f.err }
+
+func (f *fakeDropSite) dropPlace(c dropCall) dropAnswer {
+	f.placed = append(f.placed, c)
+	if f.silent {
+		return dropAnswer{}
+	}
+	return dropAnswer{Status: "settled"}
+}
 
 func (f *fakeDropSite) dropEat(op string, from int) dropAnswer {
 	f.eats = append(f.eats, fmt.Sprintf("%s:%d", op, from))
@@ -714,4 +723,37 @@ func pick(t *testing.T, frames []map[string]any, kind string) map[string]any {
 		t.Fatalf("want one %s, got %v", kind, frames)
 	}
 	return out[0]
+}
+
+// G605: a stack the street makes (a Plop, a Piglet) is placed under the player whose act made it:
+// the site records it, everyone on the street sees it, that player's 100 px guard holds it first,
+// and its words (a Plop's seeds) are checked and kept.
+func TestTheStreetPlacesAStackUnderThePlayerWhoseActMadeIt(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, _ := r.trio()
+	place := r.m.place
+	if !place(dropStreet, 7, "Ada", 1020, -100, tradeItem{C: "plop", N: 1, T: json.RawMessage(`{"seed":"seed_potato","n":40,"x":1}`)}) {
+		t.Fatal("the place was not asked")
+	}
+	r.settle()
+	if len(r.site.placed) != 1 || r.site.placed[0].ID != 7 || r.site.placed[0].Item.C != "plop" || string(r.site.placed[0].Item.T) != `{"seed":"seed_potato","n":7}` {
+		t.Fatalf("the site was asked %+v", r.site.placed)
+	}
+	if len(r.site.drops) != 0 {
+		t.Fatal("a placed stack is no drop from anyone's ledger")
+	}
+	added := only(t, drain(bo), "ground_added")
+	stack := added["stack"].(map[string]any)
+	if stack["c"] != "plop" || stack["by"].(map[string]any)["id"] != float64(7) {
+		t.Fatalf("Bo sees %v", stack)
+	}
+	drain(ada)
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": stack["id"]})
+	if f := only(t, drain(bo), "ground_taken"); f["why"] != "locked" {
+		t.Fatalf("Bo near Ada's Plop: %v", f)
+	}
+	// Not shared: a private place, or a class the ledger does not carry.
+	if place("HOME_7", 7, "Ada", 0, 0, tradeItem{C: "plop", N: 1}) || place(dropStreet, 7, "Ada", 0, 0, tradeItem{C: "nonsense", N: 1}) {
+		t.Fatal("placed where nothing is shared")
+	}
 }

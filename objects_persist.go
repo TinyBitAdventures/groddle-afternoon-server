@@ -82,11 +82,18 @@ type objRec struct {
 	Name    string `json:"name,omitempty"`
 	Namer   int64  `json:"namer,omitempty"`
 	NamedAt int64  `json:"namedAt,omitempty"`
+	// G605: a Piggy off the street (objects_pigs_gone.go), its crops toward a Plop and the Plops to come.
+	GoneDay int64          `json:"goneDay,omitempty"`
+	GoneWhy string         `json:"goneWhy,omitempty"`
+	Crops   map[string]int `json:"crops,omitempty"`
+	Plops   []plopEntry    `json:"plops,omitempty"`
 }
 
 type objFile struct {
 	V       int                           `json:"v"`
 	Streets map[string]map[string]*objRec `json:"streets"`
+	// G605: each player's last capture per street (Unix ms), for the 42 "game days" (objects_pigs_gone.go).
+	Captures map[string]map[int64]int64 `json:"captures,omitempty"`
 }
 
 func msOf(t time.Time) int64 {
@@ -110,7 +117,8 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
 		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
 		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food,
-		Name: ob.userName, Namer: ob.namer, NamedAt: msOf(ob.namedAt)}
+		Name: ob.userName, Namer: ob.namer, NamedAt: msOf(ob.namedAt), GoneDay: ob.goneDay, GoneWhy: ob.goneWhy,
+		Crops: ob.crops, Plops: ob.plops}
 	if ob.trip != nil {
 		t := *ob.trip
 		r.Trip = &t
@@ -194,6 +202,10 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 		if name := sanitizeAnimalName(r.Name); name != "" {
 			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
 		}
+		if r.GoneDay > 0 && (r.GoneWhy == "capture" || r.GoneWhy == "youth") {
+			ob.goneDay, ob.goneWhy = r.GoneDay, r.GoneWhy
+		}
+		ob.crops, ob.plops = o.plopsFromRecord(r.Crops, r.Plops)
 		if t := r.Trip; t != nil && t.Leg >= 0 && t.Eat >= 0 && t.Leg < 3_600_000 && t.Eat < 3_600_000 {
 			trip := *t
 			ob.trip = &trip
@@ -259,6 +271,7 @@ func (o *objects) load() error {
 		return err
 	}
 	n, dead, dropped := 0, 0, 0
+	o.capturesLoad(f.Captures)
 	for street, recs := range f.Streets {
 		spots := o.w.streets[street]
 		for id, r := range recs {
@@ -360,6 +373,11 @@ func (o *objects) resume() {
 				if ob.trip != nil {
 					o.armTrip(street, ob)
 				}
+				// G605: Plops still to come carry on; a Piggy away keeps the day timer armed.
+				o.resumePlops(street, ob)
+				if ob.pigGone() {
+					trees = true
+				}
 			case "chicken":
 				// A Chicken on an egg: it hatches when it was due (its owner is not here after a
 				// restart until they connect again, so an egg due while the server was down is lost).
@@ -391,7 +409,7 @@ func (o *objects) save() bool {
 	if o.path == "" {
 		return true
 	}
-	f := objFile{V: 1, Streets: map[string]map[string]*objRec{}}
+	f := objFile{V: 1, Streets: map[string]map[string]*objRec{}, Captures: o.capturesRecord()}
 	for street, room := range o.streets {
 		if len(room) == 0 {
 			continue
