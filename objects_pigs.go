@@ -66,6 +66,14 @@ package main
 // runs on the path's clock, so a player at it, a landed verb and the Rook freeze it for everyone.
 // A nibble is held to each player's daily limit of this Piggy (ak_piggy_nibble interval_limit) and
 // its Meat is credited to the ledger (credits.go "take").
+// A street Piggy's name is everyone's too (namePig below), as the source's user_name on the one
+// npc_piggy item: items/include/animal_naming.js canName 3-22 and onInputBoxResponse 38-62,
+// npc_piggy.js verbs.name 750-784 and rename 786-816. Animal Kinship V names (the client says so
+// with the "ak5" perk, as "ak6" for a nibble); a Piggy with no name, the player who named it, or
+// anyone an hour after the last naming may (re)name it; a sad Piggy refuses a first name (765).
+// The name is cut to 32 characters of a-z, 0-9 and spaces (41) and goes through the word filter
+// (wordfilter.go, the remake's own addition) before anyone sees it. The street hears it as obj_ev
+// "name" (sendBubble with no pc, 49: everyone sees 'And they shall call me "..."').
 // A street Piggy outlives a restart of the server (objects_persist.go, -objects-file): its mood,
 // hunger, petters and clock are kept, and the ticks it missed while the server was down run when
 // it is back.
@@ -98,7 +106,55 @@ const (
 	pigNotMood   = "That Piggy doesn't feel like being nibbled right now." // 876
 	pigNeedsPet  = "Give that Piggy some love first!"                      // 897
 	pigNotHungry = "That Piggy is not hungry."
+	pigNameSad   = "This piggy is sad, and in no mood to be called names. Even nice ones." // 765
 )
+
+// Naming (items/include/animal_naming.js). The source hides the verb where these refuse; the lines are ours.
+const (
+	pigNameMax     = 32        // onInputBoxResponse 41: value.substr(0, 32)
+	pigRenameAfter = time.Hour // canName 18: time() - named_on > 3600
+	pigNameSkill   = "You need to know Animal Kinship V to name an animal."
+	pigNameTaken   = "Someone named this Piggy less than an hour ago."
+	pigNameEmpty   = "Names need at least one letter or number." // js/animal-husbandry.js nameAnimal
+)
+
+// sanitizeAnimalName is onInputBoxResponse 41 (substr(0, 32), then only a-z, 0-9 and spaces) and the
+// word filter after it, as the game's js/animal-husbandry.js nameAnimal does.
+func sanitizeAnimalName(raw string) string {
+	if len(raw) > pigNameMax {
+		raw = raw[:pigNameMax]
+	}
+	var b strings.Builder
+	for i := 0; i < len(raw); i++ {
+		if c := raw[i]; isWordLetter(c) || isWordDigit(c) || c == ' ' {
+			b.WriteByte(c)
+		}
+	}
+	return filterWords(b.String())
+}
+
+// namePig is the name and rename verbs on a street Piggy (see the header).
+func (o *objects) namePig(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
+	if !perks["ak5"] {
+		return refuse("skill", pigNameSkill) // canName 6
+	}
+	now := o.h.Now()
+	if ob.userName != "" && ob.namer != user && now.Sub(ob.namedAt) <= pigRenameAfter {
+		return refuse("named", pigNameTaken) // canName 12-18
+	}
+	if ob.userName == "" && o.w.sad[street] {
+		return refuse("sad", pigNameSad) // verbs.name conditions 764-766 (rename has no such check)
+	}
+	name := sanitizeAnimalName(m.Name)
+	if strings.TrimSpace(name) == "" {
+		return refuse("empty", pigNameEmpty)
+	}
+	if name == ob.userName {
+		return refuse("unchanged", "") // 43: value != this.user_name
+	}
+	ob.userName, ob.namer, ob.namedAt = name, user, now
+	return verdict{ok: true, extra: map[string]any{"name": name}, ev: "name"}
+}
 
 // pigDev is GRODDLE_TREES_DEV=1 only, for QA: {"t":"obj_dev","id":"pig:4","hunger":5,"mood":0,"tick":true}
 // sets a Piggy on the player's street and, with tick, runs its next twice-daily tick now.
@@ -651,6 +707,9 @@ func (o *objects) pigsToTree(street string, treeSpot *objSpot) {
 
 // tendPig is a player's verb on a street Piggy.
 func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
+	if m.Verb == "name" {
+		return o.namePig(street, ob, m, perks, user)
+	}
 	if o.w.sad[street] {
 		return refuse("sad", pigSad)
 	}

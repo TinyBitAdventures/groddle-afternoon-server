@@ -78,6 +78,10 @@ type objRec struct {
 	Food    int                      `json:"food,omitempty"`
 	// A street Piggy on its way to food (objects_pigs.go pigTrip), on its path's clock.
 	Trip *pigTrip `json:"trip,omitempty"`
+	// A street Piggy's name, who gave it and when (objects_pigs.go namePig).
+	Name    string `json:"name,omitempty"`
+	Namer   int64  `json:"namer,omitempty"`
+	NamedAt int64  `json:"namedAt,omitempty"`
 }
 
 type objFile struct {
@@ -105,7 +109,8 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Maturity: ob.maturity, Day: ob.day, WoodCount: ob.woodCount, PoisonEnd: msOf(ob.poisonEnd), PoisonBy: ob.poisonBy,
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
 		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
-		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food}
+		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food,
+		Name: ob.userName, Namer: ob.namer, NamedAt: msOf(ob.namedAt)}
 	if ob.trip != nil {
 		t := *ob.trip
 		r.Trip = &t
@@ -185,6 +190,9 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 				ob.petters = map[int64]int64{}
 			}
 			ob.petters[id] = day
+		}
+		if name := sanitizeAnimalName(r.Name); name != "" {
+			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
 		}
 		if t := r.Trip; t != nil && t.Leg >= 0 && t.Eat >= 0 && t.Leg < 3_600_000 && t.Eat < 3_600_000 {
 			trip := *t

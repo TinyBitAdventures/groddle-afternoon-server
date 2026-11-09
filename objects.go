@@ -189,8 +189,8 @@ var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab|dragon):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true}
-	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true}
+		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true}
+	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true}
 )
 
 // The source's refusals (items/*.js), with the remake's copy where the source
@@ -496,6 +496,9 @@ type liveObj struct {
 	petters      map[int64]int64
 	eatingFood   string      // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
 	trip         *pigTrip    // pig: its walk to food and home (objects_pigs.go startTrip)
+	userName     string      // pig: its name, everyone's (animal_naming.js user_name; objects_pigs.go namePig)
+	namer        int64       // pig: who named it (pc_namer)
+	namedAt      time.Time   // pig: when (named_on)
 	tripStop     func() bool // pig: the timer for the trip's next step
 
 	// chicken, butterfly, batterfly (objects_creatures.go) and a Piggy's uses: each player's uses of
@@ -820,6 +823,10 @@ func (o *objects) state(ob *liveObj) map[string]any {
 			// Its walk to food and home, on its path's clock (objects_pigs.go startTrip).
 			m["trip"] = map[string]any{"x0": t.X0, "x1": t.X1, "c0": t.C0, "leg": t.Leg, "eat": t.Eat}
 		}
+		if ob.userName != "" {
+			// Its name, everyone's (objects_pigs.go namePig): who gave it and how long ago (ms).
+			m["name"], m["namer"], m["named"] = ob.userName, ob.namer, max(0, now.Sub(ob.namedAt).Milliseconds())
+		}
 		return m
 	case "wood":
 		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
@@ -929,11 +936,12 @@ type objAct struct {
 	Verb  string   `json:"verb"`
 	Perks []string `json:"perks"`
 	Skill string   `json:"skill"`
-	On    string   `json:"on"` // eat: the tree whose fruit a Piggy ate
-	Ms    int64    `json:"ms"` // poison, GRODDLE_TREES_DEV=1 only: the die timer for QA
-	C     string   `json:"c"`  // feed: the food's class (G335 slice 5)
-	N     int      `json:"n"`  // feed: how many of it, one stack at most
-	At    int64    `json:"at"` // wait: the path's clock (server ms minus lag) where the player's screen stopped the animal
+	On    string   `json:"on"`   // eat: the tree whose fruit a Piggy ate
+	Ms    int64    `json:"ms"`   // poison, GRODDLE_TREES_DEV=1 only: the die timer for QA
+	C     string   `json:"c"`    // feed: the food's class (G335 slice 5)
+	N     int      `json:"n"`    // feed: how many of it, one stack at most
+	At    int64    `json:"at"`   // wait: the path's clock (server ms minus lag) where the player's screen stopped the animal
+	Name  string   `json:"name"` // name: what the player typed for a street Piggy (objects_pigs.go namePig)
 }
 
 // verdict is what one verb decided: ok, or a refusal code and line; extra rides on obj_ok.
@@ -967,7 +975,7 @@ func refuse(code, message string) verdict { return verdict{code: code, message: 
 
 func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	var m objAct
-	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.Perks) > 8 || len(m.Skill) > 32 || len(m.On) > 40 || len(m.C) > 64 || m.N < 0 || m.N > tradeSlotMax {
+	if json.Unmarshal(frame, &m) != nil || m.Req < 1 || m.Req > 1<<31 || len(m.Perks) > 8 || len(m.Skill) > 32 || len(m.On) > 40 || len(m.C) > 64 || len(m.Name) > 64 || m.N < 0 || m.N > tradeSlotMax {
 		o.h.ErrorLocked(cl, "bad_obj", "That object message did not check out.")
 		return
 	}
@@ -1126,6 +1134,9 @@ func (o *objects) finishAct(cl *Client, m objAct, street string, ob *liveObj, be
 		ev := map[string]any{"t": "obj_ev", "street": street, "id": ob.spot.id, "ev": v.ev, "by": cl.ID()}
 		if m.C != "" {
 			ev["c"] = m.C
+		}
+		if name, ok := v.extra["name"].(string); ok && v.ev == "name" {
+			ev["name"] = name // a Piggy named: everyone sees its bubble (animal_naming.js 49)
 		}
 		o.h.BroadcastStreetLocked(street, ev, cl.ID())
 	}
