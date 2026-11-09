@@ -291,3 +291,67 @@ func TestMachineActsAreRateLimited(t *testing.T) {
 		t.Fatal("a burst past the limit is slowed")
 	}
 }
+
+// Lane machines (#152): in a Community Machine Room anyone sets their own machine down and acts
+// on anyone's; everyone in the room and the owner anywhere are told; nowhere else but a home.
+func TestMachinesStandInTheCommunityMachineRooms(t *testing.T) {
+	r := newMachineRig(t)
+	for street, place := range map[string]string{"GCR101Q98A12EHH": "mr:meadow", "GA9MU59GB792T80": "mr:besara", "GIF16EM56A12FSB": "mr:forest"} {
+		for _, owner := range []int64{7, 9, 12345} {
+			if p, s := machinePlace(street, owner); p != place || s != street {
+				t.Fatalf("%s for %d: %q %q", street, owner, p, s)
+			}
+		}
+	}
+	if p, _ := machinePlace("LCR101Q98A12EHH", 7); p != "" {
+		t.Fatalf("the room's L tsid is not a street anyone stands on: %q", p)
+	}
+	ada, bo, cy := r.connect(7, "Ada"), r.connect(9, "Bo"), r.connect(11, "Cy")
+	r.join(ada, "GIF16EM56A12FSB")
+	r.join(bo, "GIF16EM56A12FSB")
+	r.join(cy, "LA5101HF7F429V")
+	drain(ada)
+	drain(bo)
+	drain(cy)
+	r.do(bo, map[string]any{"t": "home_machine", "req": 1, "owner": 7, "verb": "place", "class": "fuelmaker", "rx": 200})
+	if f := only(t, drain(bo), "home_machine_done"); f["why"] != "own" {
+		t.Fatalf("only your own machine goes down, in a room too: %v", f)
+	}
+	r.do(ada, map[string]any{"t": "home_machine", "req": 2, "owner": 7, "verb": "place", "class": "fuelmaker", "rx": 200, "fuel": 80})
+	r.settle()
+	if c := r.site.calls[0]; c.Place != "mr:forest" || c.Owner != 7 || c.Actor != 7 || c.Verb != "place" {
+		t.Fatalf("the site hears the room: %+v", c)
+	}
+	only(t, drain(ada), "home_machine_done")
+	if a := only(t, drain(bo), "home_machine_changed"); a["verb"] != "place" || a["owner"] != float64(7) {
+		t.Fatalf("Bo in the room sees it go down: %v", a)
+	}
+	// Cy walks in and uses Ada's machine; Ada is told, so is Bo.
+	r.join(cy, "GIF16EM56A12FSB")
+	drain(ada)
+	drain(bo)
+	drain(cy)
+	r.do(cy, map[string]any{"t": "home_machine", "req": 3, "owner": 7, "verb": "use", "id": "hm-00000000000000aa", "key": "fuel_cell", "qty": 1})
+	r.settle()
+	if c := r.site.calls[1]; c.Place != "mr:forest" || c.Owner != 7 || c.Actor != 11 || c.Key != "fuel_cell" {
+		t.Fatalf("a stranger uses it: %+v", c)
+	}
+	only(t, drain(cy), "home_machine_done")
+	only(t, drain(ada), "home_machine_changed")
+	only(t, drain(bo), "home_machine_changed")
+	// Ada leaves for a public street: she is still told; acts from there are refused.
+	r.join(ada, "LA5101HF7F429V")
+	drain(ada)
+	r.do(cy, map[string]any{"t": "home_machine", "req": 4, "owner": 7, "verb": "collect", "id": "hm-00000000000000aa"})
+	r.settle()
+	if a := only(t, drain(ada), "home_machine_changed"); a["verb"] != "collect" {
+		t.Fatalf("the owner is told wherever she is: %v", a)
+	}
+	r.do(ada, map[string]any{"t": "home_machine", "req": 5, "owner": 7, "verb": "take", "id": "hm-00000000000000aa"})
+	if f := only(t, drain(ada), "home_machine_done"); f["why"] != "away" {
+		t.Fatalf("picked up only from in the room: %v", f)
+	}
+	if len(r.site.calls) != 3 {
+		t.Fatalf("the refusal never reaches the site: %d", len(r.site.calls))
+	}
+}

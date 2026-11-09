@@ -26,6 +26,15 @@ package main
 // the pool. The actor is answered; everyone else on that home street and the
 // owner (online anywhere) are told how the machine stands now.
 //
+// The Community Machine Rooms (lane machines, report #152; Austin 2026-11-08:
+// "Allow machines in the community machine rooms only."): anyone standing in
+// the Meadow, Besara or Forest room (config_prod.js:1332 machine_rooms) acts
+// there on any player's machine, named by its owner, and sets their own down
+// (place "mr:meadow", "mr:besara", "mr:forest"). A room is no one's home, so
+// no pass and no key: the site keeps the rows (the same table, owner the one
+// who set it down) and decides the rest; everyone in the room and the owner,
+// online anywhere, are told. A machine stays there while its owner is away.
+//
 // Client to server:
 //
 //	{"t":"home_machine","req":3,"owner":7,"verb":"place","class":"fuelmaker","rx":120,"fuel":50}
@@ -61,7 +70,7 @@ const (
 	machineEvery            = time.Second
 	machineRxMax            = 20000 // HomeMachines::RX_MAX
 
-	machineTextAway = "You need to be in their home to do that."
+	machineTextAway = "You need to be in their home or a Community Machine Room to do that."
 	machineTextOwn  = "Only the owner can set a machine down here."
 	machineTextOff  = "That can't be done right now."
 	machineTextBad  = "Nothing to do here."
@@ -274,9 +283,20 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 	})
 }
 
+// machineRooms are the three Community Machine Rooms (config_prod.js:1332, as built: G prefix) and their places.
+var machineRooms = map[string]string{
+	"GCR101Q98A12EHH": "mr:meadow",
+	"GA9MU59GB792T80": "mr:besara",
+	"GIF16EM56A12FSB": "mr:forest",
+}
+
 // machinePlace names where in owner's home a street is: "street" (HOME_<owner>), "house"
-// (HOUSE_<owner>) or "tower:<floor>" (TOWER_<owner>_<floor>); "" anywhere else.
+// (HOUSE_<owner>) or "tower:<floor>" (TOWER_<owner>_<floor>); in a machine room its place,
+// whoever the owner; "" anywhere else.
 func machinePlace(street string, owner int64) (string, string) {
+	if p := machineRooms[street]; p != "" {
+		return p, street
+	}
 	if t := towerOwner(street); t > 0 {
 		if t != owner {
 			return "", ""
