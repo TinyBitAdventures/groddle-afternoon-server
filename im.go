@@ -45,7 +45,11 @@ package main
 //	        (a line's "r" is left out while it has none; refused: {"t":"error","code":"react",…} or slow_down)
 //	{"t":"im_no","reason":"…","with":9,"message":"…"}  an im_send refused: reason is the source's
 //	        ("self", "ignoring you", "on your ignore list", "offline") or ours ("full": imUnreadMax waiting
-//	        unread, "slow_down"); the client says "<Name> is <reason>" as the source's did (RightSideManager.as:600)
+//	        unread, "slow_down", "restricted": a moderator paused this player's IMs, moderation.go); the
+//	        client says "<Name> is <reason>" as the source's did (RightSideManager.as:600)
+//	{"t":"im_deleted","with":9,"line":12,"at":…}   a moderator deleted a reported line (moderation.go im_delete)
+//	{"t":"chat_purged","player":9,"since":…}       a moderator took everything player 9 said since then away
+//	        (moderation.go mod_purge): their lines leave every IM pane, as every chat pane
 //
 // Who may IM whom: anyone online, and while they are offline anyone on your
 // buddy list or who has you on theirs (the site signs both, buddies.go), or
@@ -72,7 +76,9 @@ package main
 // change and at shutdown. IM text is private: it is never written to the chat
 // log (chatlog.go) or the server's log, and the administrators' console has no
 // call that reads it (nor does the site's: its groddle_im_lines answer only the
-// conversation's two players). Rates: imBurst lines then one each imEvery; imNewBurst new
+// conversation's two players, and a moderator only the lines a recipient
+// reported, groddle-afternoon-site src/Moderation.php). What moderation learns
+// here has no words in it (modsignals.go: counts per sender). Rates: imBurst lines then one each imEvery; imNewBurst new
 // conversations then one each imNewEvery.
 
 import (
@@ -404,6 +410,7 @@ func (m *ims) sendAs(from int64, name string, to int64, raw string, parent int64
 		return "self", "You can't IM yourself."
 	}
 	if !m.allowID("im", from, imBurst, imEvery) {
+		m.h.signalIMRefusedLocked(from, name) // modsignals.go: a count, no words
 		return "slow_down", "Slow down a little."
 	}
 	if ign, ok := m.h.ProvidedLocked("buddies.ignoring").(func(int64, int64) bool); ok {
@@ -416,6 +423,10 @@ func (m *ims) sendAs(from int64, name string, to int64, raw string, parent int64
 	}
 	if !m.vouched(from, to) {
 		return "offline", "That player is offline."
+	}
+	if m.h.modIMRestrictedLocked(from, to) {
+		// moderation.go: a moderator stopped this player's IMs (to anyone, or to non-buddies).
+		return "restricted", "A moderator has paused your IMs for now."
 	}
 	k := pairOf(from, to)
 	c := m.convs[k]
@@ -439,6 +450,7 @@ func (m *ims) sendAs(from int64, name string, to int64, raw string, parent int64
 			}
 		}
 		if waiting >= imUnreadMax {
+			m.h.signalIMRefusedLocked(from, name) // modsignals.go
 			return "full", "They have " + strconv.Itoa(waiting) + " of your IMs to read already."
 		}
 	}
@@ -459,7 +471,8 @@ func (m *ims) sendAs(from int64, name string, to int64, raw string, parent int64
 	c.Closed = [2]bool{}
 	c.Read[c.side(from)] = c.Seq // your own line is read
 	m.saveSoon()
-	m.h.storeChatLocked(imEntry(c, l)) // chatstore.go: kept on the site, for the two of them only
+	m.h.storeChatLocked(imEntry(c, l))                     // chatstore.go: kept on the site, for the two of them only
+	m.h.signalIMSentLocked(from, name, to, l.Text != text) // modsignals.go: who to and whether the filter changed it, never the words
 	m.deliver(c, l, from, to)
 	return "", ""
 }

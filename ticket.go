@@ -24,6 +24,8 @@ type Claims struct {
 	Off bool `json:"off,omitempty"`
 	// Cone: the character is under the chat cone of silence when the ticket was made (hub.go, G480).
 	Cone bool `json:"cone,omitempty"`
+	// Mod: a moderator's restrictions that stand when the ticket was made (moderation.go).
+	Mod *modClaim `json:"mod,omitempty"`
 }
 
 var (

@@ -200,7 +200,7 @@ func TestChatDeleteRefusesWhatIsNotAChannelLine(t *testing.T) {
 		{"lid": 0, "rooms": "global", "by": 1},
 		{"lid": 5, "rooms": "global", "by": 0},
 		{"lid": 5, "rooms": "", "by": 1},
-		{"lid": 5, "rooms": "group:12", "by": 1}, // group chats are not offered
+		{"lid": 5, "rooms": "group:12,global", "by": 1}, // a group's chat is named alone (moderation.go)
 		{"lid": 5, "rooms": "local", "by": 1},
 		{"lid": 5, "rooms": "global", "by": 1, "room": "trade"},
 	} {

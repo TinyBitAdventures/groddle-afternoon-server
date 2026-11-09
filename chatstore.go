@@ -23,6 +23,8 @@ package main
 //	{"k":"im_react","seq":4,"a":7,"b":9,"line":12,"at":1730000000000,"r":[…]}           the IM line's reactions now
 //	{"k":"delete","seq":5,"lid":1730000000123,"by":1,"at":1730000000000}             an administrator deleted that channel
 //	        or thread line for everyone (chatdelete.go); at is when, by who
+//	{"k":"purge","seq":6,"id":7,"at":1730000000000,"by":1}   a moderator purged what player 7 said from at on (moderation.go)
+//	{"k":"flag","seq":7,"id":7,"name":"Ada","signal":"im_fanout","n":9,"window":600}   a moderation signal (modsignals.go), no words
 //
 // room: global, help, newbie, trade or group:<id> (channels.go rooms). Every
 // entry is idempotent at the site: a line by its lid (an IM line by its pair,
@@ -103,8 +105,12 @@ type chatEntry struct {
 	// Parent is the line a thread reply is under (threads.go): its lid for a channel line, its line id
 	// for an IM line; 0 (left out) for a line of the channel or conversation itself.
 	Parent int64 `json:"parent,omitempty"`
-	// By is the administrator who deleted a line (a "delete").
+	// By is the administrator who deleted a line (a "delete"), or the moderator of a "purge".
 	By int64 `json:"by,omitempty"`
+	// A "flag" (modsignals.go): the signal, its count and its window in seconds; no words.
+	Signal string `json:"signal,omitempty"`
+	N      int    `json:"n,omitempty"`
+	Window int    `json:"window,omitempty"`
 }
 
 // MarshalJSON writes a react's "r" even when it is empty (every reaction taken off).

@@ -178,7 +178,7 @@ func (m *threads) say(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, chanNotIn)
 		return
 	}
-	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) {
+	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) || m.h.modSilencedRoomLocked(id, room) { // moderation.go
 		m.h.logChatLocked("channel", room, cl, text, "silenced", nil)
 		m.refuse(cl, chanSuspended)
 		return

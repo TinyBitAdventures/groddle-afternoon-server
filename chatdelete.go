@@ -16,8 +16,9 @@ package main
 //	        400 {"status":"bad"}
 //
 // rooms: the channel rooms the line may be in (the website's key: Live Help is
-// help or newbie); global, help, newbie and trade only (group chats are not
-// offered). room, parent, author, at and text: the site's kept row, when it has
+// help or newbie); global, help, newbie and trade, or one group's chat alone
+// ("group:12", since the moderators' delete line, moderation.go: Austin
+// 2026-11-09). The group's members hear chat_deleted with "channel":"group:12". room, parent, author, at and text: the site's kept row, when it has
 // one (a line said a moment ago may not have reached it yet: this server's
 // chat store sends lines every few seconds, so a line it still holds is found
 // here). The line is found in the room's history, in a thread this server holds
@@ -74,6 +75,10 @@ func chatDeleteService(h *Hub, body []byte) (int, any) {
 		return http.StatusBadRequest, map[string]string{"status": "bad"}
 	}
 	rooms, ok := chanWords(c.Rooms, chatDeleteRooms)
+	if _, group := groupChannel(c.Rooms); group {
+		// A group's chat (moderation.go, Austin 2026-11-09): one room, named alone.
+		rooms, ok = map[string]bool{c.Rooms: true}, true
+	}
 	if !ok || len(rooms) == 0 || (c.Room != "" && !rooms[c.Room]) {
 		return http.StatusBadRequest, map[string]string{"status": "bad"}
 	}

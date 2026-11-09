@@ -159,6 +159,7 @@ func (h *Hub) ConnectWeb(c Claims) *Client {
 	tabs[cl] = true
 	h.off[c.Sub] = c.Off
 	h.inputAt[c.Sub] = h.now()
+	h.applyModClaimLocked(c.Sub, c.Mod, c.Iat) // moderation.go
 	h.queueLocked(cl, map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "web": true, "off": c.Off})
 	for _, fn := range h.onWeb {
 		fn(cl, "connect")

@@ -87,7 +87,7 @@ func webSayService(h *Hub, body []byte) (int, any) {
 	if name == "" {
 		return http.StatusBadRequest, map[string]string{"status": "bad"}
 	}
-	if ((room == "global" || room == "trade") && silence["chat"]) || ((room == "help" || room == "newbie") && silence["help"]) {
+	if ((room == "global" || room == "trade") && silence["chat"]) || ((room == "help" || room == "newbie") && silence["help"]) || h.modSilencedRoomLocked(c.Player, room) {
 		h.logChatAsLocked("channel", room, c.Player, name, text, "silenced", nil)
 		return http.StatusForbidden, map[string]string{"status": "silenced", "message": chanSuspended}
 	}

@@ -149,6 +149,8 @@ type chatlogDeleted struct {
 	At     string `json:"at"`
 	By     int64  `json:"by"`
 	ByName string `json:"by_name"`
+	// Purge: the line went in a moderator's purge of everything its player said (moderation.go).
+	Purge bool `json:"purge,omitempty"`
 }
 
 // chatDeletion is one line of deleted.jsonl (chatdelete.go writes it).
@@ -161,6 +163,8 @@ type chatDeletion struct {
 	Text   string `json:"text,omitempty"`
 	By     int64  `json:"by"`
 	ByName string `json:"by_name"`
+	// Purge: a moderator took everything player ID said from LineAt on out of sight (moderation.go).
+	Purge bool `json:"purge,omitempty"`
 }
 
 type chatLog struct {
@@ -245,6 +249,9 @@ func (h *Hub) logChatAsLocked(kind, where string, id int64, name, text, why stri
 
 // logChatLineLocked writes a line with its id (a delivered channel or thread line), so a deletion finds it.
 func (h *Hub) logChatLineLocked(kind, where string, id int64, name, text, why string, to []int64, lid int64) {
+	if why != "" {
+		h.signalChatRefusedLocked(id, name) // modsignals.go: refused lines are a moderation signal
+	}
 	c := h.chatlogOf()
 	if c == nil {
 		return
@@ -452,7 +459,7 @@ func (c *chatLog) deletions() []chatDeletion {
 	var out []chatDeletion
 	for _, row := range rows[:len(rows)-1] {
 		var d chatDeletion
-		if json.Unmarshal([]byte(row), &d) == nil && d.Lid > 0 {
+		if json.Unmarshal([]byte(row), &d) == nil && (d.Lid > 0 || (d.Purge && d.ID > 0)) {
 			out = append(out, d)
 		}
 	}
@@ -501,7 +508,15 @@ func (c *chatLog) pruneDeletions(cutoff time.Time) {
 
 // deletedMark is how a search marks l when one of dels deleted it, nil otherwise.
 func deletedMark(l chatLine, at time.Time, dels []chatDeletion) *chatlogDeleted {
-	if l.Kind != "channel" || !l.Delivered {
+	if !l.Delivered {
+		return nil
+	}
+	for _, d := range dels {
+		if d.Purge && d.ID == l.ID && at.UnixMilli() >= d.LineAt {
+			return &chatlogDeleted{At: d.At, By: d.By, ByName: d.ByName, Purge: true}
+		}
+	}
+	if l.Kind != "channel" {
 		return nil
 	}
 	for _, d := range dels {

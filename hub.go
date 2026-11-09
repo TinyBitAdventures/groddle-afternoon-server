@@ -210,8 +210,9 @@ func (h *Hub) Connect(c Claims) *Client {
 	h.off[c.Sub] = c.Off
 	h.inputAt[c.Sub] = h.now()
 	h.setConeLocked(c.Sub, c.Cone, c.Iat)
+	h.applyModClaimLocked(c.Sub, c.Mod, c.Iat) // moderation.go
 	hello := map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "off": c.Off}
-	if h.cones[c.Sub].on {
+	if h.modConeLocked(c.Sub) {
 		hello["cone"] = true
 	}
 	h.queueLocked(cl, hello)
@@ -313,7 +314,7 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		if cl.street == "" || text == "" {
 			return
 		}
-		if h.cones[cl.id].on { // main.js doLocalChat 1708-1710
+		if h.modConeLocked(cl.id) { // main.js doLocalChat 1708-1710; a moderator's chat silence too (moderation.go)
 			h.logChatLocked("local", cl.street, cl, text, "silenced", nil) // chatlog.go; before the reply, which may drop a client that stopped reading
 			h.replyLocked(cl, "suspended", chanSuspended)
 			return

@@ -179,7 +179,7 @@ func (m *channels) audience(room string, id int64) ([]int64, string) {
 	if r == nil || !r.members[id] || !open || w == nil || w.exp.Before(m.h.Now()) {
 		return nil, chanNotIn
 	}
-	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) {
+	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) || m.h.modSilencedRoomLocked(id, room) {
 		return nil, chanSuspended
 	}
 	ids := make([]int64, 0, len(r.members))
@@ -624,7 +624,7 @@ func (m *channels) say(cl *Client, frame json.RawMessage) {
 		return
 	}
 	// main.js:5808-5843: the cones of silence.
-	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) {
+	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) || m.h.modSilencedRoomLocked(id, room) { // moderation.go
 		m.h.logChatLocked("channel", room, cl, text, "silenced", nil) // chatlog.go
 		m.refuse(cl, chanSuspended)
 		return
