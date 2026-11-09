@@ -506,8 +506,15 @@ func TestRookReviveNeedsThreeHealersOrABalm(t *testing.T) {
 		t.Fatalf("first dose: %v", y)
 	}
 	r.send(a, map[string]any{"t": "rook_revive", "key": "npc_piggy:0"})
-	if code := rookLastNo(r.drain(a)); code != "done" {
+	fa0 := r.drain(a)
+	if code := rookLastNo(fa0); code != "done" {
 		t.Fatalf("one dose per player: %q", code)
+	}
+	// npc_piggy.js revive conditions 236-237, word for word.
+	for _, f := range fa0 {
+		if f["t"] == "rook_no" && f["message"] != "You have already helped revive this Piggy. Now others need to help!" {
+			t.Fatalf("one dose per player says %q", f["message"])
+		}
 	}
 	r.send(b, map[string]any{"t": "rook_revive", "key": "npc_piggy:0"})
 	fb := r.drain(b)

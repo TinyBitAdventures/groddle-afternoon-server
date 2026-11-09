@@ -131,6 +131,30 @@ import (
 //go:embed data/rook.json
 var rookJSON []byte
 
+// rookSingle is each rookable class's name_single (items/npc_piggy.js 5 and the others), for the
+// revive refusals every one of them words the same (npc_piggy.js revive conditions 236-240).
+var rookSingle = map[string]string{
+	"npc_piggy": "Piggy", "npc_chicken": "Chicken", "npc_butterfly": "Butterfly", "npc_batterfly": "Batterfly",
+	"npc_kitty_chicken": "Heli Kitty", "trant_fruit": "Fruit Tree", "trant_bean": "Bean Tree", "trant_bubble": "Bubble Tree",
+	"trant_egg": "Egg Plant", "trant_gas": "Gas Plant", "trant_spice": "Spice Plant", "wood_tree": "Wood Tree", "paper_tree": "Paper Tree",
+}
+
+func rookSingleOf(class string) string {
+	if s := rookSingle[class]; s != "" {
+		return s
+	}
+	return "one"
+}
+
+// rookReviveDone and rookReviveFull: npc_piggy.js 236-240 (one dose a player; three at most).
+func rookReviveDone(class string) string {
+	return "You have already helped revive this " + rookSingleOf(class) + ". Now others need to help!"
+}
+
+func rookReviveFull(class string) string {
+	return "Enough people are already helping to revive this " + rookSingleOf(class) + "."
+}
+
 // rookTextBalming: ours, while a balm on the same rooked thing waits for the ledger.
 const rookTextBalming = "Someone is already applying a balm to this one."
 
@@ -1441,12 +1465,12 @@ func (m *rook) handleRevive(cl *Client, frame json.RawMessage) {
 		// 112: one dose per player; canRevive 365-372: three at most.
 		for _, id := range r.healers {
 			if id == cl.ID() {
-				m.no(cl, "revive", "done", "You have already helped revive this one.")
+				m.no(cl, "revive", "done", rookReviveDone(r.class))
 				return
 			}
 		}
 		if len(r.healers) >= rookHealers {
-			m.no(cl, "revive", "full", "Enough doses are already reviving this one.")
+			m.no(cl, "revive", "full", rookReviveFull(r.class))
 			return
 		}
 	}
