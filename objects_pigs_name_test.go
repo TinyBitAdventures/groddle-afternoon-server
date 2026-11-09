@@ -48,7 +48,7 @@ func TestAStreetPiggysNameIsEveryones(t *testing.T) {
 	// canName 12-18: Bo may not rename it within the hour; Ada, who named it, may.
 	r.now = r.now.Add(time.Minute)
 	r.act(b, 1, "pig:2", "name", map[string]any{"name": "Babe", "perks": ak5})
-	if no := r.only(b, "obj_no"); no["code"] != "named" || no["message"] != pigNameTaken {
+	if no := r.only(b, "obj_no"); no["code"] != "named" || no["message"] != nameTaken("pig") {
 		t.Fatalf("Bo's rename within the hour answered %v", no)
 	}
 	r.act(a, 3, "pig:2", "name", map[string]any{"name": "Wilbur", "perks": ak5})
@@ -144,5 +144,57 @@ func TestSanitizeAnimalName(t *testing.T) {
 		if got := sanitizeAnimalName(in); got != want {
 			t.Errorf("sanitizeAnimalName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// The street's Chickens and Butterflies take the same include (npc_chicken.js 677/707,
+// npc_butterfly.js 471/506): named by the same rules, with no sad check; kept across a restart.
+func TestAStreetChickensAndButterflysNameIsEveryones(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "objects.json")
+	r := newObjRigAt(t, path, time.Time{})
+	ck := sharedWorld.streets[defaultStreet]["chicken:0"]
+	bf := sharedWorld.streets[defaultStreet]["butterfly:0"]
+	if ck == nil || bf == nil {
+		t.Fatal("the default street lays out no Chicken or Butterfly")
+	}
+	a := r.player(1, "Ada", defaultStreet, ck.x, ck.y)
+	b := r.player(2, "Bo", defaultStreet, ck.x+100, ck.y)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	r.drain(a)
+	ak5 := []string{"ak5"}
+	r.act(a, 1, "chicken:0", "name", map[string]any{"name": "Henrietta"})
+	if no := r.only(a, "obj_no"); no["code"] != "skill" {
+		t.Fatalf("a name without Animal Kinship V answered %v", no)
+	}
+	r.act(a, 2, "chicken:0", "name", map[string]any{"name": "Henrietta", "perks": ak5})
+	if ok := r.only(a, "obj_ok"); ok["name"] != "Henrietta" || objOf(ok, "chicken:0")["name"] != "Henrietta" {
+		t.Fatalf("the Chicken's name answered %v", ok)
+	}
+	var ev map[string]any
+	for _, f := range r.drain(b) {
+		if f["t"] == "obj_ev" {
+			ev = f
+		}
+	}
+	if ev == nil || ev["ev"] != "name" || ev["name"] != "Henrietta" || ev["id"] != "chicken:0" {
+		t.Fatalf("Bo heard %v", ev)
+	}
+	r.act(b, 1, "chicken:0", "name", map[string]any{"name": "Clucky", "perks": ak5})
+	if no := r.only(b, "obj_no"); no["code"] != "named" || no["message"] != "Someone named this Chicken less than an hour ago." {
+		t.Fatalf("Bo's rename answered %v", no)
+	}
+	r.act(a, 3, "butterfly:0", "name", map[string]any{"name": "Flutter", "perks": ak5})
+	if ok := r.only(a, "obj_ok"); ok["name"] != "Flutter" {
+		t.Fatalf("the Butterfly's name answered %v", ok)
+	}
+	r2 := r.restart(path, r.now.Add(time.Minute))
+	c := r2.player(3, "Cy", defaultStreet, ck.x, ck.y)
+	r2.send(c, map[string]any{"t": "obj_sync"})
+	snap := r2.only(c, "objs")
+	if p := objOf(snap, "chicken:0"); p == nil || p["name"] != "Henrietta" || num(p["namer"]) != 1 {
+		t.Fatalf("after a restart the Chicken reads %v", p)
+	}
+	if p := objOf(snap, "butterfly:0"); p == nil || p["name"] != "Flutter" {
+		t.Fatalf("after a restart the Butterfly reads %v", p)
 	}
 }

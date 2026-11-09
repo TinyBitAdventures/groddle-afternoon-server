@@ -78,7 +78,7 @@ type objRec struct {
 	Food    int                      `json:"food,omitempty"`
 	// A street Piggy on its way to food (objects_pigs.go pigTrip), on its path's clock.
 	Trip *pigTrip `json:"trip,omitempty"`
-	// A street Piggy's name, who gave it and when (objects_pigs.go namePig).
+	// A street animal's name, who gave it and when (objects_pigs.go nameAnimal).
 	Name    string `json:"name,omitempty"`
 	Namer   int64  `json:"namer,omitempty"`
 	NamedAt int64  `json:"namedAt,omitempty"`
@@ -202,6 +202,9 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 	case "chicken", "butterfly", "batterfly", "kitty", "crab", "dragon":
 		ob.lag, ob.holdEnd = max(0, r.Lag), timeOf(r.HoldEnd)
 		ob.food = max(0, r.Food)
+		if name := sanitizeAnimalName(r.Name); name != "" && nameSingle[spot.kind] != "" {
+			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
+		}
 		if _, egg := o.w.rules.Incubate.Hatches[r.IncEgg]; egg && spot.kind == "chicken" && r.IncBy > 0 && r.IncEnd > 0 {
 			ob.incEgg, ob.incBy, ob.incEnd = r.IncEgg, r.IncBy, timeOf(r.IncEnd)
 		}

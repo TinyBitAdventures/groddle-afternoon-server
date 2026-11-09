@@ -496,9 +496,9 @@ type liveObj struct {
 	petters      map[int64]int64
 	eatingFood   string      // pig: the shared ground stack it is on its way to eat (objects_pigs.go pigFood)
 	trip         *pigTrip    // pig: its walk to food and home (objects_pigs.go startTrip)
-	userName     string      // pig: its name, everyone's (animal_naming.js user_name; objects_pigs.go namePig)
-	namer        int64       // pig: who named it (pc_namer)
-	namedAt      time.Time   // pig: when (named_on)
+	userName     string      // pig, chicken, butterfly, batterfly: its name, everyone's (animal_naming.js user_name; objects_pigs.go nameAnimal)
+	namer        int64       // who named it (pc_namer)
+	namedAt      time.Time   // when (named_on)
 	tripStop     func() bool // pig: the timer for the trip's next step
 
 	// chicken, butterfly, batterfly (objects_creatures.go) and a Piggy's uses: each player's uses of
@@ -824,8 +824,7 @@ func (o *objects) state(ob *liveObj) map[string]any {
 			m["trip"] = map[string]any{"x0": t.X0, "x1": t.X1, "c0": t.C0, "leg": t.Leg, "eat": t.Eat}
 		}
 		if ob.userName != "" {
-			// Its name, everyone's (objects_pigs.go namePig): who gave it and how long ago (ms).
-			m["name"], m["namer"], m["named"] = ob.userName, ob.namer, max(0, now.Sub(ob.namedAt).Milliseconds())
+			o.nameState(ob, m)
 		}
 		return m
 	case "wood":
@@ -941,7 +940,7 @@ type objAct struct {
 	C     string   `json:"c"`    // feed: the food's class (G335 slice 5)
 	N     int      `json:"n"`    // feed: how many of it, one stack at most
 	At    int64    `json:"at"`   // wait: the path's clock (server ms minus lag) where the player's screen stopped the animal
-	Name  string   `json:"name"` // name: what the player typed for a street Piggy (objects_pigs.go namePig)
+	Name  string   `json:"name"` // name: what the player typed for a street animal (objects_pigs.go nameAnimal)
 }
 
 // verdict is what one verb decided: ok, or a refusal code and line; extra rides on obj_ok.
@@ -1082,6 +1081,8 @@ func (o *objects) actOn(cl *Client, m objAct, street string, spot *objSpot, perk
 		v = o.useNode(street, ob, m.Verb, perks, cl.ID(), m.Skill)
 	case spot.kind == "pig":
 		v = o.tendPig(street, ob, m, perks, cl.ID())
+	case m.Verb == "name" && nameSingle[spot.kind] != "":
+		v = o.nameAnimal(street, ob, m, perks, cl.ID())
 	case isCreature(spot.kind):
 		v = o.tendCreature(street, ob, m, perks, cl.ID())
 	case ob.dead:

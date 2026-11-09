@@ -73,7 +73,10 @@ package main
 // anyone an hour after the last naming may (re)name it; a sad Piggy refuses a first name (765).
 // The name is cut to 32 characters of a-z, 0-9 and spaces (41) and goes through the word filter
 // (wordfilter.go, the remake's own addition) before anyone sees it. The street hears it as obj_ev
-// "name" (sendBubble with no pc, 49: everyone sees 'And they shall call me "..."').
+// "name" (sendBubble with no pc, 49: everyone sees 'And they shall call me "..."'). The street's
+// Chickens, Butterflies and Batterflies (objects_creatures.go) take the same include, so nameAnimal
+// names them by the same rules (npc_chicken.js verbs.name 677, rename 707; npc_butterfly.js 471, 506;
+// npc_batterfly.js 635, 670), without the sad check, which only npc_piggy.js has.
 // A street Piggy outlives a restart of the server (objects_persist.go, -objects-file): its mood,
 // hunger, petters and clock are kept, and the ticks it missed while the server was down run when
 // it is back.
@@ -114,9 +117,13 @@ const (
 	pigNameMax     = 32        // onInputBoxResponse 41: value.substr(0, 32)
 	pigRenameAfter = time.Hour // canName 18: time() - named_on > 3600
 	pigNameSkill   = "You need to know Animal Kinship V to name an animal."
-	pigNameTaken   = "Someone named this Piggy less than an hour ago."
 	pigNameEmpty   = "Names need at least one letter or number." // js/animal-husbandry.js nameAnimal
 )
+
+// nameState adds an animal's name to its state: who gave it and how long ago (ms).
+func (o *objects) nameState(ob *liveObj, m map[string]any) {
+	m["name"], m["namer"], m["named"] = ob.userName, ob.namer, max(0, o.h.Now().Sub(ob.namedAt).Milliseconds())
+}
 
 // sanitizeAnimalName is onInputBoxResponse 41 (substr(0, 32), then only a-z, 0-9 and spaces) and the
 // word filter after it, as the game's js/animal-husbandry.js nameAnimal does.
@@ -133,16 +140,25 @@ func sanitizeAnimalName(raw string) string {
 	return filterWords(b.String())
 }
 
-// namePig is the name and rename verbs on a street Piggy (see the header).
-func (o *objects) namePig(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
+// nameSingle is each nameable street animal's name_single (npc_piggy.js 5, npc_chicken.js,
+// npc_butterfly.js, npc_batterfly.js).
+var nameSingle = map[string]string{"pig": "Piggy", "chicken": "Chicken", "butterfly": "Butterfly", "batterfly": "Batterfly"}
+
+// nameTaken is ours: the source hid the verb from anyone else within the hour (canName 12-18).
+func nameTaken(kind string) string {
+	return "Someone named this " + nameSingle[kind] + " less than an hour ago."
+}
+
+// nameAnimal is the name and rename verbs on a street Piggy, Chicken, Butterfly or Batterfly (see the header).
+func (o *objects) nameAnimal(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
 	if !perks["ak5"] {
 		return refuse("skill", pigNameSkill) // canName 6
 	}
 	now := o.h.Now()
 	if ob.userName != "" && ob.namer != user && now.Sub(ob.namedAt) <= pigRenameAfter {
-		return refuse("named", pigNameTaken) // canName 12-18
+		return refuse("named", nameTaken(ob.spot.kind)) // canName 12-18
 	}
-	if ob.userName == "" && o.w.sad[street] {
+	if ob.spot.kind == "pig" && ob.userName == "" && o.w.sad[street] {
 		return refuse("sad", pigNameSad) // verbs.name conditions 764-766 (rename has no such check)
 	}
 	name := sanitizeAnimalName(m.Name)
@@ -708,7 +724,7 @@ func (o *objects) pigsToTree(street string, treeSpot *objSpot) {
 // tendPig is a player's verb on a street Piggy.
 func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string]bool, user int64) verdict {
 	if m.Verb == "name" {
-		return o.namePig(street, ob, m, perks, user)
+		return o.nameAnimal(street, ob, m, perks, user)
 	}
 	if o.w.sad[street] {
 		return refuse("sad", pigSad)
