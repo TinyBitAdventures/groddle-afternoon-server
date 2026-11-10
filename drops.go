@@ -28,9 +28,10 @@ package main
 //     location.js deleteTakeables (4619-4626) is called from nowhere, and
 //     dropped_on is only ever cleared by a pickup (takeable.js 41-42, 83).
 //
-// Here: only on a public street (no "_" in its id: homes, towers, party
-// spaces, races and arenas are private places, where each player's drops
-// stay their own as in solo). Nothing moves on the client's word. A drop is
+// Here: on a public street (no "_" in its id) and on a player's home street
+// (HOME_<owner>, below); house rooms, Tower floors, party spaces, races and
+// arenas are private places, where each player's drops stay their own as in
+// solo. Nothing moves on the client's word. A drop is
 // asked of the site's ledger (groddle-afternoon-site src/LedgerDrop.php,
 // POST groddle/v1/ledger/drop, signed as ledger.go signs): the stack leaves
 // the dropper's ledger and waits in the site's groddle_drops, in nobody's
@@ -46,6 +47,7 @@ package main
 //
 //	{"t":"ground_drop","ref":"…","item":{"c":"apple","n":3,"r":40},"x":1200,"y":-120}
 //	{"t":"ground_pickup","id":"drop-…","n":3}          n: how many (Pick up how many?); none or the whole count takes the stack
+//	on a home street both also carry "ox":640, the house's x as this game draws it (below, "A home street")
 //
 // Server to client:
 //
@@ -78,6 +80,22 @@ package main
 // player's (ours, Austin 2026-11-09: the feeder gets first chance; the source's plop had no dropper),
 // the first pickup has it, and one left for dropKeep goes back to that player.
 //
+// A home street (report #173, Austin 2026-11-10: "visitors' and owners' drops are seen by everyone
+// there, as on public streets"): in the original a home street was a location like any other, so
+// takeable_drop and takeable_pickup ran there unchanged, the dropper's 100 px guard included (the
+// one home rule, house_lock at takeable.js 34-36 and 179-198, is for what the owner sets on
+// furniture inside the house or Tower, not for the street). So HOME_<owner> is shared for the owner
+// and every visitor homes.go let onto it, with the same rules and the same ledger calls. Ours:
+//   - The site keeps a street as letters, digits and "-" (LedgerDrop), so a home street goes to it
+//     as HOME-<owner> and comes back as HOME_<owner> (dropSiteStreet, dropStreetFromSite).
+//   - A stack's x is kept from the house, not from the street's left end: the remake's home street
+//     grows to the left and moves the house's x with it (the source's house sat at x 0 and only
+//     the left edge moved, inc_homes.js homes_yard_rebuild 2309-2335). Each game sends the house's
+//     x it draws ("ox") with a drop and a pickup; positions are compared with it taken off.
+//   - The owner's own stacks on their own home street never go back to the pack after dropKeep
+//     (it is their street; dropStreetMax still bounds it). A visitor's do, as anywhere.
+//   - The house, its back yard and the Tower's floors stay each player's own for now.
+//
 // Pick up how many (G560): a pickup may name a part of the stack (main.js
 // 3227-3240 splits the stack, takeable_pickup takes the split part and the
 // rest stays down for everyone). The site records each part once under
@@ -99,6 +117,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -124,7 +143,7 @@ const (
 
 	dropTextSoulbound = "This item is locked to you and can't be dropped."                                 // takeable.js:118
 	dropTextCant      = "That can't be dropped for others to find."                                        // ours: the ledger does not carry it
-	dropTextPrivate   = "Only a drop on a public street is shared."                                        // ours
+	dropTextPrivate   = "Only a drop on a public street or a home street is shared."                       // ours
 	dropTextFull      = "This street can't hold any more dropped things."                                  // ours
 	dropTextShort     = "You don't have enough of that item."                                              // inc_trading.js:456
 	dropTextBusy      = "Wait a moment, you are still dropping something."                                 // ours
@@ -139,6 +158,47 @@ const (
 )
 
 var dropOpRe = regexp.MustCompile(`^drop-[0-9a-f]{16}$`)
+
+// A home street as this server names it and as the site keeps it (the header, "A home street").
+var (
+	dropHomeRe     = regexp.MustCompile(`^HOME_([1-9][0-9]{0,17})$`)
+	dropHomeSiteRe = regexp.MustCompile(`^HOME-([1-9][0-9]{0,17})$`)
+)
+
+// dropHomeOwner is whose home street this is, or 0 for any other place.
+func dropHomeOwner(street string) int64 {
+	m := dropHomeRe.FindStringSubmatch(street)
+	if m == nil {
+		return 0
+	}
+	id, _ := strconv.ParseInt(m[1], 10, 64)
+	return id
+}
+
+// dropSiteStreet is a street as the site is told it.
+func dropSiteStreet(street string) string {
+	if dropHomeOwner(street) > 0 {
+		return "HOME-" + street[len(homeStreetPrefix):]
+	}
+	return street
+}
+
+// dropStreetFromSite is a street the site names, as players join it.
+func dropStreetFromSite(street string) string {
+	if dropHomeSiteRe.MatchString(street) {
+		return homeStreetPrefix + street[len("HOME-"):]
+	}
+	return street
+}
+
+// dropOrigin is the x a game says its positions on this street start from: the house's x on a
+// home street, nothing anywhere else.
+func dropOrigin(street string, ox *float64) float64 {
+	if ox == nil || dropHomeOwner(street) == 0 || math.IsNaN(*ox) || math.Abs(*ox) > 1e6 {
+		return 0
+	}
+	return math.Round(*ox)
+}
 
 func init() { modules = append(modules, newDrops) }
 
@@ -348,14 +408,15 @@ func (m *drops) Register(r *Registry) {
 // place puts a stack the street made on the ground for everyone (see the header, "Placed by the
 // street"), under the player by whose act made it: the site records it, then the street hears it as
 // any drop. Off (no ledger, not loaded, a private place, a full street, a class the ledger does not
-// carry): false, and nothing is placed.
+// carry): false, and nothing is placed. A home street makes no stacks of its own (its animals are
+// the owner's game's), so only a public street is asked.
 func (m *drops) place(street string, by int64, name string, x, y float64, it tradeItem) bool {
 	cls, ok := m.table.Items[it.C]
-	if m.site == nil || !m.loaded || !dropShared(street) || !ok || it.N < 1 || it.N > cls.Max || len(m.byStreet[street]) >= dropStreetMax {
+	if m.site == nil || !m.loaded || followPrivate(street) || !ok || it.N < 1 || it.N > cls.Max || len(m.byStreet[street]) >= dropStreetMax {
 		return false
 	}
 	m.table.cleanTag(&it, m.h.Now())
-	call := dropCall{Op: "drop-" + m.newID(), ID: by, Street: street, X: int(math.Round(x)), Y: int(math.Round(y)), Item: it}
+	call := dropCall{Op: "drop-" + m.newID(), ID: by, Street: dropSiteStreet(street), X: int(math.Round(x)), Y: int(math.Round(y)), Item: it}
 	site := m.site
 	m.spawn(func() {
 		a := site.dropPlace(call)
@@ -442,8 +503,9 @@ func (m *drops) eat(id, pig string, done func(bool)) {
 	})
 }
 
-// dropShared: a public street, where drops are everyone's (follow.go's rule for a private place).
-func dropShared(street string) bool { return !followPrivate(street) }
+// dropShared: a public street (follow.go's rule for a private place) or a player's home street,
+// where drops are everyone's.
+func dropShared(street string) bool { return !followPrivate(street) || dropHomeOwner(street) > 0 }
 
 // load asks the site for every stack on the ground, again until it answers.
 func (m *drops) load() {
@@ -476,6 +538,7 @@ func (m *drops) load() {
 }
 
 func (m *drops) addRow(row dropRow) *groundStack {
+	row.Street = dropStreetFromSite(row.Street)
 	if !dropOpRe.MatchString(row.ID) || !dropShared(row.Street) || row.N < 1 || m.stacks[row.ID] != nil {
 		return m.stacks[row.ID]
 	}
@@ -558,6 +621,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		Item *tradeItem `json:"item"`
 		X    *float64   `json:"x"`
 		Y    *float64   `json:"y"`
+		Ox   *float64   `json:"ox"`
 	}
 	if json.Unmarshal(frame, &msg) != nil || msg.Item == nil {
 		m.refuseDrop(cl, "", "bad", dropTextBad)
@@ -617,7 +681,9 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 	if msg.X != nil && msg.Y != nil && !math.IsNaN(*msg.X) && !math.IsNaN(*msg.Y) && math.Hypot(*msg.X-px, *msg.Y-py) <= dropPlaceNear {
 		x, y = *msg.X, *msg.Y
 	}
-	call := dropCall{Op: "drop-" + m.newID(), ID: cl.ID(), Street: street, X: int(math.Round(x)), Y: int(math.Round(y)), Item: it}
+	// On a home street the stack is kept from the house (the header, "A home street").
+	x -= dropOrigin(street, msg.Ox)
+	call := dropCall{Op: "drop-" + m.newID(), ID: cl.ID(), Street: dropSiteStreet(street), X: int(math.Round(x)), Y: int(math.Round(y)), Item: it}
 	from, name := cl.ID(), cl.Name()
 	m.dropping[from] = call.Op
 	site := m.site
@@ -635,7 +701,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 			out := map[string]any{"t": "ground_dropped", "op": call.Op, "ref": ref, "status": a.Status, "why": a.Why, "text": a.Text, "stack": nil}
 			var s *groundStack
 			if a.Status == "settled" {
-				s = m.addRow(dropRow{ID: call.Op, By: from, Name: name, Street: call.Street, X: float64(call.X), Y: float64(call.Y), C: it.C, N: it.N, R: it.R, T: it.T, At: m.h.Now().Unix()})
+				s = m.addRow(dropRow{ID: call.Op, By: from, Name: name, Street: street, X: float64(call.X), Y: float64(call.Y), C: it.C, N: it.N, R: it.R, T: it.T, At: m.h.Now().Unix()})
 				if s != nil {
 					out["stack"] = s.view()
 				}
@@ -650,7 +716,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_added", "stack": s.view()}, 0)
 			m.sweepSoon()
 			// onContainerItemAdded: a hungry street Piggy goes for dropped food.
-			if m.table.Items[s.C].Food {
+			if m.table.Items[s.C].Food && dropHomeOwner(s.Street) == 0 {
 				if fn, ok := m.h.ProvidedLocked("objects.pigFood").(func(string, string, float64, float64)); ok {
 					fn(s.Street, s.ID, s.X, s.Y)
 				}
@@ -669,8 +735,9 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 		return
 	}
 	var msg struct {
-		ID string `json:"id"`
-		N  *int   `json:"n"`
+		ID string   `json:"id"`
+		N  *int     `json:"n"`
+		Ox *float64 `json:"ox"`
 	}
 	if json.Unmarshal(frame, &msg) != nil || !dropOpRe.MatchString(msg.ID) || (msg.N != nil && *msg.N < 1) {
 		m.refusePick(cl, msg.ID, "bad", pickTextGone)
@@ -699,7 +766,10 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 		m.refusePick(cl, s.ID, "busy", pickTextBusy)
 		return
 	}
+	// On a home street the stack's x is from the house: the picker's and the dropper's are read the same way.
+	ox := dropOrigin(s.Street, msg.Ox)
 	px, py := cl.Pos()
+	px -= ox
 	if math.Hypot(s.X-px, s.Y-py) > dropReach {
 		name := s.C
 		if c, ok := m.table.Items[s.C]; ok && c.Name != "" {
@@ -710,7 +780,7 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 	}
 	if s.By != cl.ID() && !s.unlocked {
 		if d := m.h.ClientLocked(s.By); d != nil && d.Street() == s.Street {
-			if dx, dy := d.Pos(); math.Abs(s.X-dx) < dropLockRadius && math.Abs(s.Y-dy) <= dropLockHeight {
+			if dx, dy := d.Pos(); math.Abs(s.X-(dx-ox)) < dropLockRadius && math.Abs(s.Y-dy) <= dropLockHeight {
 				m.refusePick(cl, s.ID, "locked", pickTextLocked)
 				return
 			}
@@ -878,7 +948,8 @@ func (m *drops) sweep() {
 	now := m.h.Now()
 	old := []*groundStack{}
 	for _, s := range m.stacks {
-		if s.picking == 0 && now.Sub(s.At) >= dropKeep {
+		// An owner's own stack on their own home street stays (the header, "A home street").
+		if s.picking == 0 && now.Sub(s.At) >= dropKeep && dropHomeOwner(s.Street) != s.By {
 			old = append(old, s)
 		}
 	}

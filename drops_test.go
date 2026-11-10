@@ -278,14 +278,23 @@ func TestDropsFollowTheRulesForWhatIsShared(t *testing.T) {
 		}
 	}
 	// A private place keeps each player's drops their own.
-	r.at(ada, "HOME_7", 0, 0)
+	r.at(ada, "HOUSE_7", 0, 0)
 	st := pick(t, drain(ada), "ground_state")
 	if len(st["stacks"].([]any)) != 0 {
-		t.Fatalf("a home shows no shared stacks: %v", st)
+		t.Fatalf("a house shows no shared stacks: %v", st)
 	}
 	r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 1}})
 	if f := only(t, drain(ada), "ground_dropped"); f["why"] != "private" {
-		t.Fatalf("in a home: %v", f)
+		t.Fatalf("in a house: %v", f)
+	}
+	// So does a Tower floor, a party space and a race.
+	for _, street := range []string{"TOWER_7_0", "PARTY_3", "RACE_ab12", "HOME_7_x", "HOME_0", "XHOME_7"} {
+		r.at(ada, street, 0, 0)
+		drain(ada)
+		r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 1}})
+		if f := only(t, drain(ada), "ground_dropped"); f["why"] != "private" {
+			t.Fatalf("on %s: %v", street, f)
+		}
 	}
 	if len(r.site.drops) != 0 {
 		t.Fatalf("the site was never asked: %v", r.site.drops)
@@ -455,7 +464,7 @@ func TestTheStacksOnTheGroundComeFromTheSiteAfterARestart(t *testing.T) {
 	r.site.err = nil
 	r.site.ground = []dropRow{
 		{ID: "drop-00000000000000aa", By: 9, Name: "Bo", Street: dropStreet, X: 10, Y: -20, C: "cherry", N: 5, At: r.now.Unix() - 60},
-		{ID: "drop-00000000000000bb", By: 9, Name: "Bo", Street: "HOME_9", X: 10, Y: -20, C: "cherry", N: 5, At: r.now.Unix()},
+		{ID: "drop-00000000000000bb", By: 9, Name: "Bo", Street: "HOUSE_9", X: 10, Y: -20, C: "cherry", N: 5, At: r.now.Unix()},
 		{ID: "not-a-drop", By: 9, Street: dropStreet, C: "cherry", N: 5},
 	}
 	if r.fire(dropLoadRetry) != 1 {
@@ -755,5 +764,144 @@ func TestTheStreetPlacesAStackUnderThePlayerWhoseActMadeIt(t *testing.T) {
 	// Not shared: a private place, or a class the ledger does not carry.
 	if place("HOME_7", 7, "Ada", 0, 0, tradeItem{C: "plop", N: 1}) || place(dropStreet, 7, "Ada", 0, 0, tradeItem{C: "nonsense", N: 1}) {
 		t.Fatal("placed where nothing is shared")
+	}
+}
+
+// Report #173: a home street is shared between its owner and its visitors, with the public street's rules.
+func TestAHomeStreetsDropsAreSharedBetweenOwnerAndVisitors(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, cy := r.connect(7, "Ada"), r.connect(9, "Bo"), r.connect(11, "Cy")
+	// Ada's home street: her game and Bo's draw the house at x 640; all stand to its right.
+	r.at(ada, "HOME_7", 1000, 870)
+	r.at(bo, "HOME_7", 1040, 870)
+	r.at(cy, "HOME_7", 1700, 870)
+	for _, cl := range []*Client{ada, bo, cy} {
+		if st := pick(t, drain(cl), "ground_state"); st["street"] != "HOME_7" || len(st["stacks"].([]any)) != 0 {
+			t.Fatalf("an empty home street: %v", st)
+		}
+	}
+	// Bo, a visitor, drops a Musicblock at his feet.
+	r.do(bo, map[string]any{"t": "ground_drop", "ref": "d1", "item": map[string]any{"c": "musicblock_d_green_01", "n": 1}, "x": 1100, "y": 850, "ox": 640})
+	r.settle()
+	if len(r.site.drops) != 1 {
+		t.Fatalf("the site is asked once: %v", r.site.drops)
+	}
+	c := r.site.drops[0]
+	if c.ID != 9 || c.Street != "HOME-7" || c.X != 460 || c.Y != 850 || c.Item.C != "musicblock_d_green_01" {
+		t.Fatalf("the site hears the home street its way, x from the house: %+v", c)
+	}
+	if f := pick(t, drain(bo), "ground_dropped"); f["status"] != "settled" || f["op"] != c.Op {
+		t.Fatalf("Bo is told: %v", f)
+	}
+	for _, cl := range []*Client{ada, cy} {
+		s := only(t, drain(cl), "ground_added")["stack"].(map[string]any)
+		if s["id"] != c.Op || s["x"] != float64(460) || s["by"].(map[string]any)["name"] != "Bo" {
+			t.Fatalf("the owner and the other visitor see it: %v", s)
+		}
+	}
+	if n := r.hub.ProvidedLocked("drops.count").(func(string) int)("HOME_7"); n != 1 {
+		t.Fatalf("drops.count: %d", n)
+	}
+	// Bo still stands by it: the owner is refused, as anyone is on a public street.
+	r.do(ada, map[string]any{"t": "ground_pickup", "id": c.Op, "ox": 640})
+	if f := only(t, drain(ada), "ground_taken"); f["why"] != "locked" || f["text"] != pickTextLocked {
+		t.Fatalf("the dropper's guard holds on a home street: %v", f)
+	}
+	r.move(cy, 1500, 870)
+	r.do(cy, map[string]any{"t": "ground_pickup", "id": c.Op, "ox": 640})
+	if f := only(t, drain(cy), "ground_taken"); f["why"] != "locked" {
+		t.Fatalf("Cy is refused too while Bo guards it: %v", f)
+	}
+	// Bo walks away; the owner picks it up, and the site puts it in her ledger.
+	r.move(bo, 1400, 870)
+	r.do(ada, map[string]any{"t": "ground_pickup", "id": c.Op, "ox": 640})
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != c.Op+":7:pickup" {
+		t.Fatalf("one take, the owner's: %v", r.site.takes)
+	}
+	if f := pick(t, drain(ada), "ground_taken"); f["status"] != "settled" || f["item"].(map[string]any)["c"] != "musicblock_d_green_01" {
+		t.Fatalf("the owner has it: %v", f)
+	}
+	if g := pick(t, drain(bo), "ground_gone"); g["id"] != c.Op || g["why"] != "picked" {
+		t.Fatalf("the street hears: %v", g)
+	}
+	// A second pickup finds nothing: the first one won.
+	r.do(cy, map[string]any{"t": "ground_pickup", "id": c.Op, "ox": 640})
+	if f := pick(t, drain(cy), "ground_taken"); f["why"] != "gone" {
+		t.Fatalf("gone for the next: %v", f)
+	}
+	if len(r.site.takes) != 1 {
+		t.Fatalf("the site was not asked again: %v", r.site.takes)
+	}
+}
+
+// A home street's stacks come back from the site after a restart, on the street players join.
+func TestAHomeStreetsStacksComeBackAfterARestart(t *testing.T) {
+	r := newDropRig(t)
+	r.m.loaded = false
+	r.site.ground = []dropRow{
+		{ID: "drop-00000000000000aa", By: 9, Name: "Bo", Street: "HOME-7", X: -300, Y: 850, C: "cherry", N: 5, At: r.now.Unix() - 60},
+		{ID: "drop-00000000000000bb", By: 9, Name: "Bo", Street: "HOUSE-7", X: 10, Y: 600, C: "cherry", N: 5, At: r.now.Unix()},
+	}
+	r.m.load()
+	r.settle()
+	ada := r.connect(7, "Ada")
+	r.at(ada, "HOME_7", 400, 870)
+	st := pick(t, drain(ada), "ground_state")
+	list := st["stacks"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["id"] != "drop-00000000000000aa" || list[0].(map[string]any)["x"] != float64(-300) {
+		t.Fatalf("the owner sees the visitor's stack where it lay: %v", st)
+	}
+	// The picker's x is read from the house too: at 400 with the house at 640 she is 60 px from it.
+	r.do(ada, map[string]any{"t": "ground_pickup", "id": "drop-00000000000000aa", "n": 2, "ox": 640})
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != "drop-00000000000000aa:7:pickup:2/5" {
+		t.Fatalf("a part of it: %v", r.site.takes)
+	}
+}
+
+// The owner's own stacks stay on their own home street; a visitor's go home after dropKeep.
+func TestOnlyAVisitorsStackGoesHomeFromAHomeStreet(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.at(ada, "HOME_7", 1000, 870)
+	r.at(bo, "HOME_7", 1300, 870)
+	r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 3}, "x": 1010, "y": 850, "ox": 640})
+	r.settle()
+	r.do(bo, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 2}, "x": 1310, "y": 850, "ox": 640})
+	r.settle()
+	own, theirs := r.site.drops[0].Op, r.site.drops[1].Op
+	drain(ada)
+	drain(bo)
+	r.now = r.now.Add(dropKeep)
+	if r.fire(dropSweepEvery) != 1 {
+		t.Fatalf("the sweep runs")
+	}
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != theirs+":9:return" {
+		t.Fatalf("only the visitor's stack went home: %v", r.site.takes)
+	}
+	if r.m.stacks[own] == nil || r.m.stacks[theirs] != nil {
+		t.Fatalf("the owner's stays: %v", r.m.stacks)
+	}
+	if f := pick(t, drain(bo), "ground_back"); f["id"] != theirs {
+		t.Fatalf("Bo hears: %v", f)
+	}
+}
+
+// An origin is a home street's only.
+func TestAPublicStreetIgnoresAnOrigin(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo, _ := r.trio()
+	r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 3}, "x": 1050, "y": -120, "ox": 5000})
+	r.settle()
+	if c := r.site.drops[0]; c.X != 1050 || c.Street != dropStreet {
+		t.Fatalf("the stack lies where it was put: %+v", c)
+	}
+	drain(bo)
+	r.move(bo, 9000, -100)
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": r.site.drops[0].Op, "ox": 8000})
+	if f := only(t, drain(bo), "ground_taken"); f["why"] != "far" {
+		t.Fatalf("an origin does not bring a far picker closer: %v", f)
 	}
 }
