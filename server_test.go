@@ -233,7 +233,7 @@ func TestChatIsRateLimitedAndCleaned(t *testing.T) {
 		t.Fatalf("%d lines got through a burst of %d", said, chatBurst)
 	}
 	now = now.Add(2 * time.Second)
-	hub.Handle(cl, []byte(`{"t":"chat","text":"`+strings.Repeat("é", 300)+"\\u0007\\u2028"+`"}`))
+	hub.Handle(cl, []byte(`{"t":"chat","text":"`+strings.Repeat("é", maxChat+100)+"\\u0007\\u2028"+`"}`))
 	var m map[string]any
 	json.Unmarshal(<-cl.send, &m)
 	if r := []rune(m["text"].(string)); len(r) != maxChat {

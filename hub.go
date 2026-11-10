@@ -68,7 +68,7 @@ import (
 const (
 	maxStreet   = 32
 	maxLook     = 4096
-	maxChat     = 200
+	maxChat     = 1000 // InputField.as 32 MAX_CHARS: the original chat box took 1,000; the site's history keeps as many (ChatHistory::TEXT_MAX)
 	maxAnim     = 24
 	sendBuffer  = 64
 	movesPerSec = 20

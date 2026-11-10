@@ -415,7 +415,7 @@ func TestPartyChatRules(t *testing.T) {
 		t.Fatalf("rate: %d said, %v", len(kinds(am, "party_said")), kinds(am, "error"))
 	}
 	r.now = r.now.Add(chatEvery)
-	r.do(a, map[string]any{"t": "party_chat", "text": strings.Repeat("x", 500)})
+	r.do(a, map[string]any{"t": "party_chat", "text": strings.Repeat("x", maxChat+300)})
 	said := kinds(drain(b), "party_said")
 	if last := said[len(said)-1]; len([]rune(last["text"].(string))) != maxChat {
 		t.Fatalf("long line kept %d", len([]rune(last["text"].(string))))

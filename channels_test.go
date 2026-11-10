@@ -169,7 +169,7 @@ func TestChannelsGlobalChatAndHistory(t *testing.T) {
 	}
 	// The length cap street chat has.
 	r.now = r.now.Add(time.Second)
-	r.send(c, map[string]any{"t": "channel_say", "channel": "global", "text": strings.Repeat("x", 500)})
+	r.send(c, map[string]any{"t": "channel_say", "channel": "global", "text": strings.Repeat("x", maxChat+300)})
 	if s := chanKind(drain(c), "channel_said"); len([]rune(s[0]["text"].(string))) != maxChat {
 		t.Fatal("not capped")
 	}

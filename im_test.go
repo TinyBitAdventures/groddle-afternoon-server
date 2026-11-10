@@ -237,7 +237,7 @@ func TestIMTheWordFilterAndTheLengthCap(t *testing.T) {
 	if c := r.m.convs[pairOf(7, 9)]; strings.Contains(fmt.Sprint(c.Lines), "fuck") {
 		t.Fatal("the original words were kept")
 	}
-	r.im(ada, 9, strings.Repeat("a", 500))
+	r.im(ada, 9, strings.Repeat("a", maxChat+300))
 	if got := one(t, drain(bo), "im")["line"].(map[string]any)["text"].(string); len([]rune(got)) != maxChat {
 		t.Fatalf("length %d", len(got))
 	}
