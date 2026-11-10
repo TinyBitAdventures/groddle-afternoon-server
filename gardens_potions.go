@@ -3,7 +3,7 @@ package main
 // Master Gardener potions on a shared public bed (register G368 slice 2): a pour works the whole bed
 // at once (items/include/master_garden.js potionTendGarden; the game's js/master-garden.js):
 //
-//	Soak-All Solution     (potion_garden_water)     waters every plot (a wet one's 12 hours start again)
+//	Soak-All Solution     (potion_garden_water)     waters every plot (a wet one's watering starts again)
 //	Liquid Super-Hoe      (potion_garden_clear)     hoes every dirty plot
 //	Seed-Dibber Libation  (potion_garden_plant)     plants every clean plot with the chosen seed while it lasts
 //	Manyharvest Cordial   (potion_garden_harvest)   picks every ripe plot, the planter's 60 seconds or not
@@ -270,11 +270,8 @@ func (g *gardens) pour(rp *gardenReply, bed *gardenBed, potion gardenPotion, m g
 		p := g.plots[street][id]
 		switch potion.action {
 		case "water":
-			// js/garden.js wetPlot: a dry plot's clock restarts; every plot's 12 hours start again.
-			if !p.wet {
-				p.stageAt = now
-			}
-			p.wet, p.wetAt = true, now
+			// js/garden.js wetPlot: a dry plot's clock restarts; every plot's watering starts again.
+			g.wetNow(p, now)
 		case "hoe":
 			p.state, p.seed, p.fert, p.stageAt, p.banked = "clean", "", false, now, 0
 		case "plant":
@@ -283,11 +280,10 @@ func (g *gardens) pour(rp *gardenReply, bed *gardenBed, potion gardenPotion, m g
 			if !(mod >= 0.5 && mod <= 1) {
 				mod = 1
 			}
-			p.state, p.seed, p.fert, p.mod, p.planter, p.ripeAt = "seeds", m.Seed, false, mod, rp.cl.ID(), 0
-			p.stageAt, p.banked = now, 0
+			g.sow(p, m.Seed, mod, rp.cl.ID(), now)
 		case "pick":
 			crops[g.w.seeds[p.seed].crop] += g.w.seeds[p.seed].produces
-			p.state, p.seed, p.fert, p.planter, p.ripeAt, p.stageAt, p.banked = "dirty", "", false, 0, 0, now, 0
+			p.state, p.seed, p.fert, p.planter, p.ripeAt, p.stageAt, p.banked, p.pace = "dirty", "", false, 0, 0, now, 0, 0
 		case "fertilize":
 			g.applyGuano(p, now)
 		}

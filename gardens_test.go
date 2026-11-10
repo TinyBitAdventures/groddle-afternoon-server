@@ -80,7 +80,14 @@ func (r *gardenRig) frames(cl *Client, kind string) []map[string]any {
 	return out
 }
 
-// grow takes a plot planted with spinach (4 s, 4 s at the remake's speed) and watered to a crop.
+// spinachRipe is how long watered spinach takes from seed to crop (data/gardens.json: the source's
+// 0.5 h and 0.25 h at the garden's pace, 3 minutes and 90 seconds at 10 times).
+func spinachRipe() time.Duration {
+	s := gardenWorldData.seeds["seed_spinach"]
+	return time.Duration(s.g1+s.g2) * time.Millisecond
+}
+
+// grow takes a plot planted with spinach and watered to a crop.
 func (r *gardenRig) grow(a *Client, id string) {
 	r.t.Helper()
 	r.gact(a, 1, id, "plant", map[string]any{"seed": "seed_spinach"})
@@ -91,7 +98,7 @@ func (r *gardenRig) grow(a *Client, id string) {
 		r.gact(a, 2, id, "water", nil)
 		r.only(a, "garden_ok")
 	}
-	r.advance(8 * time.Second)
+	r.advance(spinachRipe())
 }
 
 func TestGardenSnapshotOnlyOnTheTenPublicStreets(t *testing.T) {
@@ -175,15 +182,22 @@ func TestGardenGrowsOnlyWhileWetAndDryingKeepsProgress(t *testing.T) {
 	r.advance(3 * time.Second)
 	p := r.g.plots[gardenStreet]["default:1-1"]
 	if p.wet || p.state != "seeds" || p.banked != 3000 {
-		t.Fatalf("after 3 s wet of 4 the plot is %+v", p)
+		t.Fatalf("after 3 s wet the plot is %+v", p)
 	}
 	frames := r.frames(a, "gardens")
 	if len(frames) != 1 || plotOf(t, frames[0], "default:1-1")["wet"] != nil {
 		t.Fatalf("the drying was told as %v", frames)
 	}
+	r.g.waterMs = gardenWorldData.waterMs
 	r.gact(a, 3, "default:1-1", "water", nil)
 	r.drain(a)
-	r.advance(time.Second)
+	// The stage needs its whole time less the 3 s it kept.
+	g1 := time.Duration(gardenWorldData.seeds["seed_spinach"].g1) * time.Millisecond
+	r.advance(g1 - 3*time.Second - time.Millisecond)
+	if p.state != "seeds" {
+		t.Fatalf("the stage ended early: %+v", p)
+	}
+	r.advance(time.Millisecond)
 	if p.state != "shoots" || p.banked != 0 {
 		t.Fatalf("the banked growth was not kept: %+v", p)
 	}
@@ -192,9 +206,14 @@ func TestGardenGrowsOnlyWhileWetAndDryingKeepsProgress(t *testing.T) {
 func TestGardenStagesAfterALongGapAreAllTaken(t *testing.T) {
 	// G561: the page's tickGarden takes one stage a call; the server takes every stage the time passed.
 	r := newGardenRig(t, false)
-	p := &gPlot{state: "seeds", seed: "seed_spinach", wet: true, wetAt: 0, stageAt: 0, mod: 1}
-	if !r.g.advance(p, 20_000) || p.state != "crop" || p.ripeAt != 8000 || p.stageAt != 8000 {
-		t.Fatalf("after 20 s the plot is %+v", p)
+	p := &gPlot{state: "seeds", seed: "seed_spinach", wet: true, wetAt: 0, stageAt: 0, mod: 1, pace: 10, wetPace: 10}
+	if !r.g.advance(p, 600_000) || p.state != "crop" || p.ripeAt != 270_000 || p.stageAt != 270_000 {
+		t.Fatalf("after 10 min the plot is %+v", p)
+	}
+	// A plot from before the garden's speed changed (no pace) takes its stages on the old clock.
+	old := &gPlot{state: "seeds", seed: "seed_spinach", wet: true, wetAt: 0, stageAt: 0, mod: 1}
+	if !r.g.advance(old, 20_000) || old.state != "crop" || old.ripeAt != 8000 || old.stageAt != 8000 {
+		t.Fatalf("after 20 s the old plot is %+v", old)
 	}
 }
 
@@ -309,7 +328,9 @@ func TestGardenSeedAndGuanoGoThroughTheLedger(t *testing.T) {
 	r.advance(time.Second)
 	r.gact(a, 7, "default:1-1", "fertilize", nil)
 	p := r.g.plots[gardenStreet]["default:1-1"]
-	if !p.fert || r.g.due(p) != r.now.UnixMilli()+300 {
+	// A second into the shoots: a tenth of the rest of grow 2.
+	want := (gardenWorldData.seeds["seed_spinach"].g2 - 1000) / 10
+	if !p.fert || r.g.due(p) != r.now.UnixMilli()+want {
 		t.Fatalf("Guano on shoots left %+v, due in %d", p, r.g.due(p)-r.now.UnixMilli())
 	}
 	r.drain(a)
@@ -423,10 +444,10 @@ func TestGardenRestartKeepsPlotsGrantsAndGivesTheLockAgain(t *testing.T) {
 	r.gact(a, 4, "default:2-1", "water", nil)
 	r.gact(a, 5, "default:3-1", "plant", map[string]any{"seed": "seed_spinach"})
 	r.gact(a, 6, "default:3-1", "water", nil)
-	r.advance(8 * time.Second)
+	r.advance(spinachRipe())
 	r.gact(a, 7, "default:3-1", "harvest", nil)
 	r.gact(a, 8, "default:2-1", "plant", map[string]any{"seed": "seed_potato"}) // refused: not clean
-	r.advance(time.Second)                                                    // the soon save
+	r.advance(time.Second)                                                      // the soon save
 	r.hub.Shutdown()
 	// Down for 10 minutes: 2-1's lock was running at the stop, 1-1's ran out before it.
 	later := r.now.Add(10 * time.Minute)
@@ -501,6 +522,40 @@ func TestGardenDevHookOnlyWithTheSwitch(t *testing.T) {
 	}
 }
 
+// The QA clock: "skip" lets garden time pass for every plot at once, by the rules.
+func TestGardenDevSkipLetsGardenTimePass(t *testing.T) {
+	r := newGardenRig(t, false)
+	a := r.gardener(1, "Ada")
+	b := r.gardener(2, "Bea")
+	r.gact(a, 1, "default:1-1", "water", nil)
+	r.gact(a, 2, "default:1-1", "plant", map[string]any{"seed": "seed_potato"})
+	r.drain(a)
+	r.drain(b)
+	p := r.g.plots[gardenStreet]["default:1-1"]
+	r.send(a, map[string]any{"t": "garden_dev", "skip": 3_600_000})
+	if p.state != "seeds" || len(r.frames(a, "error")) != 1 {
+		t.Fatalf("garden_dev skip worked without GRODDLE_GARDENS_DEV: %+v", p)
+	}
+	r.g.dev = true
+	// 36 minutes: the potato's seeds stage ends, and everyone on the street hears it.
+	r.send(a, map[string]any{"t": "garden_dev", "skip": 36 * 60_000})
+	if p.state != "shoots" || !p.wet {
+		t.Fatalf("36 minutes on: %+v", p)
+	}
+	if f := r.frames(b, "gardens"); len(f) != 1 || plotOf(t, f[0], "default:1-1")["state"] != "shoots" {
+		t.Fatalf("the other gardener heard %v", f)
+	}
+	// 33 more: a crop at 69 minutes, still wet; 3 more and the watering is over.
+	r.send(a, map[string]any{"t": "garden_dev", "skip": 33 * 60_000})
+	if p.state != "crop" || !p.wet || p.planter != 1 {
+		t.Fatalf("69 minutes on: %+v", p)
+	}
+	r.send(a, map[string]any{"t": "garden_dev", "skip": 3 * 60_000})
+	if p.state != "crop" || p.wet || p.planter != 0 {
+		t.Fatalf("72 minutes on: %+v", p)
+	}
+}
+
 // The growth fixtures the game's tests run through js/garden.js too (tests/shared-gardens.test.js):
 // both copies of the rules agree on when a plot changes.
 func TestGardenGrowthFixtures(t *testing.T) {
@@ -519,7 +574,7 @@ func TestGardenGrowthFixtures(t *testing.T) {
 	}
 	r := newGardenRig(t, false)
 	for _, c := range cases {
-		p := &gPlot{state: c.Plot.State, seed: c.Plot.Seed, wet: c.Plot.Wet, wetAt: c.Plot.WetAt, stageAt: c.Plot.StageAt, banked: c.Plot.Banked, mod: c.Plot.Mod, fert: c.Plot.Fert}
+		p := &gPlot{state: c.Plot.State, seed: c.Plot.Seed, wet: c.Plot.Wet, wetAt: c.Plot.WetAt, stageAt: c.Plot.StageAt, banked: c.Plot.Banked, mod: c.Plot.Mod, fert: c.Plot.Fert, pace: c.Plot.Pace, wetPace: c.Plot.WetPace}
 		if p.mod == 0 {
 			p.mod = 1
 		}
@@ -567,5 +622,153 @@ func TestGardenToolsAreTheLedgersWithTheObjectsModule(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(toolClasses, ","), "high_class_hoe") {
 		t.Fatal("the High-Class Hoe is not asked about")
+	}
+}
+
+// The garden's speed (Austin 2026-11-10): data/gardens.json is written from the game's one number.
+func TestGardenTimesAreTheSourcesHoursAtThePace(t *testing.T) {
+	w := gardenWorldData
+	if w.pace != 10 {
+		t.Fatalf("pace %d", w.pace)
+	}
+	hour := int64(3_600_000 / w.pace)
+	// seed_*.js classProps time_grow1, time_grow2 (hours).
+	for seed, h := range map[string][2]float64{"seed_spinach": {0.5, 0.25}, "seed_potato": {6, 5.5}, "seed_onion": {1, 0.5}, "herb_seed_purple_flower": {0.5, 0.5}, "herb_seed_yellow_crumb_flower": {4.5, 4.5}} {
+		s := w.seeds[seed]
+		if s.g1 != int64(h[0]*float64(hour)) || s.g2 != int64(h[1]*float64(hour)) {
+			t.Errorf("%s grows in %d + %d ms, want %v h at %d ms an hour", seed, s.g1, s.g2, h, hour)
+		}
+		// The clock before: 8 s an hour, never under 4 s a stage.
+		if s.l1 != max(4000, int64(h[0]*8000)) || s.l2 != max(4000, int64(h[1]*8000)) {
+			t.Errorf("%s old times %d + %d", seed, s.l1, s.l2)
+		}
+	}
+	// include/garden.js timings.water 12 hours, at the same pace; before it, 12 real hours.
+	if w.waterMs != 12*hour || w.legacyWaterMs != 12*3_600_000 {
+		t.Errorf("a watering lasts %d ms (old %d)", w.waterMs, w.legacyWaterMs)
+	}
+	// The planter's lock is the source's own real 60 seconds (pushEvent 0.0167 h), not scaled.
+	if w.lockMs != 60_000 {
+		t.Errorf("lock %d", w.lockMs)
+	}
+}
+
+// A state file written before the speed changed: its growing crops finish on the old clock, its
+// waterings last their 12 hours, nothing is lost, and whatever is planted or watered next runs at
+// the new pace. The marks survive the next save and restart.
+func TestGardenFileFromBeforeThePaceFinishesOnItsOldClock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "realtime-gardens.json")
+	gardensFileForTest = path
+	defer func() { gardensFileForTest = "" }()
+	t0 := int64(1_800_000_000_000)
+	// Saved 5 s before the restart: potato seeds planted 10 s before the save in a plot watered 3 hours
+	// before (old: 48 s + 44 s to a crop), dry spinach shoots with 1 s kept, a ripe crop, a wet clean plot.
+	old := fmt.Sprintf(`{"v":1,"saved":%d,"streets":{"GCR101NQ4BU1SKS":{`+
+		`"default:1-1":{"s":"seeds","seed":"seed_potato","wet":true,"wetAt":%d,"stageAt":%d,"mod":1,"planter":1},`+
+		`"default:2-1":{"s":"shoots","seed":"seed_spinach","stageAt":%d,"banked":1000,"mod":1,"planter":1},`+
+		`"default:3-1":{"s":"crop","seed":"seed_spinach","wet":true,"wetAt":%d,"stageAt":%d,"mod":1,"ripeAt":%d},`+
+		`"default:4-1":{"s":"clean","wet":true,"wetAt":%d,"stageAt":%d,"mod":1}}},"grants":[]}`,
+		t0-5000, t0-3*3_600_000, t0-15_000, t0-60_000, t0-3*3_600_000, t0-600_000, t0-600_000, t0-11*3_600_000, t0-11*3_600_000)
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := newGardenRig(t, false)
+	a := r.gardener(1, "Ada")
+	r.send(a, map[string]any{"t": "garden_sync"})
+	snap := r.only(a, "gardens")
+	p11, p21, p31, p41 := plotOf(t, snap, "default:1-1"), plotOf(t, snap, "default:2-1"), plotOf(t, snap, "default:3-1"), plotOf(t, snap, "default:4-1")
+	if p11["state"] != "seeds" || p11["wet"] != true || p11["pace"] != nil || p11["wetPace"] != nil {
+		t.Fatalf("the old potato after the restart: %v", p11)
+	}
+	if p21["state"] != "shoots" || p21["banked"] != float64(1000) || p31["state"] != "crop" || p41["state"] != "clean" || p41["wet"] != true {
+		t.Fatalf("the other old plots: %v %v %v", p21, p31, p41)
+	}
+	// The potato was 15 s into its old 48 s of seeds: shoots 33 s on, a crop 44 s after that.
+	r.advance(33 * time.Second)
+	if p := r.g.plots[gardenStreet]["default:1-1"]; p.state != "shoots" {
+		t.Fatalf("33 s on the old potato is %+v", p)
+	}
+	r.advance(44 * time.Second)
+	if p := r.g.plots[gardenStreet]["default:1-1"]; p.state != "crop" || !p.wet {
+		t.Fatalf("77 s on the old potato is %+v", p)
+	}
+	// The dry old shoots, watered now: 3 s of their old 4 s are left, and the water is today's.
+	r.gact(a, 1, "default:2-1", "water", nil)
+	r.drain(a)
+	r.advance(3 * time.Second)
+	if p := r.g.plots[gardenStreet]["default:2-1"]; p.state != "crop" || p.wetPace != 10 || p.pace != 0 {
+		t.Fatalf("the old spinach, watered: %+v", p)
+	}
+	// The wet clean plot keeps its old 12 hours (an hour is left); spinach planted there is on the new clock.
+	r.gact(a, 2, "default:4-1", "plant", map[string]any{"seed": "seed_spinach"})
+	ok := r.only(a, "garden_ok")
+	if p := plotOf(t, ok, "default:4-1"); p["pace"] != float64(10) || p["wet"] != true || p["wetPace"] != nil {
+		t.Fatalf("spinach planted in the old wet plot: %v", p)
+	}
+	r.advance(30 * time.Second)
+	if p := r.g.plots[gardenStreet]["default:4-1"]; p.state != "seeds" {
+		t.Fatalf("new spinach grew on the old clock: %+v", p)
+	}
+	r.advance(spinachRipe() - 30*time.Second)
+	if p := r.g.plots[gardenStreet]["default:4-1"]; p.state != "crop" || !p.wet {
+		t.Fatalf("new spinach after its 4.5 minutes: %+v", p)
+	}
+	// Picked and hoed, the old potato plot is an ordinary plot: the next potato takes its 69 minutes.
+	r.gact(a, 3, "default:1-1", "harvest", nil)
+	r.gact(a, 4, "default:1-1", "clear", nil)
+	r.gact(a, 5, "default:1-1", "plant", map[string]any{"seed": "seed_potato"})
+	r.drain(a)
+	r.advance(2 * time.Second) // the save
+	r.hub.Shutdown()
+	later := r.now
+	r2 := newGardenRig(t, false)
+	r2.now = later
+	p := r2.g.plots[gardenStreet]["default:1-1"]
+	if p == nil || p.state != "seeds" || p.seed != "seed_potato" || p.pace != 10 {
+		t.Fatalf("the new potato after a restart: %+v", p)
+	}
+	if need := r2.g.need(p); need != 36*60*1000 {
+		t.Fatalf("its seeds stage is %d ms", need)
+	}
+}
+
+// One watering covers about one long crop, as in Glitch: potato (69 min) planted on a fresh watering
+// (72 min) ripens wet; planted late it dries, keeps its growth, and goes on when watered.
+func TestGardenAWateringCoversOneLongCrop(t *testing.T) {
+	r := newGardenRig(t, false)
+	a := r.gardener(1, "Ada")
+	r.gact(a, 1, "default:1-1", "water", nil)
+	r.gact(a, 2, "default:1-1", "plant", map[string]any{"seed": "seed_potato"})
+	r.drain(a)
+	r.advance(69 * time.Minute)
+	p := r.g.plots[gardenStreet]["default:1-1"]
+	if p.state != "crop" || !p.wet {
+		t.Fatalf("potato after 69 minutes: %+v", p)
+	}
+	r.advance(3 * time.Minute)
+	if p.wet {
+		t.Fatalf("the watering outlasted 72 minutes: %+v", p)
+	}
+	// A second potato in the same plot, watered again: dry at 72 minutes only if planted late.
+	r.gact(a, 3, "default:1-1", "harvest", nil)
+	r.gact(a, 4, "default:1-1", "clear", nil)
+	r.gact(a, 5, "default:1-1", "water", nil)
+	r.advance(10 * time.Minute)
+	r.gact(a, 6, "default:1-1", "plant", map[string]any{"seed": "seed_potato"})
+	r.drain(a)
+	r.advance(62 * time.Minute)
+	p = r.g.plots[gardenStreet]["default:1-1"] // hoed dry it was forgotten: the watering made it anew
+	if p.wet || p.state != "shoots" || p.banked != 26*60*1000 {
+		t.Fatalf("potato planted 10 minutes late, at the drying: %+v", p)
+	}
+	r.advance(5 * time.Hour)
+	if p.state != "shoots" || p.banked != 26*60*1000 {
+		t.Fatalf("a dry plot grew or lost growth: %+v", p)
+	}
+	r.gact(a, 7, "default:1-1", "water", nil)
+	r.advance(7 * time.Minute)
+	if p.state != "crop" {
+		t.Fatalf("watered again, the last 7 minutes: %+v", p)
 	}
 }

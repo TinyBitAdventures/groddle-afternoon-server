@@ -26,6 +26,10 @@ type gardenRec struct {
 	Fert    bool    `json:"fert,omitempty"`
 	Planter int64   `json:"planter,omitempty"`
 	RipeAt  int64   `json:"ripeAt,omitempty"`
+	// The clock the crop and the watering run on (gardens.go need, waterOf). A file from before the
+	// garden's speed changed has neither, so its crops finish and its waterings last as they were.
+	Pace    int `json:"pace,omitempty"`
+	WetPace int `json:"wetPace,omitempty"`
 }
 
 type gardenFile struct {
@@ -52,7 +56,7 @@ func (g *gardens) load() error {
 				dropped++
 				continue
 			}
-			p := &gPlot{state: r.State, seed: r.Seed, wet: r.Wet, wetAt: r.WetAt, stageAt: r.StageAt, banked: r.Banked, mod: r.Mod, fert: r.Fert, planter: r.Planter, ripeAt: r.RipeAt}
+			p := &gPlot{state: r.State, seed: r.Seed, wet: r.Wet, wetAt: r.WetAt, stageAt: r.StageAt, banked: r.Banked, mod: r.Mod, fert: r.Fert, planter: r.Planter, ripeAt: r.RipeAt, pace: r.Pace, wetPace: r.WetPace}
 			if p.mod <= 0 || p.mod > 1 {
 				p.mod = 1
 			}
@@ -94,7 +98,7 @@ func (g *gardens) save() {
 			if f.Streets[street] == nil {
 				f.Streets[street] = map[string]*gardenRec{}
 			}
-			f.Streets[street][id] = &gardenRec{State: p.state, Seed: p.seed, Wet: p.wet, WetAt: p.wetAt, StageAt: p.stageAt, Banked: p.banked, Mod: p.mod, Fert: p.fert, Planter: p.planter, RipeAt: p.ripeAt}
+			f.Streets[street][id] = &gardenRec{State: p.state, Seed: p.seed, Wet: p.wet, WetAt: p.wetAt, StageAt: p.stageAt, Banked: p.banked, Mod: p.mod, Fert: p.fert, Planter: p.planter, RipeAt: p.ripeAt, Pace: p.pace, WetPace: p.wetPace}
 		}
 	}
 	b, _ := json.Marshal(f)

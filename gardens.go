@@ -22,10 +22,11 @@ package main
 //	                                                                    a Master Gardener pour (gardens_potions.go)
 //	{"t":"garden_ack","id":"gg-…"}                                     a pick's crop is in the saved pack
 //	{"t":"garden_dev","lock":5000,"water":20000}                       QA only, GRODDLE_GARDENS_DEV=1
+//	{"t":"garden_dev","skip":180000}                                   QA only: garden time passes (below)
 //
 // Server to client:
 //
-//	{"t":"gardens","street":"GCR…","snap":true,"now":ms,"lock":60000,"water":43200000,
+//	{"t":"gardens","street":"GCR…","snap":true,"now":ms,"lock":60000,"water":4320000,
 //	 "beds":{"default":[4,2],"herb":[3,2]},"plots":{"default:1-2":Plot}}   the answer to garden_sync
 //	                                                    ("none":true: nothing is shared on this street)
 //	{"t":"gardens","street":"GCR…","now":ms,"plots":{…}}                    a change, a stage, a drying
@@ -38,16 +39,23 @@ package main
 //	                                                    original showed over their head (include/garden.js 708-722)
 //
 // Plot: {"state":"seeds","seed":"seed_spinach","wet":true,"wetAt":ms,"stageAt":ms,"banked":ms,"mod":0.9,
-// "fert":true,"ripeAt":ms,"planter":7,"lock":ms}, times the server's Unix ms. A plot nobody touched is
-// {"state":"clean"}. "planter" and "lock" (ms left) only while the planter's 60 seconds run.
+// "fert":true,"ripeAt":ms,"planter":7,"lock":ms,"pace":10,"wetPace":10}, times the server's Unix ms. A plot
+// nobody touched is {"state":"clean"}. "planter" and "lock" (ms left) only while the planter's 60 seconds
+// run. "pace" and "wetPace" say which clock the crop and the watering run on (below).
 //
 // The rules (js/garden.js, include/garden.js):
 //   - Growth runs only while wet (stateChanged dry 989-1020: progress is kept). A watering lasts
 //     rules.waterMs; seeds -> shoots -> crop take the seed's grow1Ms and grow2Ms times its grow
-//     modifier (the Growth Spurt and Speedy Herbs cards, the planter's), at the remake's speed
-//     (Austin 2026-11-07, as data). Growth goes on while the server is down, as the game's does on a
-//     closed page; every stage a long gap passed is taken (the page's tickGarden takes one a call,
-//     register G561; the server does not).
+//     modifier (the Growth Spurt and Speedy Herbs cards, the planter's). The times are the source's
+//     hours at rules.pace times Glitch's speed (Austin 2026-11-10: about 10, so a source hour is 6
+//     minutes and a watering 72; js/garden.js GARDEN_SPEEDUP is the one number, and
+//     tools/build-realtime-gardens.mjs writes it here). Growth goes on while the server is down, as
+//     the game's does on a closed page; every stage a long gap passed is taken.
+//   - A crop keeps the clock it was planted on, and a watering the clock it was poured on: a plot
+//     says so with pace and wetPace, set at planting and at watering. A plot in the state file with
+//     no pace is from before the speed changed (8 to 92 s a crop, a watering 12 real hours):
+//     rules.legacy holds that clock, and the crop finishes on it. Nothing in the ground is lost,
+//     reset or made to wait by the change.
 //   - Plant only a clean plot (339-384, 441-446), the seed fitting the bed. The site's ledger takes
 //     the seed first (groddle-afternoon-site LedgerUse.php, whole items, "n":1); the answer carries
 //     its "use", which the page applies once (its trade slice's applied list).
@@ -133,7 +141,8 @@ var (
 
 type gardenSeed struct {
 	bed      string
-	g1, g2   int64
+	g1, g2   int64 // the two stages at rules.pace
+	l1, l2   int64 // the same on the clock from before it (rules.legacy)
 	crop     string
 	produces int
 }
@@ -145,7 +154,9 @@ type gardenBed struct {
 }
 
 type gardenWorld struct {
-	waterMs, lockMs int64
+	pace            int   // how many times faster than Glitch a garden runs (js/garden.js GARDEN_SPEEDUP)
+	waterMs, lockMs int64 // a watering at that pace; the planter's lock
+	legacyWaterMs   int64 // a watering poured before the pace (wetPace unset)
 	fertilize       float64
 	seeds           map[string]gardenSeed
 	streets         map[string]map[string]*gardenBed
@@ -155,25 +166,30 @@ type gardenWorld struct {
 func loadGardenWorld(raw []byte) (*gardenWorld, error) {
 	var file struct {
 		Rules struct {
-			WaterMs   int64               `json:"waterMs"`
-			LockMs    int64               `json:"lockMs"`
-			Fertilize float64             `json:"fertilize"`
-			Seeds     map[string][]any    `json:"seeds"`
-			Potions   map[string][]string `json:"potions"`
+			Pace      int              `json:"pace"`
+			WaterMs   int64            `json:"waterMs"`
+			LockMs    int64            `json:"lockMs"`
+			Fertilize float64          `json:"fertilize"`
+			Seeds     map[string][]any `json:"seeds"`
+			Legacy    struct {
+				WaterMs int64              `json:"waterMs"`
+				Seeds   map[string][]int64 `json:"seeds"`
+			} `json:"legacy"`
+			Potions map[string][]string `json:"potions"`
 		} `json:"rules"`
 		Streets map[string][][]any `json:"streets"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	w := &gardenWorld{waterMs: file.Rules.WaterMs, lockMs: file.Rules.LockMs, fertilize: file.Rules.Fertilize, seeds: map[string]gardenSeed{}, streets: map[string]map[string]*gardenBed{}, potions: map[string]gardenPotion{}}
+	w := &gardenWorld{pace: file.Rules.Pace, waterMs: file.Rules.WaterMs, legacyWaterMs: file.Rules.Legacy.WaterMs, lockMs: file.Rules.LockMs, fertilize: file.Rules.Fertilize, seeds: map[string]gardenSeed{}, streets: map[string]map[string]*gardenBed{}, potions: map[string]gardenPotion{}}
 	for id, r := range file.Rules.Potions {
 		if len(r) != 2 || !potionActions[r[0]] || r[1] == "" {
 			return nil, fmt.Errorf("bad potion %s %v", id, r)
 		}
 		w.potions[id] = gardenPotion{action: r[0], noTarget: r[1]}
 	}
-	if w.waterMs <= 0 || w.lockMs <= 0 || w.fertilize <= 0 {
+	if w.pace <= 0 || w.waterMs <= 0 || w.legacyWaterMs <= 0 || w.lockMs <= 0 || w.fertilize <= 0 {
 		return nil, fmt.Errorf("bad rules %+v", file.Rules)
 	}
 	for id, r := range file.Rules.Seeds {
@@ -188,7 +204,11 @@ func loadGardenWorld(raw []byte) (*gardenWorld, error) {
 		if !(ok1 && ok2 && ok3 && ok4 && ok5) || (bed != "default" && bed != "herb") || g1 <= 0 || g2 <= 0 || crop == "" || n < 1 {
 			return nil, fmt.Errorf("bad seed %s %v", id, r)
 		}
-		w.seeds[id] = gardenSeed{bed: bed, g1: int64(g1), g2: int64(g2), crop: crop, produces: int(n)}
+		old := file.Rules.Legacy.Seeds[id]
+		if len(old) != 2 || old[0] <= 0 || old[1] <= 0 {
+			return nil, fmt.Errorf("seed %s has no legacy times %v", id, old)
+		}
+		w.seeds[id] = gardenSeed{bed: bed, g1: int64(g1), g2: int64(g2), l1: old[0], l2: old[1], crop: crop, produces: int(n)}
 	}
 	for tsid, beds := range file.Streets {
 		row := map[string]*gardenBed{}
@@ -253,6 +273,8 @@ type gPlot struct {
 	fert    bool
 	planter int64
 	ripeAt  int64
+	pace    int // the clock the crop was planted on (rules.pace); 0: before it (rules.legacy)
+	wetPace int // the clock the watering was poured on; 0: before it
 }
 
 func freshPlot() *gPlot { return &gPlot{state: "clean", mod: 1} }
@@ -261,17 +283,42 @@ func (p *gPlot) fresh() bool { return p.state == "clean" && !p.wet }
 
 func (p *gPlot) growing() bool { return p.state == "seeds" || p.state == "shoots" }
 
-// need is the current stage's growing time.
+// need is the current stage's growing time, on the clock the crop was planted on.
 func (g *gardens) need(p *gPlot) int64 {
 	s, ok := g.w.seeds[p.seed]
 	if !ok {
 		return 0
 	}
-	t := s.g1
-	if p.state == "shoots" {
-		t = s.g2
+	t1, t2 := s.l1, s.l2
+	if p.pace == g.w.pace {
+		t1, t2 = s.g1, s.g2
 	}
-	return int64(math.Round(float64(t) * p.mod))
+	if p.state == "shoots" {
+		t1 = t2
+	}
+	return int64(math.Round(float64(t1) * p.mod))
+}
+
+// waterOf is how long the plot's watering lasts, on the clock it was poured on.
+func (g *gardens) waterOf(p *gPlot) int64 {
+	if p.wetPace == g.w.pace {
+		return g.waterMs
+	}
+	return g.w.legacyWaterMs
+}
+
+// sow puts a seed in a plot on today's clock (include/garden.js 357-384; js/garden.js sowPlot).
+func (g *gardens) sow(p *gPlot, seed string, mod float64, planter, now int64) {
+	p.state, p.seed, p.fert, p.mod, p.planter, p.ripeAt = "seeds", seed, false, mod, planter, 0
+	p.stageAt, p.banked, p.pace = now, 0, g.w.pace
+}
+
+// wetNow waters a plot (js/garden.js wetPlot): a dry plot's stage clock restarts, the watering starts again.
+func (g *gardens) wetNow(p *gPlot, now int64) {
+	if !p.wet {
+		p.stageAt = now
+	}
+	p.wet, p.wetAt, p.wetPace = true, now, g.w.pace
 }
 
 // advance brings a plot to now: every stage the time passed (js/garden.js tickGarden, each
@@ -279,7 +326,7 @@ func (g *gardens) need(p *gPlot) int64 {
 func (g *gardens) advance(p *gPlot, now int64) bool {
 	changed := false
 	for p.wet {
-		dryAt := p.wetAt + g.waterMs
+		dryAt := p.wetAt + g.waterOf(p)
 		at := min(now, dryAt)
 		if p.growing() {
 			if need := g.need(p); need > 0 && p.banked+(at-p.stageAt) >= need {
@@ -300,7 +347,7 @@ func (g *gardens) advance(p *gPlot, now int64) bool {
 			if p.growing() {
 				p.banked += max(0, dryAt-p.stageAt)
 			}
-			p.stageAt, p.wet, p.wetAt = dryAt, false, 0
+			p.stageAt, p.wet, p.wetAt, p.wetPace = dryAt, false, 0, 0
 			changed = true
 		}
 		break
@@ -322,7 +369,7 @@ func (g *gardens) due(p *gPlot) int64 {
 		}
 	}
 	if p.wet {
-		pick(p.wetAt + g.waterMs)
+		pick(p.wetAt + g.waterOf(p))
 		if p.growing() {
 			if need := g.need(p); need > 0 {
 				pick(p.stageAt + need - p.banked)
@@ -350,6 +397,12 @@ func (g *gardens) view(p *gPlot, now int64) map[string]any {
 	}
 	if p.wet {
 		m["wet"], m["wetAt"] = true, p.wetAt
+		if p.wetPace != 0 {
+			m["wetPace"] = p.wetPace
+		}
+	}
+	if p.pace != 0 && p.seed != "" {
+		m["pace"] = p.pace
 	}
 	if p.banked > 0 {
 		m["banked"] = p.banked
@@ -825,8 +878,7 @@ func (g *gardens) plant(rp *gardenReply, bed *gardenBed) {
 		}
 		now := g.nowMs()
 		// include/garden.js plant: the seed, its grow modifier and the planter (public gardens only).
-		p.state, p.seed, p.fert, p.mod, p.planter, p.ripeAt = "seeds", rp.m.Seed, false, mod, rp.cl.ID(), 0
-		p.stageAt, p.banked = now, 0
+		g.sow(p, rp.m.Seed, mod, rp.cl.ID(), now)
 		log.Printf("gardens: %d planted %s in %s %s", rp.cl.ID(), rp.m.Seed, rp.street, rp.m.ID)
 		var extra map[string]any
 		if use != nil {
@@ -845,7 +897,7 @@ func (g *gardens) water(rp *gardenReply) {
 			continue
 		}
 		// js/garden.js wetPlot: a dry plot's clock restarts now; a watering lasts waterMs.
-		p.wet, p.wetAt, p.stageAt = true, now, now
+		g.wetNow(p, now)
 		changed = append(changed, id)
 	}
 	if len(changed) == 0 {
@@ -876,7 +928,7 @@ func (g *gardens) harvest(rp *gardenReply, full bool) {
 		n = int(math.Round(float64(n) / 2))
 	}
 	// The pick (include/garden.js 465-472): the plot is dirty, its fertilizer and planter gone.
-	p.state, p.seed, p.fert, p.planter, p.ripeAt, p.stageAt, p.banked = "dirty", "", false, 0, 0, now, 0
+	p.state, p.seed, p.fert, p.planter, p.ripeAt, p.stageAt, p.banked, p.pace = "dirty", "", false, 0, 0, now, 0, 0
 	gr := g.grant(rp.cl.ID(), seed.crop, n)
 	creditLocked(g.h, rp.cl.ID(), "take", creditItem(seed.crop, n))
 	log.Printf("gardens: %d picked %d %s in %s %s (%s)", rp.cl.ID(), n, seed.crop, rp.street, rp.m.ID, gr.ID)
@@ -900,7 +952,7 @@ func (g *gardens) fertCheck(p *gPlot, now int64) (code, line string) {
 	}
 	left := 0.0
 	if p.wet {
-		left = math.Max(0, math.Min(1, 1-float64(now-p.wetAt)/float64(g.waterMs)))
+		left = math.Max(0, math.Min(1, 1-float64(now-p.wetAt)/float64(g.waterOf(p))))
 	}
 	if left < g.w.fertilize {
 		if left > 0 {
@@ -1007,7 +1059,10 @@ func (g *gardens) handleAck(cl *Client, frame json.RawMessage) {
 }
 
 // handleDev (GRODDLE_GARDENS_DEV=1 only): a shorter lock and drying for QA, since the online page
-// strips its query parameters.
+// strips its query parameters; and the garden's QA clock: "skip" moves every plot's stage and
+// watering back by that many ms, as if each had been planted and watered that much earlier, and the
+// plots grow and dry by the rules at once (crops take minutes to an hour, so a check lets the time
+// pass instead of waiting; the game's solo ?gardenqa=1 does the same).
 func (g *gardens) handleDev(cl *Client, frame json.RawMessage) {
 	if !g.dev {
 		g.h.ErrorLocked(cl, "bad_frame", "Unknown message.")
@@ -1016,8 +1071,25 @@ func (g *gardens) handleDev(cl *Client, frame json.RawMessage) {
 	var m struct {
 		Lock  int64 `json:"lock"`
 		Water int64 `json:"water"`
+		Skip  int64 `json:"skip"`
 	}
 	if json.Unmarshal(frame, &m) != nil {
+		return
+	}
+	if m.Skip > 0 && m.Skip <= 24*3_600_000 {
+		for _, room := range g.plots {
+			for _, p := range room {
+				p.stageAt -= m.Skip
+				if p.wet {
+					p.wetAt -= m.Skip
+				}
+				if p.ripeAt > 0 {
+					p.ripeAt -= m.Skip // the planter's lock runs on too
+				}
+			}
+		}
+		log.Printf("gardens: dev skip %d ms (by %d)", m.Skip, cl.ID())
+		g.tick()
 		return
 	}
 	if m.Lock >= 1000 {
