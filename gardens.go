@@ -723,6 +723,7 @@ func (rp *gardenReply) ok(changed []string, extra map[string]any, now bool) {
 		g.h.SendLocked(rp.cl, msg)
 	}
 	g.broadcast(rp.street, changed, rp.cl.ID())
+	g.h.tallyLocked("garden:"+rp.m.Verb, 1) // the Analytics tab's world tallies (tally.go)
 	// The others see who tended (include/garden.js 708-722: the tool over the tender's head).
 	ev := map[string]any{"t": "garden_ev", "street": rp.street, "by": rp.cl.ID(), "verb": rp.m.Verb, "ids": changed}
 	if tool := overlayTool(rp.m); tool != "" {

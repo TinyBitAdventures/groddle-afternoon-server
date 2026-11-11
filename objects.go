@@ -1182,6 +1182,9 @@ func (o *objects) finishAct(cl *Client, m objAct, street string, ob *liveObj, be
 	if !v.got.empty() {
 		creditLocked(o.h, cl.ID(), "take", v.got)
 	}
+	if tallyLanded(v.extra) {
+		o.h.tallyLocked(objTallyKey(spot, m.Verb), 1) // the Analytics tab's world tallies (tally.go)
+	}
 	o.broadcast(street, cl.ID(), ob)
 	if v.ev != "" {
 		// The others on the street see the verb happen (the squeeze, the milking, the feed).

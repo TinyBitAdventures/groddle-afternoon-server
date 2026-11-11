@@ -47,6 +47,13 @@ package main
 // crash (no shutdown hook) loses at most the last playEvery of the players
 // online then. -play-time off measures and sends nothing; with no -ledger-url
 // there is nowhere to send, so it is off too.
+//
+// The world's tallies ride along (tally.go, for the console's Analytics tab):
+// a batch may carry "counts", per UTC day the acts that landed, everyone's
+// together and nobody named, {"2026-11-11":{"pig:nibble":3,"rock:mine":40}}, and
+// a batch with counts and no players is sent too. They wait, are kept in the
+// state file and are taken once by the batch id with the seconds, so a tally
+// is never added twice either. A day keeps at most tallyDayKeys keys.
 
 import (
 	"crypto/rand"
@@ -94,6 +101,43 @@ type playEntry struct {
 type playBatch struct {
 	ID      string      `json:"id"`
 	Players []playEntry `json:"players"`
+	Counts  playCounts  `json:"counts,omitempty"`
+}
+
+// playCounts is the world's tallies by UTC day ("2006-01-02") and key (tally.go).
+type playCounts map[string]map[string]int64
+
+// add puts another's tallies into c (a day full at tallyDayKeys takes no new key).
+func (c playCounts) add(o playCounts) {
+	for day, keys := range o {
+		for k, n := range keys {
+			c.addOne(day, k, n)
+		}
+	}
+}
+
+func (c playCounts) addOne(day, key string, n int64) {
+	if n <= 0 {
+		return
+	}
+	d := c[day]
+	if d == nil {
+		d = map[string]int64{}
+		c[day] = d
+	}
+	if _, ok := d[key]; !ok && len(d) >= tallyDayKeys {
+		return
+	}
+	d[key] += n
+}
+
+func (c playCounts) clone() playCounts {
+	if len(c) == 0 {
+		return nil
+	}
+	out := playCounts{}
+	out.add(c)
+	return out
 }
 
 // playSink is the site. post answers true once the site has added the batch, now or before.
@@ -105,6 +149,7 @@ type playFile struct {
 	V       int         `json:"v"`
 	Sent    *playBatch  `json:"sent,omitempty"`
 	Pending []playEntry `json:"pending"`
+	Counts  playCounts  `json:"counts,omitempty"`
 }
 
 // playSession is one character's game session (under the hub lock).
@@ -125,6 +170,7 @@ type playTime struct {
 
 	mu       sync.Mutex // the outbox: taken under the hub lock by the hooks, and by the sender without it
 	pending  map[int64]playEntry
+	counts   playCounts // the world's tallies not yet in a batch (tally.go)
 	sent     *playBatch
 	seq      uint64
 	saving   bool
@@ -142,7 +188,7 @@ func newPlayTime(h *Hub) Module {
 	var b [4]byte
 	rand.Read(b[:])
 	m := &playTime{h: h, boot: hex.EncodeToString(b[:]), sessions: map[int64]*playSession{}, carry: map[int64]time.Duration{},
-		pending: map[int64]playEntry{}, stop: make(chan struct{}), wake: make(chan struct{}, 1), done: make(chan struct{})}
+		pending: map[int64]playEntry{}, counts: playCounts{}, stop: make(chan struct{}), wake: make(chan struct{}, 1), done: make(chan struct{})}
 	if testing.Testing() {
 		m.sink = playSinkForTest
 	} else if *playTimeFlag != "off" {
@@ -163,12 +209,16 @@ func newPlayTime(h *Hub) Module {
 			log.Printf("play time %s: %v (kept in memory only)", m.path, err)
 			m.path = ""
 		} else if ok {
-			if f.Sent != nil && f.Sent.ID != "" && len(f.Sent.Players) > 0 {
+			if f.Sent != nil && f.Sent.ID != "" && (len(f.Sent.Players) > 0 || len(f.Sent.Counts) > 0) {
+				if f.Sent.Players == nil {
+					f.Sent.Players = []playEntry{}
+				}
 				m.sent = f.Sent
 			}
 			for _, e := range f.Pending {
 				m.addPendingLocked(e)
 			}
+			m.counts.add(f.Counts)
 			if m.sent != nil || len(m.pending) > 0 {
 				log.Printf("play time %s: %d players' seconds from before the restart to send", m.path, len(m.pending)+m.sentPlayers())
 			}
@@ -190,6 +240,30 @@ func (m *playTime) Register(r *Registry) {
 	r.OnDisconnect(m.disconnected)
 	r.OnShutdown(m.shutdown)
 	r.Provide("playtime.input", m.input)
+	r.Provide("playtime.count", m.count)
+}
+
+// count adds n to today's (UTC, the hub's clock) tally of key, for the next batch (Hub.tallyLocked).
+func (m *playTime) count(key string, n int64) {
+	day := m.h.Now().UTC().Format("2006-01-02")
+	m.mu.Lock()
+	m.counts.addOne(day, key, n)
+	m.saveSoonLocked()
+	m.mu.Unlock()
+}
+
+// tallied is the tallies not yet taken by the site, sent or waiting (tests).
+func (m *playTime) tallied() playCounts {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := m.counts.clone()
+	if out == nil {
+		out = playCounts{}
+	}
+	if m.sent != nil {
+		out.add(m.sent.Counts)
+	}
+	return out
 }
 
 // playInputLocked tells the module a game socket sent an input (hub.go Handle). Under the hub lock.
@@ -376,10 +450,11 @@ func (m *playTime) save() {
 		return // a send that ended after shutdown: the file keeps its batch, which the site dedupes
 	}
 	m.mu.Lock()
-	f := playFile{V: 1, Pending: make([]playEntry, 0, len(m.pending))}
+	f := playFile{V: 1, Pending: make([]playEntry, 0, len(m.pending)), Counts: m.counts.clone()}
 	if m.sent != nil {
 		b := *m.sent
 		b.Players = append([]playEntry(nil), m.sent.Players...)
+		b.Counts = m.sent.Counts.clone()
 		f.Sent = &b
 	}
 	for _, e := range m.pending {
@@ -403,7 +478,7 @@ func (m *playTime) flush() bool {
 		m.mu.Lock()
 		fresh := false
 		if m.sent == nil {
-			if len(m.pending) == 0 {
+			if len(m.pending) == 0 && len(m.counts) == 0 {
 				m.mu.Unlock()
 				return true
 			}
@@ -418,6 +493,9 @@ func (m *playTime) flush() bool {
 			for _, id := range ids {
 				b.Players = append(b.Players, m.pending[id])
 				delete(m.pending, id)
+			}
+			if len(m.counts) > 0 {
+				b.Counts, m.counts = m.counts, playCounts{}
 			}
 			m.sent, fresh = b, true
 		}

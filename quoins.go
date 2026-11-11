@@ -379,6 +379,7 @@ func (m *quoinsModule) claim(cl *Client, frame json.RawMessage) {
 	}
 	m.h.SendLocked(cl, got)
 	m.h.BroadcastStreetLocked(street, taken, cl.ID())
+	m.h.tallyLocked("quoin:"+paid.Type, 1) // the Analytics tab's world tallies (tally.go)
 	m.credit(cl, paid.Type, amount, st.mult, shards)
 	m.saveSoon()
 }
