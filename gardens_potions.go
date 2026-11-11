@@ -108,7 +108,7 @@ func bedOrder(b *gardenBed) []string {
 	out := make([]string, 0, b.cols*b.rows)
 	for r := 1; r <= b.rows; r++ {
 		for c := 1; c <= b.cols; c++ {
-			out = append(out, b.bed+":"+strconv.Itoa(c)+"-"+strconv.Itoa(r))
+			out = append(out, b.key+":"+strconv.Itoa(c)+"-"+strconv.Itoa(r))
 		}
 	}
 	return out

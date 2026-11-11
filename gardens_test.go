@@ -772,3 +772,30 @@ func TestGardenAWateringCoversOneLongCrop(t *testing.T) {
 		t.Fatalf("watered again, the last 7 minutes: %+v", p)
 	}
 }
+
+// Report 188: the Herb Gardens streets have two herb beds, the first keyed herb2 (js/garden.js
+// streetGardenBed); herb2's plots take herb seeds only and there is no crop bed.
+func TestGardenHerbGardensStreetsHaveTwoHerbBeds(t *testing.T) {
+	const chakra = "GA95U14319524O9"
+	beds := gardenWorldData.streets[chakra]
+	if beds["herb2"] == nil || beds["herb2"].bed != "herb" || beds["herb2"].key != "herb2" || beds["herb"] == nil || beds["default"] != nil {
+		t.Fatalf("Chakra Phool Herb Gardens beds %v", beds)
+	}
+	if bed, key := gardenWorldData.bedOf(chakra, "herb2:4-2"); bed != beds["herb2"] || key != "4-2" {
+		t.Fatalf("herb2:4-2 is %v %q", bed, key)
+	}
+	if got := bedOrder(beds["herb2"]); got[0] != "herb2:1-1" || len(got) != 8 {
+		t.Fatalf("herb2 order %v", got)
+	}
+	r := newGardenRig(t, false)
+	b := beds["herb2"]
+	a := r.player(1, "Ada", chakra, b.x+20, b.y)
+	r.gact(a, 1, "herb2:1-1", "plant", map[string]any{"seed": "herb_seed_rubeweed"})
+	if ok := r.only(a, "garden_ok"); plotOf(t, ok, "herb2:1-1")["state"] != "seeds" {
+		t.Fatalf("an herb seed in herb2 answered %v", ok)
+	}
+	r.gact(a, 2, "herb2:2-1", "plant", map[string]any{"seed": "seed_spinach"})
+	if no := r.only(a, "garden_no"); no["message"] != gardenHerbOnly {
+		t.Fatalf("a crop seed in herb2 answered %v", no)
+	}
+}

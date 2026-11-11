@@ -131,7 +131,9 @@ var (
 	gardensFileForTest string
 	gardensOffForTest  bool
 
-	gardenPlotRe = regexp.MustCompile(`^(default|herb):(\d{1,2})-(\d{1,2})$`)
+	// A bed's key: default, herb, or herb2 for a street with two herb beds (the Herb Gardens
+	// streets, js/garden.js HERB_GARDEN_STREETS); its kind is the key without the digit.
+	gardenPlotRe = regexp.MustCompile(`^(default|herb|herb2):(\d{1,2})-(\d{1,2})$`)
 	gardenVerbs  = map[string]bool{"plant": true, "water": true, "water_all": true, "harvest": true, "clear": true, "fertilize": true}
 )
 
@@ -148,7 +150,8 @@ type gardenSeed struct {
 }
 
 type gardenBed struct {
-	bed        string
+	bed        string // the kind: default (crops) or herb
+	key        string // the id in plot ids: the kind, or herb2
 	cols, rows int
 	x, y       float64
 }
@@ -216,15 +219,19 @@ func loadGardenWorld(raw []byte) (*gardenWorld, error) {
 			if len(b) != 5 {
 				return nil, fmt.Errorf("%s: bad bed %v", tsid, b)
 			}
-			bed, ok1 := b[0].(string)
+			key, ok1 := b[0].(string)
 			cols, ok2 := b[1].(float64)
 			rows, ok3 := b[2].(float64)
 			x, ok4 := b[3].(float64)
 			y, ok5 := b[4].(float64)
-			if !(ok1 && ok2 && ok3 && ok4 && ok5) || (bed != "default" && bed != "herb") || cols < 1 || rows < 1 || cols > 12 || rows > 12 || row[bed] != nil {
+			if !(ok1 && ok2 && ok3 && ok4 && ok5) || (key != "default" && key != "herb" && key != "herb2") || cols < 1 || rows < 1 || cols > 12 || rows > 12 || row[key] != nil {
 				return nil, fmt.Errorf("%s: bad bed %v", tsid, b)
 			}
-			row[bed] = &gardenBed{bed: bed, cols: int(cols), rows: int(rows), x: x, y: y}
+			kind := key
+			if key == "herb2" {
+				kind = "herb"
+			}
+			row[key] = &gardenBed{bed: kind, key: key, cols: int(cols), rows: int(rows), x: x, y: y}
 		}
 		w.streets[tsid] = row
 	}
