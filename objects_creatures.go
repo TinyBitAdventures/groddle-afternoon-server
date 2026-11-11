@@ -70,7 +70,8 @@ package main
 //     from every feeder, reset when Guano drops; 15/50/100 make 1/2/3 Guano, the bonus cards 50 -> 3
 //     and 80 -> 5). The food is the ledger's to take first (objects_uses.go), the server decides the
 //     Guano from the shared counter, and the feeder is credited it ("take"). Feed has no limit
-//     (707-851). Its hourly Guano (onInterval 1064-1072) stays each player's own pile.
+//     (707-851). Its hourly Guano (onInterval 1064-1072) is one pile under it for everyone
+//     (objects_guano.go: "guano" in its state, the verb "pickup").
 //   - Not kept: life points (npc_chicken.js 1436, npc_butterfly.js 1212: lost only on a home street
 //     or when more than one of the class is there, 2000 and 400 of them), sing to (the singer's
 //     iMG, once a day each) and the crowding moods, which the client runs as in solo.
@@ -366,7 +367,7 @@ func (o *objects) rookedCreatures(street string, spots map[string]*objSpot) []st
 }
 
 func (o *objects) creatureFresh(ob *liveObj) bool {
-	return ob.lag == 0 && !ob.holdEnd.After(o.h.Now()) && ob.incEgg == "" && ob.food == 0 && ob.userName == "" &&
+	return ob.lag == 0 && !ob.holdEnd.After(o.h.Now()) && ob.incEgg == "" && ob.food == 0 && ob.guano == 0 && ob.userName == "" &&
 		(ob.usesDay != o.today() || (len(ob.uses) == 0 && len(ob.tally) == 0))
 }
 
@@ -393,6 +394,9 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 		tally("mk", "milk")
 	case "batterfly":
 		m["food"] = ob.food
+		if ob.guano > 0 {
+			m["guano"] = ob.guano // the pile under it (objects_guano.go)
+		}
 	}
 	if ob.userName != "" {
 		o.nameState(ob, m)

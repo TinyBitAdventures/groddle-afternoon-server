@@ -189,7 +189,7 @@ var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab|dragon):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true}
+		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true, "pickup": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true, "herd": true}
 )
 
@@ -519,6 +519,7 @@ type liveObj struct {
 	incEnd  time.Time
 	incStop func() bool
 	food    int
+	guano   int // batterfly: the hourly Guano lying under it (objects_guano.go)
 
 	// rock: who is mining it now, in the order they started, and each miner's helpers with how
 	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122). A Dirt Pile keeps its
@@ -557,6 +558,12 @@ type objects struct {
 	// Fertilidust, Tree Poison and Antidote through the site's ledger (objects_uses.go).
 	uses objUses
 
+	// A Batterfly's hourly Guano (objects_guano.go): when the clocks started, the time each street's
+	// piles were last settled to, and the tick timer of each street someone stands on.
+	guanoStart time.Time
+	guanoAt    map[string]time.Time
+	guanoStop  map[string]func() bool
+
 	// The state file (objects_persist.go): "" keeps everything in memory only.
 	path    string
 	saveAt  bool              // a save is due
@@ -574,6 +581,12 @@ func newObjects(h *Hub) Module {
 			o.path = ""
 		}
 	}
+	if o.guanoStart.IsZero() {
+		// The Guano clocks start now (objects_guano.go): a new world, or a state file from before
+		// them. Written at once, so a crash before the first change does not start them again.
+		o.guanoStart = time.UnixMilli(h.Now().UnixMilli())
+		o.saveNow()
+	}
 	return o
 }
 
@@ -588,6 +601,7 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_dev", o.kept(o.pigDev))
 	r.Handle("obj_dust", o.kept(o.handleDust))
 	r.Handle("obj_day_dev", o.kept(o.dayDev))
+	r.Handle("obj_guano_dev", o.kept(o.guanoDev))
 	r.Handle("bog_start", o.kept(o.handleBogStart))
 	r.OnLeave(o.leftStreet)
 	r.Provide("objects.treeClass", o.treeClass)
@@ -887,6 +901,10 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	}
 	// A street's Piggies start their clocks the first time anyone is there (objects_pigs.go).
 	o.wakePigs(street)
+	// The hourly Guano under its Batterflies, up to now (objects_guano.go): the others there see
+	// what grew, and the street's next tick is armed while someone stands on it.
+	o.guanoGrew(street, cl.ID())
+	o.armGuano(street)
 	ids := make([]string, 0, len(o.streets[street]))
 	for id := range o.streets[street] {
 		ids = append(ids, id)
@@ -921,7 +939,8 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	// "pigtrips": it walks them to food and home too ("trip" in their state, objects_pigs.go startTrip),
 	// from "homes" (each Piggy's spot and walk, {"pig:0":[x,range]}) and the street's "trunks", so every
 	// page and the server put a Piggy in the same place.
-	msg := map[string]any{"t": "objs", "street": street, "snap": true, "creatures": true, "pigpaths": true, "pigtrips": true, "animals": animals, "now": o.h.Now().UnixMilli(), "objs": list}
+	// "guano": this server shares the Batterflies' hourly Guano, its clocks running since then (objects_guano.go).
+	msg := map[string]any{"t": "objs", "street": street, "snap": true, "creatures": true, "pigpaths": true, "pigtrips": true, "guano": o.guanoStart.UnixMilli(), "animals": animals, "now": o.h.Now().UnixMilli(), "objs": list}
 	if len(places) > 0 {
 		msg["spots"] = places
 	}
@@ -1074,6 +1093,15 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	if spot.kind == "chicken" && m.Verb == "incubate" {
 		// The egg is the ledger's to take before the Chicken sits on it (objects_creatures.go).
 		o.askIncubate(cl, m, street, spot)
+		return
+	}
+	if m.Verb == "pickup" {
+		// The Guano under a Batterfly, everyone's until someone picks it up (objects_guano.go).
+		if spot.kind != "batterfly" {
+			no("bad_verb", "That is not something here.", nil)
+			return
+		}
+		o.pickGuano(cl, m, street, spot)
 		return
 	}
 	if spot.kind == "batterfly" && m.Verb == "feed" {

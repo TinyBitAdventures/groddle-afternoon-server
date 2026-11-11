@@ -9,7 +9,8 @@ package main
 // replay of a tick nobody watched does), a street Chicken, Butterfly or
 // Batterfly keeps its path's lag, today's uses by each player, a Chicken's egg
 // (it hatches when due, for an owner on the street) and a Batterfly's food
-// counter (objects_creatures.go), and rocks, resource nodes, trees and Wood
+// counter (objects_creatures.go) and the hourly Guano under it, with the clocks'
+// start and each street's settled time (objects_guano.go), and rocks, resource nodes, trees and Wood
 // Trees keep what was taken and when it comes back.
 //
 // -objects-file (default realtime-objects.json beside -secret-file; off:
@@ -76,6 +77,8 @@ type objRec struct {
 	IncBy   int64                    `json:"incBy,omitempty"`
 	IncEnd  int64                    `json:"incEnd,omitempty"`
 	Food    int                      `json:"food,omitempty"`
+	// The hourly Guano under a Batterfly (objects_guano.go).
+	Guano int `json:"guano,omitempty"`
 	// A street Piggy on its way to food (objects_pigs.go pigTrip), on its path's clock.
 	Trip *pigTrip `json:"trip,omitempty"`
 	// A street animal's name, who gave it and when (objects_pigs.go nameAnimal).
@@ -94,6 +97,11 @@ type objFile struct {
 	Streets map[string]map[string]*objRec `json:"streets"`
 	// G605: each player's last capture per street (Unix ms), for the 42 "game days" (objects_pigs_gone.go).
 	Captures map[string]map[int64]int64 `json:"captures,omitempty"`
+	// The Batterflies' hourly Guano (objects_guano.go): when the clocks started and the time each
+	// street's piles were last settled to (Unix ms). A file from before has neither: the clocks
+	// start when it is first read.
+	GuanoStart int64            `json:"guanoStart,omitempty"`
+	GuanoAt    map[string]int64 `json:"guanoAt,omitempty"`
 }
 
 func msOf(t time.Time) int64 {
@@ -116,7 +124,7 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Maturity: ob.maturity, Day: ob.day, WoodCount: ob.woodCount, PoisonEnd: msOf(ob.poisonEnd), PoisonBy: ob.poisonBy,
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
 		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
-		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food,
+		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food, Guano: ob.guano,
 		Name: ob.userName, Namer: ob.namer, NamedAt: msOf(ob.namedAt), GoneDay: ob.goneDay, GoneWhy: ob.goneWhy,
 		Crops: ob.crops, Plops: ob.plops}
 	if ob.trip != nil {
@@ -214,6 +222,9 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 	case "chicken", "butterfly", "batterfly", "kitty", "crab", "dragon":
 		ob.lag, ob.holdEnd = max(0, r.Lag), timeOf(r.HoldEnd)
 		ob.food = max(0, r.Food)
+		if spot.kind == "batterfly" {
+			ob.guano = clamp(r.Guano, 0, guanoCap)
+		}
 		if name := sanitizeAnimalName(r.Name); name != "" && nameSingle[spot.kind] != "" {
 			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
 		}
@@ -272,6 +283,17 @@ func (o *objects) load() error {
 	}
 	n, dead, dropped := 0, 0, 0
 	o.capturesLoad(f.Captures)
+	if f.GuanoStart > 0 {
+		o.guanoStart = timeOf(f.GuanoStart)
+		for street, at := range f.GuanoAt {
+			if at > 0 && len(o.guanoSpots(street)) > 0 {
+				if o.guanoAt == nil {
+					o.guanoAt = map[string]time.Time{}
+				}
+				o.guanoAt[street] = timeOf(at)
+			}
+		}
+	}
 	for street, recs := range f.Streets {
 		spots := o.w.streets[street]
 		for id, r := range recs {
@@ -409,7 +431,13 @@ func (o *objects) save() bool {
 	if o.path == "" {
 		return true
 	}
-	f := objFile{V: 1, Streets: map[string]map[string]*objRec{}, Captures: o.capturesRecord()}
+	f := objFile{V: 1, Streets: map[string]map[string]*objRec{}, Captures: o.capturesRecord(), GuanoStart: msOf(o.guanoStart)}
+	for street, at := range o.guanoAt {
+		if f.GuanoAt == nil {
+			f.GuanoAt = map[string]int64{}
+		}
+		f.GuanoAt[street] = msOf(at)
+	}
 	for street, room := range o.streets {
 		if len(room) == 0 {
 			continue

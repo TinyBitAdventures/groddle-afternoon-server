@@ -525,8 +525,18 @@ func TestASadStreetsPiggiesRefuseAndWait(t *testing.T) {
 		t.Fatalf("a sad Piggy's pet answered %v", no)
 	}
 	r.advance(pigTick + 20*time.Millisecond)
-	if p := objOf(r.only(a, "objs"), "pig:0"); num(p["hunger"]) != 0 || p["daily"] != true {
-		t.Fatalf("a sad Piggy ticked: %v", p)
+	// The sad streets are caves: this one's Batterflies left Guano in those two hours too
+	// (objects_guano.go), in a frame of its own.
+	var p map[string]any
+	pigFrames := 0
+	for _, m := range r.drain(a) {
+		if m["t"] == "objs" && objOf(m, "pig:0") != nil {
+			p = objOf(m, "pig:0")
+			pigFrames++
+		}
+	}
+	if pigFrames != 1 || num(p["hunger"]) != 0 || p["daily"] != true {
+		t.Fatalf("a sad Piggy ticked: %d frames, %v", pigFrames, p)
 	}
 }
 
