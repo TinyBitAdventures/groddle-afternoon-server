@@ -43,7 +43,7 @@ package main
 // alike). IM reactions are kept with the IM line in -im-file.
 //
 // The chat log (chatlog.go) does not record reactions: it is there to read what
-// players wrote, for moderation, and a reaction is one of seven fixed marks.
+// players wrote, for moderation, and a reaction is one of a few fixed marks.
 //
 // Rates: reactBurst, then one each reactEvery, for react and im_react each.
 
@@ -64,9 +64,14 @@ const (
 )
 
 // reactionKeys are the reactions the game offers, in the order they show. The
-// game's js/chat-reactions.js REACTIONS draws them (👍 ❤️ 😂 😮 😢 🎉 and Tiny
-// Speck's own "Hi" sign).
-var reactionKeys = []string{"like", "heart", "laugh", "wow", "sad", "tada", "hi"}
+// game's js/chat-reactions.js REACTIONS draws them (👍 ❤️ 😂 😮 😢 🎉 🙏 and Tiny
+// Speck's own "Hi" sign). "thanks" (🙏, "Thank you") came on 2026-11-10. A new
+// key needs nothing else here: a line's reactions are kept by key (in memory,
+// in -im-file and on the site, chatstore.go), and a game or page from before a
+// key leaves it out of what it draws. The site keeps only keys it knows
+// (ChatHistory.php reactionsJson drops the rest of a line's set), so the site
+// must know a new key before any game or page offers it.
+var reactionKeys = []string{"like", "heart", "laugh", "wow", "sad", "tada", "thanks", "hi"}
 
 func reactionOrder(e string) int {
 	for i, k := range reactionKeys {

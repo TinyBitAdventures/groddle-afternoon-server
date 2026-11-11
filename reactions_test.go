@@ -185,7 +185,7 @@ func TestReactionsOnlyTheSetAndOnlyLinesItKnows(t *testing.T) {
 	for _, e := range reactionKeys {
 		r.react(bo, lid, e)
 	}
-	if a := lastReacted(drain(ada), "reacted", lid); a != "like:9 heart:9 laugh:9 wow:9 sad:9 tada:9 hi:9" {
+	if a := lastReacted(drain(ada), "reacted", lid); a != "like:9 heart:9 laugh:9 wow:9 sad:9 tada:9 thanks:9 hi:9" {
 		t.Fatalf("the set: %q", a)
 	}
 	r.react(bo, lid+1000, "like")
@@ -500,6 +500,66 @@ func TestReactionsSetKeepsOrderAndOnePerPlayer(t *testing.T) {
 	}
 	if got := rs.shownTo(2, ign); len(got) != 1 {
 		t.Fatalf("2 sees their own: %v", got)
+	}
+}
+
+// Thank you (2026-11-10): one of the set, between Hooray and the Hi sign, toggled like the rest, on a
+// Local line and on an IM line (kept in the state file by its key).
+func TestReactionsThankYouIsOneOfTheSet(t *testing.T) {
+	if !validReaction("thanks") || reactionOrder("thanks") != reactionOrder("tada")+1 || reactionOrder("hi") != reactionOrder("thanks")+1 {
+		t.Fatalf("thanks sits after tada and before hi: %v", reactionKeys)
+	}
+	file := filepath.Join(t.TempDir(), "im.json")
+	r := newReactRig(t, file)
+	ada, bo := r.online(7, "Ada"), r.online(9, "Bo")
+	r.street("GA5", ada, bo)
+	r.do(ada, map[string]any{"t": "chat", "text": "here, have a cherry"})
+	lid := lidOf(t, drain(bo), "said")
+	drain(ada)
+	r.react(bo, lid, "hi")
+	r.react(ada, lid, "tada")
+	r.react(bo, lid, "thanks")
+	if a := lastReacted(drain(ada), "reacted", lid); a != "tada:7 thanks:9 hi:9" {
+		t.Fatalf("order: %q", a)
+	}
+	if errs := reactErrors(drain(bo)); len(errs) != 0 {
+		t.Fatalf("refused: %v", errs)
+	}
+	// Left out, on toggles: Bo's own thanks comes off again; on true twice changes nothing.
+	r.react(bo, lid, "thanks")
+	if a := lastReacted(drain(ada), "reacted", lid); a != "tada:7 hi:9" {
+		t.Fatalf("off again: %q", a)
+	}
+	r.react(bo, lid, "thanks", true)
+	r.react(bo, lid, "thanks", true)
+	r.react(ada, lid, "thanks", true)
+	if a := lastReacted(drain(ada), "reacted", lid); a != "tada:7 thanks:9+7 hi:9" {
+		t.Fatalf("both: %q", a)
+	}
+	drain(bo)
+	// An IM line: both are told, and the state file keeps it by its key.
+	r.do(ada, map[string]any{"t": "im_sync"})
+	r.do(bo, map[string]any{"t": "im_sync"})
+	drain(ada)
+	drain(bo)
+	r.do(ada, map[string]any{"t": "im_send", "to": 9, "text": "psst"})
+	line := int64(one(t, drain(bo), "im")["line"].(map[string]any)["id"].(float64))
+	drain(ada)
+	r.do(bo, map[string]any{"t": "im_react", "with": 7, "line": line, "e": "thanks"})
+	if a, b := one(t, drain(ada), "im_reacted"), one(t, drain(bo), "im_reacted"); reactedText(a) != "thanks:9" || reactedText(b) != "thanks:9" {
+		t.Fatalf("Ada %v, Bo %v", a, b)
+	}
+	if !r.im.save() {
+		t.Fatal("save")
+	}
+	raw, _ := os.ReadFile(file)
+	if !strings.Contains(string(raw), `"r":[{"e":"thanks","by":[{"id":9,"name":"Bo"}]}]`) {
+		t.Fatalf("state file: %s", raw)
+	}
+	r.now = r.now.Add(time.Second)
+	r.do(bo, map[string]any{"t": "im_react", "with": 7, "line": line, "e": "thanks"})
+	if a := one(t, drain(ada), "im_reacted"); reactedText(a) != "" {
+		t.Fatalf("off again: %v", a)
 	}
 }
 
