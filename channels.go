@@ -31,6 +31,8 @@ package main
 //	{"t":"channel_said","channel":"global","id":7,"name":"Ada","text":"hi","at":1730000000000,"lid":…}  to everyone in it, you too; lid the line's id for reactions
 //	        ("web":true on a line said from the website, webchat.go; history lines carry it too)
 //	{"t":"channel_note","channel":"group:12","text":"Ada has joined"}                              the source's lines from "God"
+//	{"t":"channel_note","channel":"global","text":"…","at":…}                                      a server notice (notice: the featured street project, projects_featured.go);
+//	        kept in the chat's history as {"note":true,"text":"…","at":…} (id 0, no name)
 //	{"t":"error","code":"channels","message":"…"}
 //
 // The watch token is base64url(JSON) "." base64url(HMAC-SHA256(secret, the
@@ -111,10 +113,11 @@ type chanLine struct {
 	Name string     `json:"name"`
 	Text string     `json:"text"`
 	At   int64      `json:"at"`
-	Lid  int64      `json:"lid,omitempty"` // reactions.go
-	R    []reaction `json:"r,omitempty"`   // in a history sent to one player: the reactions they may see
-	Web  bool       `json:"web,omitempty"` // said from the website's /chat/ (webchat.go)
-	Th   *threadSum `json:"th,omitempty"`  // in a history sent to one player: its thread's replies as they may see them (threads.go)
+	Lid  int64      `json:"lid,omitempty"`  // reactions.go
+	R    []reaction `json:"r,omitempty"`    // in a history sent to one player: the reactions they may see
+	Web  bool       `json:"web,omitempty"`  // said from the website's /chat/ (webchat.go)
+	Th   *threadSum `json:"th,omitempty"`   // in a history sent to one player: its thread's replies as they may see them (threads.go)
+	Note bool       `json:"note,omitempty"` // the server's own notice (notice below): no speaker, shown as a note
 }
 
 type chanRoom struct {
@@ -164,6 +167,42 @@ func (m *channels) Register(r *Registry) {
 	// reactions.go: who has a channel line (everyone in the room now), and whether id may react there.
 	r.Provide("channels.audience", m.audience)
 	r.Provide("channels.self", m) // webchat.go, chatdelete.go
+	r.Provide("channels.notice", m.notice)
+}
+
+// notice posts the server's own line in a channel room (ours: Glitch's Global had no server lines):
+// everyone in the room now gets it as a channel_note, and it is kept in the room's history (id 0,
+// note) for whoever opens the chat later. Nobody can react to it or reply to it (no lid), and it
+// is not sent to the site's long-term chat history, which keeps players' lines.
+func (m *channels) notice(room, text string) {
+	if !chanRooms[room] || text == "" {
+		return
+	}
+	r := m.rooms[room]
+	if r == nil {
+		r = &chanRoom{members: map[int64]bool{}}
+		m.rooms[room] = r
+	}
+	at := m.h.Now().UnixMilli()
+	r.history = append(r.history, chanLine{Text: text, At: at, Note: true})
+	if over := len(r.history) - chanHistory; over > 0 {
+		r.history = append([]chanLine{}, r.history[over:]...)
+	}
+	// Each member gets it under the name they opened the chat by (Live Help's two rooms are both "help").
+	ids := make([]int64, 0, len(r.members))
+	for id := range r.members {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		ch := room
+		for name, rm := range m.open[id] {
+			if rm == room {
+				ch = name
+			}
+		}
+		m.send(id, map[string]any{"t": "channel_note", "channel": ch, "text": text, "at": at})
+	}
 }
 
 // audience is room's members when id may react to its lines there ("" why), else why not.

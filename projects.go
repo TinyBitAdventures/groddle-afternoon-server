@@ -17,7 +17,7 @@ package main
 //	{"t":"project_give","job":"62","req":"r136","currants":400}         currants for a currants requirement
 //	{"t":"project_work","job":"62","req":"r138","option":"13"}          one unit of work, done now
 //	{"t":"project_ack","id":"…"}                                         you applied a project_given / project_reward and saved
-//	{"t":"project_sync"}                                                 after a join (and on connect): the world, this street, what you are owed
+//	{"t":"project_sync"}                                                 after a join (and on connect): the world, the featured project, this street, what you are owed
 //	{"t":"project_sync","mine":true}                                     the same, and every project you have put anything into (project_mine)
 //	{"t":"project_work_start",…} and {"t":"project_work_stop"}           a run of work began or ended: the street's tool bubbles (projects_crew.go)
 //
@@ -212,6 +212,9 @@ type projJob struct {
 	Yard       string         `json:"yard,omitempty"`    // street | back
 	Mult       float64        `json:"mult,omitempty"`    // the rewards' lifespan multiplier (quest.js:1762-1767)
 	Built      bool           `json:"built,omitempty"`   // every world starts with it built (the game's tools/street-jobs-built-from-start.json)
+	Label      string         `json:"label,omitempty"`   // the street's public name (the featured project's notices, projects_featured.go)
+	Hub        string         `json:"hub,omitempty"`     // and its region
+	Exempt     bool           `json:"exempt,omitempty"`  // every player counts it built (js/street-jobs.js isJobBuilt: a subway street, a road from the start)
 }
 
 type projDropRow struct {
@@ -246,6 +249,8 @@ type projTable struct {
 	Drops      map[string][]projDrop `json:"drops"`
 	// Restorations: proto class -> its project's phases, classes at divisor 1 (home_projects.go).
 	Restorations map[string]projRestoration `json:"restorations"`
+	// Street tsid -> public name, for the featured project's notices (projects_featured.go).
+	Names map[string]string `json:"names"`
 }
 
 func (t *projTable) class(job projJob, phase int) (projClass, bool) {
@@ -331,6 +336,8 @@ type projState struct {
 	Halls   map[string]*hallAsk    `json:"halls,omitempty"` // group hall calls waiting for the site (group_halls.go)
 	Homes   map[string]*projJob    `json:"homes,omitempty"` // restorations on home streets, made from the site's word (home_projects.go)
 	Seq     int64                  `json:"seq"`
+	// G656: the one featured street project, kept until it is built (projects_featured.go).
+	Featured *projFeatured `json:"featured,omitempty"`
 }
 
 func newProjState() *projState {
@@ -364,6 +371,8 @@ type projects struct {
 	// Who is working now, for the tool bubbles the street sees (projects_crew.go).
 	crew     map[int64]*projWorker
 	crewRate map[int64]*bucket
+	// The featured project's live side: its notice waiting for Global, its throttled progress (projects_featured.go).
+	feat featuredLive
 }
 
 func newProjects(h *Hub) Module {
@@ -433,6 +442,7 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 		log.Printf("projects: built from the start %v", opened)
 		m.save()
 	}
+	m.ensureFeatured() // projects_featured.go: one featured project, picked now when none stands
 	return m
 }
 
@@ -471,7 +481,8 @@ func (m *projects) Register(r *Registry) {
 	r.Handle("project_claim", m.claim)
 	r.Handle("project_home", m.homeJob)
 	r.Handle("project_home_drop", m.homeDrop)
-	m.registerCrew(r) // projects_crew.go: project_work_start, project_work_stop
+	m.registerCrew(r)     // projects_crew.go: project_work_start, project_work_stop
+	m.registerFeatured(r) // projects_featured.go: the featured project on connect, project_featured_dev
 	r.OnConnect(m.connected)
 	r.OnConnect(m.hallsConnected)
 	m.armHalls() // after the ledger is set: a claim that ran out while the server was down is told to the site
@@ -1209,6 +1220,7 @@ func (m *projects) settleIfComplete(jobID string) {
 		}
 		m.toAll(map[string]any{"t": "project_built", "now": now, "job": jobID, "at": now, "option": option, "rest": rest})
 		log.Printf("project %s done: %s %s", jobID, job.Kind, job.Street)
+		m.featuredBuilt(jobID) // projects_featured.go: thanks in Global, and the next one
 	} else {
 		r.Phase = phase + 1
 		r.Got = map[string]int64{}
@@ -1346,6 +1358,7 @@ func (m *projects) broadcast(jobID string) {
 	}
 	r := m.st.Jobs[jobID]
 	now := m.ms()
+	m.featuredTouched(jobID) // projects_featured.go: everyone's featured row follows its progress
 	seen := map[int64]bool{}
 	for _, s := range job.Offer {
 		for _, street := range []string{s, "L" + strings.TrimPrefix(s, "G")} {
@@ -1378,6 +1391,7 @@ func (m *projects) sync(cl *Client, frame json.RawMessage) {
 		}
 	}
 	m.h.SendLocked(cl, map[string]any{"t": "project_world", "now": m.ms(), "built": built, "rest": m.st.Rest})
+	m.h.SendLocked(cl, m.featuredMsg()) // projects_featured.go
 	if cl.Street() != "" {
 		jobs := map[string]any{}
 		for _, id := range m.offer[gStreet(cl.Street())] {
