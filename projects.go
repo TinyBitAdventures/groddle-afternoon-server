@@ -19,6 +19,7 @@ package main
 //	{"t":"project_ack","id":"…"}                                         you applied a project_given / project_reward and saved
 //	{"t":"project_sync"}                                                 after a join (and on connect): the world, this street, what you are owed
 //	{"t":"project_sync","mine":true}                                     the same, and every project you have put anything into (project_mine)
+//	{"t":"project_work_start",…} and {"t":"project_work_stop"}           a run of work began or ended: the street's tool bubbles (projects_crew.go)
 //
 // Server to client:
 //
@@ -360,6 +361,9 @@ type projects struct {
 	workAt  map[int64]time.Time
 	giveAt  map[int64]time.Time
 	secret  []byte // the site's signing secret, for restorations' tokens (home_projects.go)
+	// Who is working now, for the tool bubbles the street sees (projects_crew.go).
+	crew     map[int64]*projWorker
+	crewRate map[int64]*bucket
 }
 
 func newProjects(h *Hub) Module {
@@ -467,6 +471,7 @@ func (m *projects) Register(r *Registry) {
 	r.Handle("project_claim", m.claim)
 	r.Handle("project_home", m.homeJob)
 	r.Handle("project_home_drop", m.homeDrop)
+	m.registerCrew(r) // projects_crew.go: project_work_start, project_work_stop
 	r.OnConnect(m.connected)
 	r.OnConnect(m.hallsConnected)
 	m.armHalls() // after the ledger is set: a claim that ran out while the server was down is told to the site
@@ -991,6 +996,7 @@ func (m *projects) work(cl *Client, frame json.RawMessage) {
 	r.Got[req.ID]++
 	m.contribute(r, cl.ID(), cl.Name(), req.Cost, m.option(job, msg.Option))
 	m.h.SendLocked(cl, map[string]any{"t": "project_worked", "job": msg.Job, "req": req.ID, "cost": req.Cost, "left": req.Need - req.got - 1})
+	m.crewUnit(cl) // projects_crew.go: the bubble stays while units count
 	m.settleIfComplete(msg.Job)
 	m.save()
 	m.broadcast(msg.Job)
