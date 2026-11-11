@@ -22,6 +22,22 @@ package main
 // data/feats.json (the game's tools/build-realtime-feats.mjs from
 // js/feats-mp.js and js/solo-feats.js; the rules are stated there).
 //
+// Goals scale with yesterday's active players (register G656, report #180
+// "Perhaps the goals on the feats need to be increased"; Austin: "Scale with
+// yesterday's active players"; 11-10's Animal Love reached 2,794 against a
+// minimum of 150). The module keeps, per UTC day, the distinct players whose
+// game socket signed in (or was still signed in when the day turned, or
+// contributed), a few days of them, in the state file. When a run starts
+// (runGoals) its minimum is the Feat's share (one sitting, the solo personal
+// goal: the table's minimum over 3) times the players of the UTC day before
+// the run's start, at most goalPlayersMax players, and never below the
+// table's minimum (a quiet day is never easier than the table); the bonus and
+// supermegabonus keep the table's ratios to the minimum (2x, 3x). With no
+// full day counted (the first day after a deploy, or no data) the table's
+// goals stand. The goals are the run's (kept in the state file, so a restart
+// mid-run keeps them) and go to players in feat_state; the reward pool's
+// scale is min(total, supermegabonus) over the run's minimum.
+//
 // Client to server:
 //
 //	{"t":"feat_add","feat":"animal_love","n":1}                       a contribution the client made
@@ -32,8 +48,9 @@ package main
 //
 // Server to client:
 //
-//	{"t":"feat_state","now":ms,"run":n,"feat":"…","start":ms,"end":ms,"total":n,"goal":n,"bonus":n,"super":n,
+//	{"t":"feat_state","now":ms,"run":n,"feat":"…","start":ms,"end":ms,"total":n,"goal":n,"bonus":n,"super":n,"basis":n,
 //	     "tier":0-3,"count":n,"mine":n,"place":n,"top":[{"id","name","n"}],"last":Last|null}   answering a sync, and to everyone when a Feat begins
+//	     (goal, bonus, super: the run's goals; basis: yesterday's players they came from, -1 the table's)
 //	{"t":"feat_progress","run":n,"feat":"…","total":n,"tier":n,"count":n,"top":[…]}               to everyone, at most once a second
 //	{"t":"feat_counted","feat":"…","run":n,"n":n,"total":n,"mine":n,"place":n,"reason":"…"}      to the contributor (n 0 and a reason when nothing counted)
 //	{"t":"feat_goal","run":n,"feat":"…","tier":1-3,"total":n}                                     to everyone: a goal was met
@@ -100,6 +117,8 @@ const (
 	featTop         = 5 // the top contributors players see
 	featMaxN        = 100_000
 	featKeepSeen    = 20_000
+	featKeepDays    = 4       // UTC days of active players kept
+	featDayMax      = 100_000 // the most players one day keeps (a bound)
 )
 
 var featsFileFlag = flag.String("feats-file", "", "file that keeps the shared Feat, who contributed and was rewarded, and the rewards not yet applied (default: realtime-feats.json beside -secret-file; off: memory only)")
@@ -125,9 +144,10 @@ type featAct struct {
 type featDef struct {
 	Title     string             `json:"title"`
 	Epic      int                `json:"epic"`
-	Goal      int64              `json:"goal"`
+	Goal      int64              `json:"goal"` // the table's goals: the floor, and the goals when yesterday is unknown
 	Bonus     int64              `json:"bonus"`
 	Super     int64              `json:"super"`
+	Share     int64              `json:"share"` // one player's share of the minimum (one sitting)
 	Pace      featPace           `json:"pace"`
 	Acts      map[string]featAct `json:"acts"`
 	Elsewhere bool               `json:"elsewhere"` // the game counts its first feats:contributed itself
@@ -148,14 +168,15 @@ type featRewardDef struct {
 }
 
 type featTable struct {
-	EpochMs   int64              `json:"epochMs"`
-	RunMs     int64              `json:"runMs"`
-	GameDayMs int64              `json:"gameDayMs"`
-	QuickMs   int64              `json:"quickMs"`
-	Order     []string           `json:"order"`
-	Feats     map[string]featDef `json:"feats"`
-	Epics     map[string]int     `json:"epics"`
-	Reward    featRewardDef      `json:"reward"`
+	EpochMs    int64              `json:"epochMs"`
+	RunMs      int64              `json:"runMs"`
+	GameDayMs  int64              `json:"gameDayMs"`
+	QuickMs    int64              `json:"quickMs"`
+	PlayersMax int64              `json:"goalPlayersMax"` // yesterday's players count toward the goals up to this many (0: no cap)
+	Order      []string           `json:"order"`
+	Feats      map[string]featDef `json:"feats"`
+	Epics      map[string]int     `json:"epics"`
+	Reward     featRewardDef      `json:"reward"`
 }
 
 // —— State ——
@@ -175,6 +196,10 @@ type featRun struct {
 	End     int64           `json:"end"`
 	Total   int64           `json:"total"`
 	Tier    int             `json:"tier"`
+	Goal    int64           `json:"goal,omitempty"` // the run's goals (runGoals); 0 (a run kept from before G656): the table's
+	Bonus   int64           `json:"bonus,omitempty"`
+	Super   int64           `json:"super,omitempty"`
+	Basis   int64           `json:"basis,omitempty"` // yesterday's active players the goals came from, -1 unknown (0 with no goals: the table's)
 	Players []*featEntry    `json:"players"`
 	Seen    map[string]bool `json:"seen,omitempty"` // dedupe keys (streets streaked, qurazy streets)
 	idx     map[int64]*featEntry
@@ -220,7 +245,14 @@ type featState struct {
 	Rewarded  map[int64][]string     `json:"rewarded"`            // Feats a player was rewarded for (feats.feats)
 	Credits   map[string]*featCredit `json:"credits"`
 	Owed      map[int64][]featOwed   `json:"owed"`
+	// Days: per UTC day ("2026-11-10"), the players whose game socket was signed in that day (G656).
+	// DaysSince: ms the count began; a day before it is unknown (a partial day would undercount).
+	Days      map[string][]int64 `json:"days,omitempty"`
+	DaysSince int64              `json:"daysSince,omitempty"`
 }
+
+// featGoals is a run's three goals.
+type featGoals struct{ Goal, Bonus, Super int64 }
 
 func newFeatState() *featState {
 	return &featState{Ever: map[int64][]string{}, Rewarded: map[int64][]string{}, Credits: map[string]*featCredit{}, Owed: map[int64][]featOwed{}}
@@ -252,8 +284,9 @@ type feats struct {
 
 	buckets    map[int64]map[string]*featBucket
 	endStop    func() bool
-	progressAt bool // a feat_progress is due
-	saveAt     bool // a save is due
+	progressAt bool   // a feat_progress is due
+	saveAt     bool   // a save is due
+	dayAt      string // the UTC day players were last counted for (noteDay)
 }
 
 func newFeats(h *Hub) Module {
@@ -399,6 +432,95 @@ func (m *feats) saveSoon() {
 	})
 }
 
+// —— Yesterday's active players and the run's goals (G656) ——
+
+func featDay(ms int64) string { return time.UnixMilli(ms).UTC().Format("2006-01-02") }
+
+// noteDay: on the first note of a new UTC day, everyone still signed in counts for it too.
+func (m *feats) noteDay() {
+	day := featDay(m.ms())
+	if m.dayAt == day {
+		return
+	}
+	m.dayAt = day
+	for id := range m.h.clients {
+		m.addActive(day, id)
+	}
+}
+
+// noteActive counts a player as active today.
+func (m *feats) noteActive(id int64) {
+	m.noteDay()
+	m.addActive(featDay(m.ms()), id)
+}
+
+func (m *feats) addActive(day string, id int64) {
+	if id <= 0 || slices.Contains(m.st.Days[day], id) || len(m.st.Days[day]) >= featDayMax {
+		return
+	}
+	if m.st.Days == nil {
+		m.st.Days = map[string][]int64{}
+	}
+	if m.st.DaysSince == 0 {
+		m.st.DaysSince = m.ms()
+	}
+	m.st.Days[day] = append(m.st.Days[day], id)
+	// Keep the newest featKeepDays days (the keys sort as dates).
+	if len(m.st.Days) > featKeepDays {
+		days := make([]string, 0, len(m.st.Days))
+		for d := range m.st.Days {
+			days = append(days, d)
+		}
+		sort.Strings(days)
+		for _, d := range days[:len(days)-featKeepDays] {
+			delete(m.st.Days, d)
+		}
+	}
+	m.saveSoon()
+}
+
+// yesterday is the active players of the UTC day before the one at ms; false when that day was not wholly counted.
+func (m *feats) yesterday(ms int64) (int64, bool) {
+	t := time.UnixMilli(ms).UTC()
+	from := time.Date(t.Year(), t.Month(), t.Day()-1, 0, 0, 0, 0, time.UTC)
+	if m.st.DaysSince <= 0 || m.st.DaysSince > from.UnixMilli() {
+		return 0, false
+	}
+	return int64(len(m.st.Days[from.Format("2006-01-02")])), true
+}
+
+// runGoals are the goals of a run of def starting at start: the share times yesterday's
+// players (at most PlayersMax), never below the table's minimum; the bonus and supermegabonus
+// keep the table's ratios. basis is yesterday's players, -1 when unknown (the table's goals).
+func (m *feats) runGoals(def featDef, start int64) (featGoals, int64) {
+	table := featGoals{def.Goal, def.Bonus, def.Super}
+	n, ok := m.yesterday(start)
+	if !ok {
+		return table, -1
+	}
+	if def.Share <= 0 || def.Goal <= 0 {
+		return table, n
+	}
+	players := n
+	if m.t.PlayersMax > 0 {
+		players = min(players, m.t.PlayersMax)
+	}
+	goal := def.Share * players
+	if goal <= def.Goal {
+		return table, n
+	}
+	return featGoals{goal, goal * def.Bonus / def.Goal, goal * def.Super / def.Goal}, n
+}
+
+// goalsOf is a run's goals; a run kept from before it had its own has the table's.
+func (m *feats) goalsOf(r *featRun) featGoals {
+	if r.Goal > 0 {
+		return featGoals{r.Goal, r.Bonus, r.Super}
+	}
+	def := m.t.Feats[r.Feat]
+	return featGoals{def.Goal, def.Bonus, def.Super}
+}
+
 // —— The schedule ——
 
 func (m *feats) ms() int64 { return m.h.Now().UnixMilli() }
@@ -433,10 +555,12 @@ func (m *feats) current() *featRun {
 	if r != nil {
 		m.end(r)
 	}
-	r = &featRun{Run: n, Feat: feat, Start: start, End: end, Seen: map[string]bool{}, idx: map[int64]*featEntry{}}
+	m.noteDay()
+	g, basis := m.runGoals(m.t.Feats[feat], start)
+	r = &featRun{Run: n, Feat: feat, Start: start, End: end, Goal: g.Goal, Bonus: g.Bonus, Super: g.Super, Basis: basis, Seen: map[string]bool{}, idx: map[int64]*featEntry{}}
 	m.st.Run = r
 	m.save()
-	log.Printf("feat run %d: %s until %s", n, feat, time.UnixMilli(end).UTC().Format(time.RFC3339))
+	log.Printf("feat run %d: %s until %s, goals %d/%d/%d (yesterday's players %d)", n, feat, time.UnixMilli(end).UTC().Format(time.RFC3339), g.Goal, g.Bonus, g.Super, basis)
 	m.arm(r)
 	for _, cl := range m.h.clients {
 		m.h.SendLocked(cl, m.stateJSON(r, cl.ID()))
@@ -462,9 +586,9 @@ func (m *feats) arm(r *featRun) {
 	})
 }
 
-func (m *feats) tierOf(def featDef, total int64) int {
+func (m *feats) tierOf(g featGoals, total int64) int {
 	tier := 0
-	for _, g := range []int64{def.Goal, def.Bonus, def.Super} {
+	for _, g := range []int64{g.Goal, g.Bonus, g.Super} {
 		if g > 0 && total >= g {
 			tier++
 		}
@@ -616,6 +740,7 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 func (m *feats) count(run *featRun, id int64, name string, n int64) {
 	now := m.ms()
 	def := m.t.Feats[run.Feat]
+	m.noteActive(id)
 	run.Total += n
 	e := run.idx[id]
 	if e == nil {
@@ -626,7 +751,7 @@ func (m *feats) count(run *featRun, id int64, name string, n int64) {
 	e.N += n
 	e.At = now
 	e.Name = name
-	if tier := m.tierOf(def, run.Total); tier > run.Tier {
+	if tier := m.tierOf(m.goalsOf(run), run.Total); tier > run.Tier {
 		run.Tier = tier
 		m.toAll(map[string]any{"t": "feat_goal", "run": run.Run, "feat": run.Feat, "tier": tier, "total": run.Total})
 		log.Printf("feat run %d: %s met goal %d at %d", run.Run, run.Feat, tier, run.Total)
@@ -667,8 +792,8 @@ func (m *feats) first(run *featRun, id int64, def featDef, now int64) {
 	}
 	// 76-79: the vog_text while the value is at or under the goal.
 	remaining := int64(-1)
-	if run.Total <= def.Goal {
-		remaining = def.Goal - run.Total
+	if goal := m.goalsOf(run).Goal; run.Total <= goal {
+		remaining = goal - run.Total
 	}
 	fid := fmt.Sprintf("feat-f-%d-%d", slices.Index(m.t.Order, run.Feat), id) // once per Feat ever
 	m.owe(id, fid, map[string]any{"t": "feat_first", "id": fid, "feat": run.Feat, "run": run.Run, "counters": counters, "grants": grants, "remaining": remaining})
@@ -692,19 +817,19 @@ func (m *feats) progressSoon() {
 // —— The end of a Feat's day ——
 
 func (m *feats) end(r *featRun) {
-	def := m.t.Feats[r.Feat]
+	g := m.goalsOf(r)
 	sorted := ranked(r)
-	tier := m.tierOf(def, r.Total)
-	m.st.Last = &featLast{Run: r.Run, Feat: r.Feat, Total: r.Total, Goal: def.Goal, Tier: tier, Count: len(sorted), Top: topRows(sorted)}
+	tier := m.tierOf(g, r.Total)
+	m.st.Last = &featLast{Run: r.Run, Feat: r.Feat, Total: r.Total, Goal: g.Goal, Tier: tier, Count: len(sorted), Top: topRows(sorted)}
 	m.st.Run = nil
-	m.toAll(map[string]any{"t": "feat_ended", "run": r.Run, "feat": r.Feat, "total": r.Total, "goal": def.Goal, "tier": tier, "count": len(sorted), "top": topRows(sorted)})
-	if tier == 0 || def.Goal <= 0 {
-		log.Printf("feat run %d: %s failed at %d of %d (%d contributors)", r.Run, r.Feat, r.Total, def.Goal, len(sorted))
+	m.toAll(map[string]any{"t": "feat_ended", "run": r.Run, "feat": r.Feat, "total": r.Total, "goal": g.Goal, "tier": tier, "count": len(sorted), "top": topRows(sorted)})
+	if tier == 0 || g.Goal <= 0 {
+		log.Printf("feat run %d: %s failed at %d of %d (%d contributors)", r.Run, r.Feat, r.Total, g.Goal, len(sorted))
 		m.save()
 		return
 	}
-	// The pool scales with what was done (blog 2012-10-12), up to the supermegabonus.
-	scale := float64(min(r.Total, max(def.Super, def.Goal))) / float64(def.Goal)
+	// The pool scales with what was done (blog 2012-10-12), up to the supermegabonus: 1 to super/goal (3).
+	scale := float64(min(r.Total, max(g.Super, g.Goal))) / float64(g.Goal)
 	rw := m.t.Reward
 	var asks []*featCredit
 	for i, e := range sorted {
@@ -735,7 +860,7 @@ func (m *feats) end(r *featRun) {
 		}
 		id := fmt.Sprintf("feat-r-%s-%d-%d", strconv.FormatInt(r.Run, 36), slices.Index(m.t.Order, r.Feat), e.ID)
 		msg := map[string]any{"t": "feat_reward", "id": id, "feat": r.Feat, "run": r.Run, "place": place, "count": len(sorted), "tier": tier,
-			"total": r.Total, "goal": def.Goal, "mine": e.N, "scale": scale, "rewards": rewards, "items": items, "counters": counters, "grants": grants}
+			"total": r.Total, "goal": g.Goal, "mine": e.N, "scale": scale, "rewards": rewards, "items": items, "counters": counters, "grants": grants}
 		log.Printf("feat run %d: %s placed %d of %d with %d: %d iMG, %d currants", r.Run, e.Name, place, len(sorted), e.N, rewards["xp"], currants)
 		if m.ledger == nil || currants <= 0 {
 			if m.ledger == nil && !m.trusted && currants > 0 {
@@ -843,7 +968,11 @@ func (m *feats) toAll(msg any) {
 }
 
 func (m *feats) stateJSON(r *featRun, reader int64) map[string]any {
-	def := m.t.Feats[r.Feat]
+	g := m.goalsOf(r)
+	basis := r.Basis
+	if r.Goal <= 0 {
+		basis = -1
+	}
 	sorted := ranked(r)
 	mine, place := int64(0), 0
 	for i, e := range sorted {
@@ -856,7 +985,7 @@ func (m *feats) stateJSON(r *featRun, reader int64) map[string]any {
 		last = m.st.Last
 	}
 	return map[string]any{"t": "feat_state", "now": m.ms(), "run": r.Run, "feat": r.Feat, "start": r.Start, "end": r.End, "total": r.Total,
-		"goal": def.Goal, "bonus": def.Bonus, "super": def.Super, "tier": r.Tier, "count": len(sorted), "mine": mine, "place": place, "top": topRows(sorted), "last": last}
+		"goal": g.Goal, "bonus": g.Bonus, "super": g.Super, "basis": basis, "tier": r.Tier, "count": len(sorted), "mine": mine, "place": place, "top": topRows(sorted), "last": last}
 }
 
 func (m *feats) sync(cl *Client, _ json.RawMessage) {
@@ -871,7 +1000,9 @@ func (m *feats) sync(cl *Client, _ json.RawMessage) {
 }
 
 // connected: rewards that got no answer (or came before a restart) are asked again now this player is here.
+// connected also counts the player as active today (G656).
 func (m *feats) connected(cl *Client) {
+	m.noteActive(cl.ID())
 	if m.ledger == nil {
 		return
 	}
