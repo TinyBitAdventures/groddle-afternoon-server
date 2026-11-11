@@ -19,6 +19,7 @@ package main
 //	                                                  200 {"status":"sent"} | {"status":"offline"} (the site's ledger already holds it; their next load applies it)
 //	refill  {"player":7}                              200 {"status":"sent"} | {"status":"offline"}
 //	chatlog {…filters}                                200 {"status":"ok","lines":[…],"next":"…"}   the chat log, newest first (chatlog.go)
+//	health  {"since":…,"until":…,"points":1000}       200 {"status":"ok","bucket":60,"machine":{…},"now":{…},"fields":[…],"rows":[[…]]}   server health a minute, bucketed (health.go)
 //	rooks   {}                                        200 {"status":"ok","attacks":[…]}   every Rook over a street now (rook_admin.go)
 //	rook_end {"street":"GA5…"}                        200 {"status":"ended"} | {"status":"ending"} | {"status":"none"}   the Rook flies off, nothing paid (rook_admin.go)
 //	any:    401 {"status":"refused"} unsigned, a bad, old or replayed signature; 400 {"status":"bad"} not a call this server can make

@@ -159,6 +159,7 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
+		healthFramesIn.Add(1) // health.go: frames read a minute
 		if kind == websocket.MessageText {
 			s.hub.Handle(cl, frame)
 		}
@@ -204,6 +205,7 @@ func (s *Server) write(ctx context.Context, conn *websocket.Conn, cl *Client) {
 				conn.CloseNow()
 				return
 			}
+			healthFramesOut.Add(1) // health.go: frames written a minute
 		case <-tick.C:
 			pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			err := conn.Ping(pctx)

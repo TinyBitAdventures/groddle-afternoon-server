@@ -238,6 +238,7 @@ func (h *Hub) Disconnect(cl *Client) {
 
 // Handle acts on one frame from a client.
 func (h *Hub) Handle(cl *Client, frame []byte) {
+	defer healthNoteLag(time.Now()) // health.go: the slowest frame a minute (deferred first, so it runs after the unlock)
 	var m struct {
 		T      string          `json:"t"`
 		Street string          `json:"street"`
