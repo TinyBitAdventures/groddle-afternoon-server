@@ -158,7 +158,7 @@ func (o *objects) nameAnimal(street string, ob *liveObj, m objAct, perks map[str
 	if ob.userName != "" && ob.namer != user && now.Sub(ob.namedAt) <= pigRenameAfter {
 		return refuse("named", nameTaken(ob.spot.kind)) // canName 12-18
 	}
-	if ob.spot.kind == "pig" && ob.userName == "" && o.w.sad[street] {
+	if ob.spot.kind == "pig" && ob.userName == "" && o.sadOn(street) {
 		return refuse("sad", pigNameSad) // verbs.name conditions 764-766 (rename has no such check)
 	}
 	name := sanitizeAnimalName(m.Name)
@@ -185,7 +185,7 @@ func (o *objects) pigDev(cl *Client, frame json.RawMessage) {
 	if !o.dev || json.Unmarshal(frame, &m) != nil || street == "" {
 		return
 	}
-	spot := o.w.streets[street][m.ID]
+	spot := o.spotOf(street, m.ID)
 	if spot == nil || spot.kind != "pig" {
 		return
 	}
@@ -213,7 +213,7 @@ func (o *objects) freshPig(ob *liveObj) {
 
 // wakePigs makes every Piggy of a street live: their clocks start (get arms the tick timer).
 func (o *objects) wakePigs(street string) {
-	for _, spot := range o.w.streets[street] {
+	for _, spot := range o.spots(street) {
 		if spot.kind == "pig" && o.streets[street][spot.id] == nil {
 			o.get(street, spot)
 		}
@@ -309,7 +309,7 @@ func (o *objects) pigTwiceDaily(street string, ob *liveObj, pigs []*liveObj) []m
 			delete(ob.petters, id)
 		}
 	}
-	if o.w.sad[street] {
+	if o.sadOn(street) {
 		return nil
 	}
 	ev := func(kind string) map[string]any {
@@ -363,12 +363,12 @@ func (o *objects) pigTwiceDaily(street string, ob *liveObj, pigs []*liveObj) []m
 // site has it): the nearest hungry Piggy on the street that is not sad, not rooked, not already on
 // its way to food and has it in reach goes for it.
 func (o *objects) pigFood(street, id string, x, y float64) {
-	if o.w.sad[street] {
+	if o.sadOn(street) {
 		return
 	}
 	var best *liveObj
 	bestD := math.Inf(1)
-	for _, spot := range o.w.streets[street] {
+	for _, spot := range o.spots(street) {
 		if spot.kind != "pig" {
 			continue
 		}
@@ -413,14 +413,14 @@ func (o *objects) fruitNear(street string, x, y float64) *liveObj {
 	var best *liveObj
 	bestD := math.Inf(1)
 	ids := make([]string, 0)
-	for id, spot := range o.w.streets[street] {
+	for id, spot := range o.spots(street) {
 		if spot.kind == "tree" {
 			ids = append(ids, id)
 		}
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		spot := o.w.streets[street][id]
+		spot := o.spotOf(street, id)
 		if math.Abs(spot.y-y) > pigEatDY || math.Abs(spot.x-x) > pigReachX || o.rooked(street, id) {
 			continue
 		}
@@ -505,7 +505,7 @@ func (o *objects) pigHome(street string, spot *objSpot) pigHome {
 	if spot.index%2 != 0 {
 		dir = -1
 	}
-	return pigHome{baseX: spot.x, rng: spot.rng, dir: dir, trunks: o.w.trunks[street], trunkPx: o.w.rules.PigTrip.TreeStop}
+	return pigHome{baseX: spot.x, rng: spot.rng, dir: dir, trunks: o.trunksOf(street), trunkPx: o.w.rules.PigTrip.TreeStop}
 }
 
 // pigX is where the Piggy stands now, as every page draws it: on its trip, else on its path.
@@ -666,7 +666,7 @@ func (o *objects) tripEat(street string, ob *liveObj, t *pigTrip) {
 		})
 		return
 	}
-	spot := o.w.streets[street][t.Tree]
+	spot := o.spotOf(street, t.Tree)
 	if spot == nil || ob.hunger <= 0 || o.rooked(street, t.Tree) {
 		return
 	}
@@ -686,7 +686,7 @@ func (o *objects) tripEat(street string, ob *liveObj, t *pigTrip) {
 // (the game's animal-mood-feature onEvent): every hungry Piggy of the street on the tree's level and
 // in reach that is not sad, rooked or already on its way to food goes for it.
 func (o *objects) pigsToTree(street string, treeSpot *objSpot) {
-	if o.w.sad[street] || o.rooked(street, treeSpot.id) {
+	if o.sadOn(street) || o.rooked(street, treeSpot.id) {
 		return
 	}
 	tree := o.get(street, treeSpot)
@@ -697,7 +697,7 @@ func (o *objects) pigsToTree(street string, treeSpot *objSpot) {
 	}
 	o.wakePigs(street)
 	ids := make([]string, 0)
-	for id, spot := range o.w.streets[street] {
+	for id, spot := range o.spots(street) {
 		if spot.kind == "pig" {
 			ids = append(ids, id)
 		}
@@ -729,7 +729,7 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 	if m.Verb == "name" {
 		return o.nameAnimal(street, ob, m, perks, user)
 	}
-	if o.w.sad[street] {
+	if o.sadOn(street) {
 		return refuse("sad", pigSad)
 	}
 	today := o.today()
@@ -794,7 +794,7 @@ func (o *objects) tendPig(street string, ob *liveObj, m objAct, perks map[string
 		}
 		var also []*liveObj
 		{
-			spot := o.w.streets[street][m.On]
+			spot := o.spotOf(street, m.On)
 			if spot == nil || spot.kind != "tree" || !strings.HasPrefix(m.On, "tree:") || math.Abs(spot.x-ob.spot.x) > pigReachX {
 				return refuse("unknown", "That is not something here.")
 			}
@@ -835,7 +835,7 @@ func (o *objects) askFeed(cl *Client, m objAct, street string, spot *objSpot, pe
 	before := o.state(ob)
 	food, isFood := pigFoods[m.C]
 	switch {
-	case o.w.sad[street]:
+	case o.sadOn(street):
 		o.finishAct(cl, m, street, ob, before, refuse("sad", pigSad))
 		return
 	case !isFood || m.N < 1 || m.N > food.Max:

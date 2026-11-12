@@ -73,7 +73,7 @@ func (o *objects) pigLeaves(street string, ob *liveObj, why string) {
 func (o *objects) askCapture(cl *Client, m objAct, street string, spot *objSpot, perks map[string]bool) {
 	ob := o.get(street, spot)
 	before := o.state(ob)
-	sad := o.w.sad[street]
+	sad := o.sadOn(street)
 	switch {
 	case ob.pigGone():
 		o.finishAct(cl, m, street, ob, before, refuse("gone", pigTextGone))
@@ -107,7 +107,7 @@ func (o *objects) askCapture(cl *Client, m objAct, street string, spot *objSpot,
 			return
 		}
 		roll := o.roll()
-		caught := roll < pigCaptureChance || o.w.sad[street]
+		caught := roll < pigCaptureChance || o.sadOn(street)
 		v := verdict{ok: true, extra: map[string]any{"roll": roll, "success": caught}}
 		if use != nil {
 			v.extra["use"] = use

@@ -301,123 +301,51 @@ type objWorld struct {
 	// sad: streets where a Piggy is sad (include/animal_sadness.js locationIsDepressing); its tick
 	// waits and its verbs refuse (npc_piggy.js onTwiceDaily 1834, verb conditions).
 	sad map[string]bool
+	// upgrades: a street's layout once its street upgrade is built, by option id (only the options
+	// whose layout differs). The game plans an upgraded street from js/street-jobs.js
+	// upgradeEcologyEntry (more animals, rocks, a shrine), which moves the planned spots after them
+	// (tools/build-realtime-objects.mjs upgradeLayouts; objects_upgrades.go).
+	upgrades map[string]map[string]*objVariant
+}
+
+// objVariant is one upgraded layout of a street.
+type objVariant struct {
+	spots  map[string]*objSpot
+	trunks []float64
+	sad    bool
+}
+
+// objRow is one street's row in data/objects.json; upgrades holds rows of the same shape.
+type objRow struct {
+	Rocks    [][]any           `json:"rocks"`
+	Trees    [][]any           `json:"trees"`
+	Nodes    [][]any           `json:"nodes"`
+	Pigs     [][]any           `json:"pigs"`
+	Chick    [][]any           `json:"chickens"`
+	Bfly     [][]any           `json:"butterflies"`
+	Bat      [][]any           `json:"batterflies"`
+	Kitty    [][]any           `json:"kitties"`
+	Crab     [][]any           `json:"crabs"`
+	Drag     [][]any           `json:"dragons"`
+	Trunk    []float64         `json:"trunks"`
+	Sad      bool              `json:"sad"`
+	Upgrades map[string]objRow `json:"upgrades"`
 }
 
 func loadObjWorld(raw []byte) (*objWorld, error) {
 	var file struct {
-		Rules   objRules `json:"rules"`
-		Streets map[string]struct {
-			Rocks [][]any   `json:"rocks"`
-			Trees [][]any   `json:"trees"`
-			Nodes [][]any   `json:"nodes"`
-			Pigs  [][]any   `json:"pigs"`
-			Chick [][]any   `json:"chickens"`
-			Bfly  [][]any   `json:"butterflies"`
-			Bat   [][]any   `json:"batterflies"`
-			Kitty [][]any   `json:"kitties"`
-			Crab  [][]any   `json:"crabs"`
-			Drag  [][]any   `json:"dragons"`
-			Trunk []float64 `json:"trunks"`
-			Sad   bool      `json:"sad"`
-		} `json:"streets"`
+		Rules   objRules          `json:"rules"`
+		Streets map[string]objRow `json:"streets"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}, sad: map[string]bool{}, trunks: map[string][]float64{}}
+	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}, sad: map[string]bool{}, trunks: map[string][]float64{}, upgrades: map[string]map[string]*objVariant{}}
 	w.rules.PigTrip.fill()
-	num := func(v any) (float64, bool) { f, ok := v.(float64); return f, ok }
-	str := func(v any) (string, bool) { s, ok := v.(string); return s, ok }
 	for tsid, row := range file.Streets {
-		spots := map[string]*objSpot{}
-		for _, r := range row.Rocks {
-			i, ok1 := num(r[0])
-			class, ok2 := str(r[1])
-			x, ok3 := num(r[2])
-			y, ok4 := num(r[3])
-			if !(ok1 && ok2 && ok3 && ok4) || w.rules.Rocks[class].Chunks == 0 {
-				return nil, fmt.Errorf("%s: bad rock %v", tsid, r)
-			}
-			id := "rock:" + strconv.Itoa(int(i))
-			spots[id] = &objSpot{id: id, kind: "rock", class: class, x: x, y: y}
-		}
-		for _, r := range row.Trees {
-			if len(r) < 6 {
-				return nil, fmt.Errorf("%s: bad tree %v", tsid, r)
-			}
-			i, ok1 := num(r[0])
-			class, ok2 := str(r[1])
-			x, ok3 := num(r[2])
-			y, ok4 := num(r[3])
-			m, ok5 := num(r[4])
-			hl, ok6 := num(r[5])
-			kind := "tree"
-			if class == "wood_tree" {
-				kind = "wood"
-			}
-			if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) || (kind == "tree" && w.rules.Trants[class] == nil) || (kind == "wood" && (m < 1 || m > 6)) {
-				return nil, fmt.Errorf("%s: bad tree %v", tsid, r)
-			}
-			id := "tree:" + strconv.Itoa(int(i))
-			spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, maturity: int(m), health: int(hl)}
-		}
-		for _, r := range row.Nodes {
-			key, ok1 := str(r[0])
-			class, ok2 := str(r[1])
-			x, ok3 := num(r[2])
-			y, ok4 := num(r[3])
-			if _, known := w.rules.Nodes[class]; !(ok1 && ok2 && ok3 && ok4) || !known {
-				return nil, fmt.Errorf("%s: bad node %v", tsid, r)
-			}
-			id := "node:" + key
-			spots[id] = &objSpot{id: id, kind: "node", class: class, x: x, y: y}
-		}
-		for _, r := range row.Pigs {
-			if len(r) < 3 {
-				return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
-			}
-			i, ok1 := num(r[0])
-			x, ok2 := num(r[1])
-			y, ok3 := num(r[2])
-			if !(ok1 && ok2 && ok3) {
-				return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
-			}
-			// Its walk each way (an older layout has none: ANIMAL_PATROL.piggies).
-			rng := float64(pigPatrol)
-			if len(r) > 3 {
-				if v, ok := num(r[3]); ok && v >= 0 {
-					rng = v
-				}
-			}
-			id := "pig:" + strconv.Itoa(int(i))
-			spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y, index: int(i), rng: rng}
-		}
-		for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat, "kitty": row.Kitty, "crab": row.Crab, "dragon": row.Drag} {
-			for _, r := range rows {
-				if len(r) < 3 {
-					return nil, fmt.Errorf("%s: bad %s %v", tsid, kind, r)
-				}
-				i, ok1 := num(r[0])
-				x, ok2 := num(r[1])
-				y, ok3 := num(r[2])
-				if !(ok1 && ok2 && ok3) {
-					return nil, fmt.Errorf("%s: bad %s %v", tsid, kind, r)
-				}
-				fly := false
-				if len(r) > 3 {
-					f, _ := num(r[3])
-					fly = f == 1
-				}
-				id := kind + ":" + strconv.Itoa(int(i))
-				class := "npc_" + kind
-				switch kind {
-				case "kitty":
-					class = "npc_kitty_chicken"
-				case "dragon":
-					class = "npc_fire_dragon"
-				}
-				spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, fly: fly, index: int(i)}
-			}
+		spots, err := w.parseRow(tsid, row)
+		if err != nil {
+			return nil, err
 		}
 		if row.Sad {
 			w.sad[tsid] = true
@@ -426,8 +354,118 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 			w.trunks[tsid] = row.Trunk
 		}
 		w.streets[tsid] = spots
+		for option, up := range row.Upgrades {
+			if option == "" || len(option) > 16 || len(up.Upgrades) > 0 {
+				return nil, fmt.Errorf("%s: bad upgrade %q", tsid, option)
+			}
+			ups, err := w.parseRow(tsid+" upgrade "+option, up)
+			if err != nil {
+				return nil, err
+			}
+			if w.upgrades[tsid] == nil {
+				w.upgrades[tsid] = map[string]*objVariant{}
+			}
+			w.upgrades[tsid][option] = &objVariant{spots: ups, trunks: up.Trunk, sad: up.Sad}
+		}
 	}
 	return w, nil
+}
+
+// parseRow lays out one street row's objects by id.
+func (w *objWorld) parseRow(tsid string, row objRow) (map[string]*objSpot, error) {
+	num := func(v any) (float64, bool) { f, ok := v.(float64); return f, ok }
+	str := func(v any) (string, bool) { s, ok := v.(string); return s, ok }
+	spots := map[string]*objSpot{}
+	for _, r := range row.Rocks {
+		i, ok1 := num(r[0])
+		class, ok2 := str(r[1])
+		x, ok3 := num(r[2])
+		y, ok4 := num(r[3])
+		if !(ok1 && ok2 && ok3 && ok4) || w.rules.Rocks[class].Chunks == 0 {
+			return nil, fmt.Errorf("%s: bad rock %v", tsid, r)
+		}
+		id := "rock:" + strconv.Itoa(int(i))
+		spots[id] = &objSpot{id: id, kind: "rock", class: class, x: x, y: y}
+	}
+	for _, r := range row.Trees {
+		if len(r) < 6 {
+			return nil, fmt.Errorf("%s: bad tree %v", tsid, r)
+		}
+		i, ok1 := num(r[0])
+		class, ok2 := str(r[1])
+		x, ok3 := num(r[2])
+		y, ok4 := num(r[3])
+		m, ok5 := num(r[4])
+		hl, ok6 := num(r[5])
+		kind := "tree"
+		if class == "wood_tree" {
+			kind = "wood"
+		}
+		if !(ok1 && ok2 && ok3 && ok4 && ok5 && ok6) || (kind == "tree" && w.rules.Trants[class] == nil) || (kind == "wood" && (m < 1 || m > 6)) {
+			return nil, fmt.Errorf("%s: bad tree %v", tsid, r)
+		}
+		id := "tree:" + strconv.Itoa(int(i))
+		spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, maturity: int(m), health: int(hl)}
+	}
+	for _, r := range row.Nodes {
+		key, ok1 := str(r[0])
+		class, ok2 := str(r[1])
+		x, ok3 := num(r[2])
+		y, ok4 := num(r[3])
+		if _, known := w.rules.Nodes[class]; !(ok1 && ok2 && ok3 && ok4) || !known {
+			return nil, fmt.Errorf("%s: bad node %v", tsid, r)
+		}
+		id := "node:" + key
+		spots[id] = &objSpot{id: id, kind: "node", class: class, x: x, y: y}
+	}
+	for _, r := range row.Pigs {
+		if len(r) < 3 {
+			return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
+		}
+		i, ok1 := num(r[0])
+		x, ok2 := num(r[1])
+		y, ok3 := num(r[2])
+		if !(ok1 && ok2 && ok3) {
+			return nil, fmt.Errorf("%s: bad pig %v", tsid, r)
+		}
+		// Its walk each way (an older layout has none: ANIMAL_PATROL.piggies).
+		rng := float64(pigPatrol)
+		if len(r) > 3 {
+			if v, ok := num(r[3]); ok && v >= 0 {
+				rng = v
+			}
+		}
+		id := "pig:" + strconv.Itoa(int(i))
+		spots[id] = &objSpot{id: id, kind: "pig", class: "npc_piggy", x: x, y: y, index: int(i), rng: rng}
+	}
+	for kind, rows := range map[string][][]any{"chicken": row.Chick, "butterfly": row.Bfly, "batterfly": row.Bat, "kitty": row.Kitty, "crab": row.Crab, "dragon": row.Drag} {
+		for _, r := range rows {
+			if len(r) < 3 {
+				return nil, fmt.Errorf("%s: bad %s %v", tsid, kind, r)
+			}
+			i, ok1 := num(r[0])
+			x, ok2 := num(r[1])
+			y, ok3 := num(r[2])
+			if !(ok1 && ok2 && ok3) {
+				return nil, fmt.Errorf("%s: bad %s %v", tsid, kind, r)
+			}
+			fly := false
+			if len(r) > 3 {
+				f, _ := num(r[3])
+				fly = f == 1
+			}
+			id := kind + ":" + strconv.Itoa(int(i))
+			class := "npc_" + kind
+			switch kind {
+			case "kitty":
+				class = "npc_kitty_chicken"
+			case "dragon":
+				class = "npc_fire_dragon"
+			}
+			spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, fly: fly, index: int(i)}
+		}
+	}
+	return spots, nil
 }
 
 // capAt is include/trants.js updateFruitCap: fruitCapMap[maturity-1][health-1], 0 outside the table.
@@ -569,10 +607,13 @@ type objects struct {
 	saveAt  bool              // a save is due
 	resumed bool              // the file's timers are armed
 	bogs    map[int64]*bogRun // Peter out Peat's nine seconds, by player (objects_peat.go)
+	// laidFor: the street upgrade option each street's live objects are laid out for (absent: the
+	// street's own layout; objects_upgrades.go spots).
+	laidFor map[string]string
 }
 
 func newObjects(h *Hub) Module {
-	o := &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{}, bogs: map[int64]*bogRun{},
+	o := &objects{h: h, w: sharedWorld, roll: rand.Float64, streets: map[string]map[string]*liveObj{}, limits: map[int64]*objBucket{}, bogs: map[int64]*bogRun{}, laidFor: map[string]string{},
 		dev: os.Getenv("GRODDLE_TREES_DEV") == "1", resumed: true}
 	o.initUses()
 	if o.path = statePath(objectsFileForTest, objectsFileFlag, "realtime-objects.json"); o.path != "" {
@@ -615,7 +656,7 @@ func (o *objects) Register(r *Registry) {
 // tree that died), so the Rook can check the tree a client pairs with one of its keys (rook_sync "objs").
 func (o *objects) treeClass(street, id string) string {
 	o.resume()
-	spot := o.w.streets[street][id]
+	spot := o.spotOf(street, id)
 	if spot == nil || (spot.kind != "tree" && spot.kind != "wood") {
 		return ""
 	}
@@ -632,7 +673,7 @@ func (o *objects) treeClass(street, id string) string {
 func (o *objects) rookTree(street, id string) bool {
 	o.resume()
 	defer o.saveSoon()
-	spot := o.w.streets[street][id]
+	spot := o.spotOf(street, id)
 	if spot == nil || spot.kind != "tree" {
 		return false
 	}
@@ -894,7 +935,7 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	if street == "" || !o.allow(cl) {
 		return
 	}
-	spots := o.w.streets[street]
+	spots := o.spots(street)
 	if spots == nil {
 		o.h.SendLocked(cl, map[string]any{"t": "objs", "street": street, "snap": true, "none": true, "objs": []any{}})
 		return
@@ -952,7 +993,7 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	}
 	if len(homes) > 0 {
 		msg["homes"] = homes
-		if t := o.w.trunks[street]; len(t) > 0 {
+		if t := o.trunksOf(street); len(t) > 0 {
 			msg["trunks"] = t
 		} else {
 			msg["trunks"] = []float64{}
@@ -1027,7 +1068,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		return
 	}
 	street := cl.Street()
-	spot := o.w.streets[street][m.ID]
+	spot := o.spotOf(street, m.ID)
 	if street == "" || spot == nil {
 		no("unknown", "That is not something here.", nil)
 		return
@@ -1337,7 +1378,7 @@ func (o *objects) handleMine(cl *Client, frame json.RawMessage) {
 		return
 	}
 	street := cl.Street()
-	spot := o.w.streets[street][m.ID]
+	spot := o.spotOf(street, m.ID)
 	if street == "" || spot == nil || spot.kind != "rock" {
 		return
 	}
@@ -1374,7 +1415,7 @@ func (o *objects) handleDig(cl *Client, frame json.RawMessage) {
 		return
 	}
 	street := cl.Street()
-	spot := o.w.streets[street][m.ID]
+	spot := o.spotOf(street, m.ID)
 	if street == "" || spot == nil || spot.kind != "node" || spot.class != "dirt_pile" {
 		return
 	}
@@ -1818,7 +1859,7 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 		return
 	}
 	street := cl.Street()
-	spots := o.w.streets[street]
+	spots := o.spots(street)
 	var targets []*objSpot
 	patchKey := ""
 	if m.ID != "" {

@@ -357,6 +357,7 @@ type projects struct {
 	h       *Hub
 	t       projTable
 	offer   map[string][]string // street -> job ids its board offers
+	upJobs  map[string][]string // street -> its street-upgrade job ids (upgradeOn)
 	st      *projState
 	path    string // "" memory only
 	boot    string
@@ -419,7 +420,7 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 	if t.CooldownMs <= 0 {
 		t.CooldownMs = 30 * 60 * 1000
 	}
-	m := &projects{h: h, t: t, offer: map[string][]string{}, st: newProjState(), path: path,
+	m := &projects{h: h, t: t, offer: map[string][]string{}, upJobs: map[string][]string{}, st: newProjState(), path: path,
 		boot: strconv.FormatInt(h.Now().UnixMilli(), 36), spawn: func(fn func()) { go fn() }, rng: rand.Float64,
 		workAt: map[int64]time.Time{}, giveAt: map[int64]time.Time{}, secret: homesSecretForTest}
 	m.pace = newOwedPacer(h, m.owedItems)
@@ -431,6 +432,9 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 	for _, id := range ids {
 		for _, s := range t.Jobs[id].Offer {
 			m.offer[s] = append(m.offer[s], id)
+		}
+		if job := t.Jobs[id]; job.Kind == "upgrade" && job.Street != "" {
+			m.upJobs[gStreet(job.Street)] = append(m.upJobs[gStreet(job.Street)], id)
 		}
 	}
 	if path != "" {
@@ -484,6 +488,8 @@ func (m *projects) Register(r *Registry) {
 	r.Handle("project_claim", m.claim)
 	r.Handle("project_home", m.homeJob)
 	r.Handle("project_home_drop", m.homeDrop)
+	// objects_upgrades.go: a street's built upgrade picks its layout.
+	r.Provide("projects.upgrade", m.upgradeOn)
 	m.registerCrew(r)     // projects_crew.go: project_work_start, project_work_stop
 	m.registerFeatured(r) // projects_featured.go: the featured project on connect, project_featured_dev
 	r.OnConnect(m.connected)
@@ -738,6 +744,18 @@ func uniqueBuckets(rs []reqView) []string {
 		}
 	}
 	return out
+}
+
+// upgradeOn is the option of a street's built street upgrade, "" when none is built: the game's
+// js/street-jobs.js appliedUpgrade (its first upgrade job with doneAt, upgradeOption falling back to
+// the first option), whose upgradeEcologyEntry moves the street's planned objects (objects_upgrades.go).
+func (m *projects) upgradeOn(street string) string {
+	for _, id := range m.upJobs[gStreet(street)] {
+		if r := m.st.Jobs[id]; r != nil && r.Done > 0 {
+			return m.option(m.t.Jobs[id], r.Option)
+		}
+	}
+	return ""
 }
 
 func (m *projects) option(job projJob, want string) string {

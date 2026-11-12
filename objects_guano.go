@@ -74,7 +74,7 @@ const (
 // guanoSpots is a street's Batterflies, by id.
 func (o *objects) guanoSpots(street string) []*objSpot {
 	var out []*objSpot
-	for _, spot := range o.w.streets[street] {
+	for _, spot := range o.spots(street) {
 		if spot.kind == "batterfly" {
 			out = append(out, spot)
 		}

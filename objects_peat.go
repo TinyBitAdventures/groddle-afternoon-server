@@ -63,7 +63,7 @@ func (o *objects) handleBogStart(cl *Client, frame json.RawMessage) {
 		return
 	}
 	street := cl.Street()
-	spot := o.w.streets[street][m.ID]
+	spot := o.spotOf(street, m.ID)
 	if street == "" || spot == nil || spot.kind != "node" || spot.class != "peat_1" {
 		no(bogNotClose)
 		return

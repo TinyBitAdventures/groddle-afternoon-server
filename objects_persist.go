@@ -295,9 +295,12 @@ func (o *objects) load() error {
 		}
 	}
 	for street, recs := range f.Streets {
-		spots := o.w.streets[street]
+		if o.w.upgrades[street] != nil {
+			// Its layout is the built upgrade's or its own: the first look settles it (objects_upgrades.go).
+			o.laidFor[street] = laidUnknown
+		}
 		for id, r := range recs {
-			spot := spots[id]
+			spot := o.anySpot(street, id)
 			if spot == nil {
 				dropped++
 				continue

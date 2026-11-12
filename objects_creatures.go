@@ -338,7 +338,7 @@ func (o *objects) rookHoldCreature(street string, ob *liveObj) bool {
 // when the id names no Chicken, Butterfly, Piggy or Heli Kitty there.
 func (o *objects) rookCreature(street, id string) bool {
 	o.resume()
-	spot := o.w.streets[street][id]
+	spot := o.spotOf(street, id)
 	if spot == nil || rookCreatureKey(spot) == "" {
 		return false
 	}
