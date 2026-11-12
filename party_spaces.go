@@ -258,6 +258,54 @@ func (m *parties) registerSpaces(r *Registry) {
 		}
 		return ""
 	})
+	// summon.go: a summons from inside a Party Space (inc_teleportation.js 682-687).
+	r.Provide("party.summonCheck", m.summonCheck)
+	r.Provide("party.summonJoin", m.summonJoin)
+	r.Provide("party.summonIn", func(from, to int64) bool { return m.of[from] != nil && m.of[from] == m.of[to] })
+}
+
+// summonCheck is whether from, standing in their party's space, may summon to into it:
+// the space's label, or why not (other_party, full, kicked, space). The source sent a
+// silent invite (main.js:3899-3900, party.js send_invite) and failed on Yes when it could
+// not be taken; here those are refused up front.
+func (m *parties) summonCheck(from, to int64) (label, why string) {
+	m.resume()
+	p := m.of[from]
+	cl := m.h.ClientLocked(from)
+	if p == nil || p.space == nil || cl == nil || cl.Street() != p.space.street {
+		return "", "space"
+	}
+	label = partyTemplates[p.space.template].label
+	if other := m.of[to]; other == p {
+		return label, ""
+	} else if other != nil {
+		return "", "other_party"
+	}
+	if len(p.members) >= partyMaxSize {
+		return "", "full"
+	}
+	if p.kicked[to] && p.space.creator != from {
+		return "", "kicked"
+	}
+	return label, ""
+}
+
+// summonJoin is party_invite_accepted(pc, auto_space) for a summons: the target joins
+// from's party (a member already stays) and is sent the space, with no teleporter
+// offer, as the summons takes them in (party.js accept_invite 305-311).
+func (m *parties) summonJoin(from int64, to *Client) bool {
+	if _, why := m.summonCheck(from, to.ID()); why != "" {
+		return false
+	}
+	p := m.of[from]
+	if m.of[to.ID()] == p {
+		return true
+	}
+	delete(p.kicked, to.ID()) // the creator's own summons brings them back (send_invite 80-86)
+	inv := &partyInvite{from: from, to: to.ID(), fromName: m.h.ClientLocked(from).Name(), toName: to.Name(), summoned: true}
+	m.accept(p, inv, to)
+	m.saveSoon()
+	return m.of[to.ID()] == p
 }
 
 // —— Sending ——

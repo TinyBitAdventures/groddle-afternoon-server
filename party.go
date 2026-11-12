@@ -89,6 +89,7 @@ type partyInvite struct {
 	fromName, toName string
 	expires          time.Time
 	stop             func() bool
+	summoned         bool // a summons into the space (summon.go): it takes them in, so no teleporter offer
 }
 
 type party struct {
@@ -587,6 +588,10 @@ func (m *parties) accept(p *party, inv *partyInvite, cl *Client) {
 		}
 	}
 	m.push(p)
+	if inv.summoned {
+		m.sendSpace(id, p.space, "") // accept_invite 305-311 with auto_space: enter_space, no prompt
+		return
+	}
 	m.spaceJoined(p, cl) // party.js accept_invite 305-316
 }
 

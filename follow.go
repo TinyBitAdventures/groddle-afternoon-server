@@ -157,6 +157,12 @@ func (m *follows) Register(r *Registry) {
 	// For other modules: who a player follows (0: nobody), and how many follow them.
 	r.Provide("follow.leaderOf", func(id int64) int64 { return m.leaderOf[id] })
 	r.Provide("follow.count", func(id int64) int { return len(m.of[id]) })
+	// summon.go: a summoned player's followers are let go (inc_teleportation.js:673 removeFollowers),
+	// and their own follow ends as a teleport ends it (player.js:671).
+	r.Provide("follow.summoned", func(id int64) {
+		m.stopFollowing(id, "stopped")
+		m.removeFollowers(id, "private")
+	})
 }
 
 func (m *follows) allow(set map[int64]*bucket, id int64, burst float64, every time.Duration) bool {
