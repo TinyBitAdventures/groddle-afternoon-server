@@ -31,6 +31,12 @@ package main
 //	{"t":"admin_give","op":"admin-give-…","items":[{"c":"cherry","n":3}],"currants":50,"text":"An administrator gave you …"}
 //	{"t":"admin_refill"}
 //
+// A ban names a login (groddle-afternoon-site src/Logins.php; a character with no
+// login row is its own login) and covers every character of it: a ticket whose
+// character or login (Claims.Acct) is banned is refused at auth, and ban and bans
+// sign out whichever character of the login is playing and close the website's
+// sockets of each. So the site sends the login's id in ban, unban and bans.
+//
 // Bans are enforced here too, not only by the site refusing the ticket: a
 // ticket for a banned character is refused at auth (closeBanned, "suspended"),
 // so a ticket signed just before the ban, or a site that has not caught up,
@@ -171,6 +177,21 @@ func (h *Hub) Banned(id int64) bool {
 	defer h.mu.Unlock()
 	m := h.adminOf()
 	return m != nil && m.bans[id]
+}
+
+// bannedLiveLocked is the live game socket a ban on id reaches: the character id's own, or the
+// character of login id now playing (a ban on a login covers each character of it; one plays at a time).
+func (h *Hub) bannedLiveLocked(id int64) []*Client {
+	var out []*Client
+	if cl := h.clients[id]; cl != nil && !cl.closed {
+		out = append(out, cl)
+	}
+	if cid := h.logins[id]; cid != 0 && cid != id {
+		if cl := h.clients[cid]; cl != nil && !cl.closed && cl.acct == id {
+			out = append(out, cl)
+		}
+	}
+	return out
 }
 
 // bootLocked tells a connected character why, takes them off their street and offline, and closes the socket with why.
@@ -334,8 +355,11 @@ func adminBan(h *Hub, body []byte) (int, any) {
 	}
 	delete(m.queued, c.Player)
 	h.closeWebLocked(c.Player, closeBanned) // web.go: the website's live chat closes too
-	if cl := h.clients[c.Player]; cl != nil && !cl.closed {
+	live := h.bannedLiveLocked(c.Player)
+	for _, cl := range live {
 		h.bootLocked(cl, cleanReason(c.Reason, adminMaxReason), true)
+	}
+	if len(live) > 0 {
 		return http.StatusOK, statusOf("sent")
 	}
 	return http.StatusOK, statusOf("banned")
@@ -389,7 +413,7 @@ func adminBans(h *Hub, body []byte) (int, any) {
 	}
 	// Anyone the list names who is connected now goes (a server that had lost its file).
 	for id := range next {
-		if cl := h.clients[id]; cl != nil && !cl.closed {
+		for _, cl := range h.bannedLiveLocked(id) {
 			h.bootLocked(cl, "", true)
 		}
 	}

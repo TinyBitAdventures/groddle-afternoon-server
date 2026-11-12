@@ -43,8 +43,14 @@ import (
 //	{"t":"admin_message"|"booted"|"admin_give"|"admin_refill",…}  the administrators' console (admin.go; the site's calls, never a client's)
 //
 // One live session per character: a second socket for the same player closes the
-// first with closeReplaced. An administrator's boot closes with closeBooted (4010),
-// a ban with closeBanned (4011), which also refuses a banned account at auth.
+// first with closeReplaced. One character per login in the game: a login's
+// alternate characters (Claims.Acct) share it, and a second character of the
+// same login connecting a game socket closes the first character's with
+// closeOtherCharacter (4012, "Playing as another character"; the game does not
+// reconnect on it). The website's /chat/ sockets (web.go) are never closed by
+// it. An administrator's boot closes with closeBooted (4010), a ban with
+// closeBanned (4011), which also refuses a banned account at auth; a ban on a
+// login covers every character of it (admin.go).
 //
 // The typing mark (register G366) is main.js doLocalChatStart 1677-1694: a
 // player starting a Local chat line (ChatArea.as 529-537, local_chat_start) puts
@@ -99,6 +105,7 @@ type Player struct {
 // Client is one signed-in socket. The hub owns every field but send and done.
 type Client struct {
 	id     int64
+	acct   int64 // the login (Claims.Acct; the character's own id when it has none). Never sent to anyone.
 	name   string
 	send   chan []byte
 	done   chan struct{}
@@ -136,6 +143,7 @@ type Hub struct {
 	mu      sync.Mutex
 	clients map[int64]*Client
 	streets map[string]map[int64]*Client
+	logins  map[int64]int64 // login id to the one character of it with a game socket now (closeOtherCharacter)
 
 	// Modules (modules.go): extra message kinds and lifecycle hooks, all run under mu.
 	handlers     map[string]func(cl *Client, frame json.RawMessage)
@@ -186,13 +194,18 @@ func NewHub(now func() time.Time) *Hub {
 	if now == nil {
 		now = time.Now
 	}
-	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{},
+	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, logins: map[int64]int64{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{},
 		webs: map[int64]map[*Client]bool{}, off: map[int64]bool{}, inputAt: map[int64]time.Time{}, cones: map[int64]coneWord{}, rates: map[int64]*connRate{}}
 	for _, m := range modules {
 		m(h).Register(&Registry{h: h})
 	}
 	// After every module's own hook: a character with no socket left has no presence (web.go).
-	h.onDisconnect = append(h.onDisconnect, func(cl *Client) { h.forgetIdleLocked(cl.id) })
+	h.onDisconnect = append(h.onDisconnect, func(cl *Client) {
+		h.forgetIdleLocked(cl.id)
+		if h.logins[cl.acct] == cl.id && h.clients[cl.id] == nil {
+			delete(h.logins, cl.acct)
+		}
+	})
 	return h
 }
 
@@ -213,17 +226,32 @@ func (h *Hub) Stats() (players, streets int) {
 	return len(h.clients), len(h.streets)
 }
 
-// Connect adds a character, closing any socket it already had.
+// Connect adds a character, closing any socket it already had, and the game socket of any other
+// character of the same login (closeOtherCharacter): that one goes offline as if it had left.
 func (h *Hub) Connect(c Claims) *Client {
-	cl := &Client{id: c.Sub, name: c.Name, send: make(chan []byte, sendBuffer), done: make(chan struct{}), chatTokens: chatBurst, chatAt: h.now(), at: h.now()}
+	cl := &Client{id: c.Sub, acct: c.login(), name: c.Name, send: make(chan []byte, sendBuffer), done: make(chan struct{}), chatTokens: chatBurst, chatAt: h.now(), at: h.now()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.noteConnectLocked(cl)
+	if other := h.logins[cl.acct]; other != 0 && other != cl.id {
+		if oc := h.clients[other]; oc != nil && oc.acct == cl.acct {
+			h.leaveLocked(oc)
+			delete(h.clients, other)
+			for _, fn := range h.onDisconnect {
+				fn(oc)
+			}
+			h.closeLocked(oc, closeOtherCharacter)
+		}
+	}
 	if old := h.clients[c.Sub]; old != nil {
 		h.leaveLocked(old)
 		h.closeLocked(old, closeReplaced)
+		if old.acct != cl.acct && h.logins[old.acct] == old.id {
+			delete(h.logins, old.acct)
+		}
 	}
 	h.clients[c.Sub] = cl
+	h.logins[cl.acct] = cl.id
 	h.off[c.Sub] = c.Off
 	h.inputAt[c.Sub] = h.now()
 	h.setConeLocked(c.Sub, c.Cone, c.Iat)
@@ -551,8 +579,9 @@ func cleanChat(s string) string {
 //	realtime: close player=7 name="Ada" via=game code=1009 reason="read limit: read limited at 8193 bytes" after=41m2s
 //	realtime: close player=7 name="Ada" via=game code=1006 reason="write: failed to write msg: …" after=2h3m
 //	realtime: close player=7 name="Ada" via=game code=1001 reason="" after=12m40s
+//	realtime: close player=7 name="Ada" via=game code=4012 reason="Playing as another character" after=5m2s
 //
-// code is the WebSocket close code (the hub's 4001/4008/4010/4011, the peer's
+// code is the WebSocket close code (the hub's 4001/4008/4010/4011/4012, the peer's
 // own, 1009 for a frame over the read limit, 1006 for a socket that dropped
 // with no close frame). A character that connects more than reconnectLoopMax
 // times in a minute is in a loop: one warning a minute names it, with the last
@@ -651,10 +680,11 @@ func (h *Hub) closeNoteLocked(cl *Client, code int, reason string) {
 
 // closeReasons are the hub's close codes as the socket sends them (main.go write).
 var closeReasons = map[int]string{
-	closeReplaced: "this character connected somewhere else",
-	closeSlow:     "too far behind",
-	closeBooted:   "an administrator signed you out",
-	closeBanned:   "this account is suspended",
+	closeReplaced:       "this character connected somewhere else",
+	closeOtherCharacter: "Playing as another character",
+	closeSlow:           "too far behind",
+	closeBooted:         "an administrator signed you out",
+	closeBanned:         "this account is suspended",
 }
 
 // recentKindsLocked: the kinds ("t") of the last few frames queued for cl, oldest first.

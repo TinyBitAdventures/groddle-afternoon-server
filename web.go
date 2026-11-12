@@ -132,7 +132,7 @@ var inputKinds = map[string]bool{
 
 // ConnectWeb adds a web socket for a character; the game socket, if any, is untouched.
 func (h *Hub) ConnectWeb(c Claims) *Client {
-	cl := &Client{id: c.Sub, name: c.Name, web: true, send: make(chan []byte, sendBuffer), done: make(chan struct{}), at: h.now()}
+	cl := &Client{id: c.Sub, acct: c.login(), name: c.Name, web: true, send: make(chan []byte, sendBuffer), done: make(chan struct{}), at: h.now()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	tabs := h.webs[c.Sub]
@@ -385,12 +385,24 @@ func (h *Hub) WebCount() int {
 	return n
 }
 
-// closeWebLocked closes every web socket of a character (a ban) with why.
+// closeWebLocked closes every web socket of a character (a ban) with why, and of every character
+// whose login is id (a ban on a login covers each character of it).
 func (h *Hub) closeWebLocked(id int64, why int) {
-	for _, cl := range h.WebLocked(id) {
-		h.queueLocked(cl, map[string]any{"t": "booted", "banned": why == closeBanned})
-		h.dropWebLocked(cl)
-		h.closeLocked(cl, why)
+	ids := []int64{id}
+	for cid, tabs := range h.webs {
+		for cl := range tabs {
+			if cid != id && cl.acct == id {
+				ids = append(ids, cid)
+				break
+			}
+		}
+	}
+	for _, cid := range ids {
+		for _, cl := range h.WebLocked(cid) {
+			h.queueLocked(cl, map[string]any{"t": "booted", "banned": why == closeBanned})
+			h.dropWebLocked(cl)
+			h.closeLocked(cl, why)
+		}
 	}
 }
 

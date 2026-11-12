@@ -14,6 +14,11 @@ import (
 type Claims struct {
 	Sub  int64  `json:"sub"`
 	Name string `json:"name"`
+	// Acct is the login the character belongs to (groddle-afternoon-site src/Logins.php): a login may
+	// have alternate characters, and only one of them plays at a time (hub.go closeOtherCharacter).
+	// 0 or absent is the character's own id (a character with no login row is its own login);
+	// Check fills it in, so Acct is never 0 after it. Never sent to a player.
+	Acct int64  `json:"acct,omitempty"`
 	Iat  int64  `json:"iat"`
 	Exp  int64  `json:"exp"`
 	Jti  string `json:"jti"`
@@ -26,6 +31,14 @@ type Claims struct {
 	Cone bool `json:"cone,omitempty"`
 	// Mod: a moderator's restrictions that stand when the ticket was made (moderation.go).
 	Mod *modClaim `json:"mod,omitempty"`
+}
+
+// login is the claims' login id: Acct, or the character's own id when the ticket names none.
+func (c Claims) login() int64 {
+	if c.Acct > 0 {
+		return c.Acct
+	}
+	return c.Sub
 }
 
 var (
@@ -74,6 +87,7 @@ func (t *Tickets) Check(ticket string) (Claims, error) {
 	if !t.used.spend("ticket", c.Jti, c.Exp, now) {
 		return Claims{}, errTicketReused
 	}
+	c.Acct = c.login()
 	c.Name = cleanName(c.Name)
 	return c, nil
 }

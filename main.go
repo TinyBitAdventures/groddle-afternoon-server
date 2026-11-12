@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	closeReplaced = 4001 // the same character connected somewhere else
-	closeTicket   = 4003 // no ticket, or one that does not check out
-	closeSlow     = 4008 // stopped reading
+	closeReplaced       = 4001 // the same character connected somewhere else
+	closeOtherCharacter = 4012 // another character of the same login connected a game socket (hub.go Connect)
+	closeTicket         = 4003 // no ticket, or one that does not check out
+	closeSlow           = 4008 // stopped reading
 
 	authWait  = 5 * time.Second
 	pingEvery = 25 * time.Second
@@ -140,8 +141,9 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// A suspended account never connects, whatever ticket it holds (admin.go).
-	if s.hub.Banned(claims.Sub) {
+	// A suspended account never connects, whatever ticket it holds (admin.go): the character's own
+	// ban, or its login's (a ban covers every character of the login).
+	if s.hub.Banned(claims.Sub) || s.hub.Banned(claims.Acct) {
 		conn.Close(closeBanned, "this account is suspended")
 		RefusedNote(closeBanned, "player "+strconv.FormatInt(claims.Sub, 10)+": this account is suspended", time.Since(start))
 		return
