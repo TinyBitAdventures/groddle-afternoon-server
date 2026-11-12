@@ -30,13 +30,16 @@ package main
 //	{"t":"project_state","job":"62","now":ms,"row":Row}                                        a change (everyone on the board's street)
 //	{"t":"project_given","id":"…","job":"62","req":"r133","cls":"…","phase":0,"items":{"ginger":10},"currants":0,"cost":40}
 //	{"t":"project_worked","job":"62","req":"r138","cost":15,"left":5}                         your unit counted
-//	{"t":"project_reward","id":"…","job":"62","phase":0,"cls":"…","final":true,"share":0.59,
-//	     "participation":59,"rewards":{…},"performance":{…},"winner":true,"top5":true,"phases":1,"option":"","readyAt":ms}
+//	{"t":"project_reward","id":"…","job":"62","phase":0,"cls":"…","final":true,"share":0.5912,
+//	     "participation":59.12,"rewards":{…},"performance":{…},"winner":true,"top5":true,"phases":1,"option":"","readyAt":ms,
+//	     "finisher":true,"shares":{"<phase class>":59.12}}                                        shares on the last phase only;
+//	     a contributor of an earlier phase only gets one too at the end, paying nothing ("complete":true)
 //	{"t":"error","code":"project","message":"…"}
 //
 // Row is {"phase","got":{rid:n},"held":{rid:n},"mine":{class:cost},"started","ready","done",
-// "option","votes":{option:cost},"top":[{"id","name","cost"}],"count"}: mine is the reader's own
-// contribution per phase class, top and count the current phase's (the last one once done).
+// "option","votes":{option:cost},"top":[{"id","name","cost"}],"me":{"position","cost"},"count"}: mine is the
+// reader's own contribution per phase class, top (the ten biggest), me (the reader's place) and count the
+// current phase's (the last one once done).
 //
 // The Projects panel (ticket 81, Austin 2026-11-04): Glitch kept the projects each player joined
 // (players/inc_jobs.js 1-16 jobs.todo and jobs.done, jobs_accept 111-121) and showed no list of
@@ -120,7 +123,8 @@ const (
 	ledgerRouteProject = "/groddle/v1/ledger/project"
 	projectWorkSlack   = 250 * time.Millisecond // a unit may arrive this early (timer and network jitter); the pace holds over time
 	projectGiveEvery   = 250 * time.Millisecond
-	projectTopFive     = 5 // quest.js getTopFive
+	projectTopFive     = 5  // quest.js getTopFive
+	projectBoardSize   = 10 // items/include/jobs.js getJobLeaderboard 538: the top ten
 	projectMaxN        = 1_000_000
 	projectMaxID       = 40
 )
@@ -668,8 +672,9 @@ func (m *projects) gate(cl *Client, jobID string) (projJob, string) {
 	if r != nil && r.Ready > now {
 		return job, projectTextDelayed
 	}
-	// locations/inc_jobs.js jobs_get_available: no new street-building job for 30 minutes after one finished here.
-	if (r == nil || r.Started == 0) && job.Kind == "street" {
+	// locations/inc_jobs.js jobs_get_available 457-461: no street or upgrade job not yet done (type 1 or 2,
+	// started or not) is offered for 30 minutes after the street's last such job finished.
+	if job.Kind == "street" || job.Kind == "upgrade" {
 		if last := m.st.Rest[here]; last > 0 && now-last < m.t.CooldownMs {
 			return job, projectTextCooldown
 		}
@@ -970,7 +975,7 @@ func (m *projects) counted(g *projGive) {
 	}
 	m.owe(g.Player, g.ID, msg)
 	log.Printf("project %s: %s gave %d %s (base cost %d)", g.Job, g.Name, g.N, map[bool]string{true: "currants", false: g.Item}[g.Currants], g.Cost)
-	m.settleIfComplete(g.Job)
+	m.settleIfComplete(g.Job, g.Player)
 	m.save()
 	m.broadcast(g.Job)
 }
@@ -1030,7 +1035,7 @@ func (m *projects) work(cl *Client, frame json.RawMessage) {
 	m.contribute(r, cl.ID(), cl.Name(), req.Cost, m.option(job, msg.Option))
 	m.h.SendLocked(cl, map[string]any{"t": "project_worked", "job": msg.Job, "req": req.ID, "cost": req.Cost, "left": req.Need - req.got - 1})
 	m.crewUnit(cl) // projects_crew.go: the bubble stays while units count
-	m.settleIfComplete(msg.Job)
+	m.settleIfComplete(msg.Job, cl.ID())
 	m.save()
 	m.broadcast(msg.Job)
 }
@@ -1088,6 +1093,43 @@ func (m *projects) owedItems(player int64) []owedItem {
 // jsRound is Math.round: halves go up.
 func jsRound(x float64) int64 { return int64(math.Floor(x + 0.5)) }
 
+// sharePercent is a share as quest.js expandText 261 printed {job_participation}: Math.round(x * 10000) / 100.
+func sharePercent(share float64) float64 { return float64(jsRound(share*10000)) / 100 }
+
+// sharesOf is one player's share of each phase they put anything into, by phase class (players/inc_jobs.js
+// 485-499 "You contributed {job_participation}% of the work!"), two decimals.
+func (m *projects) sharesOf(job projJob, r *projRow, player int64) map[string]float64 {
+	out := map[string]float64{}
+	for i, p := range r.Per {
+		if i >= len(job.Phases) {
+			break
+		}
+		var mine int64
+		for _, c := range p.Mine {
+			if c.ID == player {
+				mine += c.Cost
+			}
+		}
+		if mine <= 0 {
+			continue
+		}
+		cls, ok := m.t.class(job, i)
+		if !ok {
+			continue
+		}
+		var total int64
+		for _, q := range cls.Reqs {
+			total += q.Need * q.Cost
+		}
+		share := 1.0
+		if total > 0 {
+			share = math.Min(1, float64(mine)/float64(total))
+		}
+		out[job.Phases[i].C] = sharePercent(share)
+	}
+	return out
+}
+
 func (m *projects) rollDrop(table []projDrop) *projDropRow {
 	roll := int(math.Floor(m.rng()*100)) + 1
 	for _, d := range table {
@@ -1113,7 +1155,9 @@ func winningOption(job projJob, votes map[string]int64) string {
 	return best
 }
 
-func (m *projects) settleIfComplete(jobID string) {
+// settleIfComplete closes the current phase once every requirement is met. by names the player whose
+// contribution finished it (quest.js onJobComplete(pc)): a restoration counts for them (finisher).
+func (m *projects) settleIfComplete(jobID string, by ...int64) {
 	job, _ := m.job(jobID)
 	r := m.st.Jobs[jobID]
 	if r == nil || r.Done > 0 {
@@ -1145,6 +1189,10 @@ func (m *projects) settleIfComplete(jobID string) {
 	}
 	winners, top := map[int64]bool{}, map[int64]bool{}
 	for i, c := range sorted {
+		// quest.js 1671: a type 5 job (a restoration) has no winners and no top five.
+		if job.Kind == "restore" {
+			break
+		}
 		if i < nWin {
 			winners[c.ID] = true
 		}
@@ -1223,13 +1271,54 @@ func (m *projects) settleIfComplete(jobID string) {
 		}
 		id := fmt.Sprintf("job-r-%s-%d-%s-%d", jobID, phase, strconv.FormatInt(r.Started, 36), c.ID)
 		msg := map[string]any{"t": "project_reward", "id": id, "job": jobID, "phase": phase, "cls": job.Phases[phase].C, "final": final,
-			"share": share, "participation": jsRound(share * 100), "rewards": rewards, "performance": perf, "winner": winners[c.ID], "top5": top[c.ID],
-			"phases": phases, "option": option, "readyAt": next, "count": len(rec.Mine), "cost": c.Cost, "total": total}
+			"share": share, "participation": sharePercent(share), "rewards": rewards, "performance": perf, "winner": winners[c.ID], "top5": top[c.ID],
+			"phases": phases, "option": option, "readyAt": next, "count": len(rec.Mine), "cost": c.Cost, "total": total,
+			"finisher": len(by) > 0 && by[0] == c.ID}
+		if final {
+			msg["shares"] = m.sharesOf(job, r, c.ID)
+		}
 		if job.Kind == "restore" {
 			m.homeReward(msg, job, c.ID, share)
 		}
 		credits = append(credits, credit{c: &projCredit{ID: id, Player: c.ID, Goods: goods}, msg: msg})
 		log.Printf("project %s phase %d: %s put in %d of %d (%.1f%%): %d iMG, %d currants%s", jobID, phase+1, c.Name, c.Cost, total, share*100, rewards["xp"], goods.Currants, map[bool]string{true: ", a winner"}[winners[c.ID]])
+	}
+	// quest.js onJobComplete 1734-1773: at the end every contributor of every phase, not only the last
+	// one's, gets jobs_familiar_job_complete (players/inc_jobs.js 357-500): the "Hooray!" card with each
+	// phase's share, the Teleportation Script to the new street and the Participant count. Those who put
+	// nothing into the last phase get it here, as a project_reward that pays nothing (no ledger part).
+	var completes []map[string]any
+	if final && job.Kind != "restore" {
+		inLast := map[int64]bool{}
+		for _, c := range rec.Mine {
+			inLast[c.ID] = true
+		}
+		told := map[int64]bool{}
+		for i := 0; i < phase && i < len(r.Per); i++ {
+			for _, c := range r.Per[i].Mine {
+				if c.Cost <= 0 || inLast[c.ID] || told[c.ID] {
+					continue
+				}
+				told[c.ID] = true
+				phases := 0
+				for _, p := range r.Per {
+					for _, o := range p.Mine {
+						if o.ID == c.ID && o.Cost > 0 {
+							phases++
+						}
+					}
+				}
+				id := fmt.Sprintf("job-r-%s-%d-%s-%d", jobID, phase, strconv.FormatInt(r.Started, 36), c.ID)
+				nothing := map[string]any{"xp": 0, "currants": 0, "mood": 0, "energy": 0, "favor": []any{}}
+				noPerf := map[string]any{"xp": 0, "mood": 0, "energy": 0, "currants": 0, "items": []any{}, "favor": []any{}}
+				msg := map[string]any{"t": "project_reward", "id": id, "job": jobID, "phase": phase, "cls": job.Phases[phase].C, "final": true}
+				msg["share"], msg["participation"], msg["rewards"], msg["performance"] = 0, 0, nothing, noPerf
+				msg["winner"], msg["top5"], msg["phases"], msg["option"], msg["readyAt"] = false, false, phases, option, 0
+				msg["count"], msg["cost"], msg["total"], msg["finisher"] = len(rec.Mine), 0, total, false
+				msg["shares"], msg["complete"], msg["player"] = m.sharesOf(job, r, c.ID), true, c.ID
+				completes = append(completes, msg)
+			}
+		}
 	}
 	// Advance the project (locations/inc_jobs.js): the next phase after its delay, or done.
 	if final && job.Kind == "hall" {
@@ -1262,6 +1351,11 @@ func (m *projects) settleIfComplete(jobID string) {
 		if r.Hall != nil {
 			r.Hall.Until = 0 // quest.js onJobTimeout 1359: only the claimed phase has the clock
 		}
+	}
+	for _, msg := range completes {
+		player := msg["player"].(int64)
+		delete(msg, "player")
+		m.owe(player, msg["id"].(string), msg)
 	}
 	for _, cr := range credits {
 		cr.c.Msg, _ = json.Marshal(cr.msg)
@@ -1362,8 +1456,14 @@ func (m *projects) rowJSON(jobID string, r *projRow, reader int64) map[string]an
 		rec := r.Per[at]
 		sorted := append([]projContrib(nil), rec.Mine...)
 		sort.SliceStable(sorted, func(a, b int) bool { return sorted[a].Cost > sorted[b].Cost })
-		top = sorted[:min(projectTopFive, len(sorted))]
+		top = sorted[:min(projectBoardSize, len(sorted))]
 		count = len(sorted)
+		// getJobLeaderboard 548-554: the reader's own place and contribution.
+		for i, c := range sorted {
+			if c.ID == reader && reader != 0 {
+				out["me"] = map[string]any{"position": i + 1, "cost": c.Cost}
+			}
+		}
 		for k, v := range rec.Votes {
 			votes[k] = v
 		}
