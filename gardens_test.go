@@ -784,7 +784,8 @@ func TestGardenHerbGardensStreetsHaveTwoHerbBeds(t *testing.T) {
 	if bed, key := gardenWorldData.bedOf(chakra, "herb2:4-2"); bed != beds["herb2"] || key != "4-2" {
 		t.Fatalf("herb2:4-2 is %v %q", bed, key)
 	}
-	if got := bedOrder(beds["herb2"]); got[0] != "herb2:1-1" || len(got) != 8 {
+	// Report #252: herb2 is now the 3x4 planter box (every one of its old 4x2 plots still in it).
+	if got := bedOrder(beds["herb2"]); got[0] != "herb2:1-1" || len(got) != 12 {
 		t.Fatalf("herb2 order %v", got)
 	}
 	r := newGardenRig(t, false)
@@ -797,5 +798,36 @@ func TestGardenHerbGardensStreetsHaveTwoHerbBeds(t *testing.T) {
 	r.gact(a, 2, "herb2:2-1", "plant", map[string]any{"seed": "seed_spinach"})
 	if no := r.only(a, "garden_no"); no["message"] != gardenHerbOnly {
 		t.Fatalf("a crop seed in herb2 answered %v", no)
+	}
+}
+
+// Report #252: the Herb Gardens streets have one herb bed in each planter box (js/street-ecology.js
+// streetGardenBoxBeds): Chakra Phool's 8, the old herb2 and herb keys kept, the rest herb3..herb8.
+func TestGardenHerbGardensStreetsHaveABedInEveryBox(t *testing.T) {
+	want := map[string]int{"GA95U14319524O9": 8, "GA97L62229522GS": 5, "GA99U5PI39524GN": 7}
+	for tsid, n := range want {
+		beds := gardenWorldData.streets[tsid]
+		if len(beds) != n || beds["herb2"] == nil || beds["herb"] == nil || beds["default"] != nil {
+			t.Fatalf("%s beds %v", tsid, beds)
+		}
+		for key, b := range beds {
+			if b.bed != "herb" || b.key != key {
+				t.Fatalf("%s %s is %+v", tsid, key, b)
+			}
+		}
+		// The old beds' plots all fit: herb2 was 4x2, herb 3x2.
+		if b := beds["herb2"]; b.cols < 4 || b.rows < 2 {
+			t.Fatalf("%s herb2 %dx%d", tsid, b.cols, b.rows)
+		}
+		if b := beds["herb"]; b.cols < 3 || b.rows < 2 {
+			t.Fatalf("%s herb %dx%d", tsid, b.cols, b.rows)
+		}
+	}
+	chakra := gardenWorldData.streets["GA95U14319524O9"]
+	if bed, key := gardenWorldData.bedOf("GA95U14319524O9", "herb8:3-1"); bed != chakra["herb8"] || key != "3-1" {
+		t.Fatalf("herb8:3-1 is %v %q", bed, key)
+	}
+	if bed, _ := gardenWorldData.bedOf("GA95U14319524O9", "herb9:1-1"); bed != nil {
+		t.Fatalf("herb9 on Chakra Phool is %v", bed)
 	}
 }
