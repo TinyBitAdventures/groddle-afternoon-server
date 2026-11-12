@@ -17,7 +17,7 @@ package main
 //	{"t":"project_give","job":"62","req":"r136","currants":400}         currants for a currants requirement
 //	{"t":"project_work","job":"62","req":"r138","option":"13"}          one unit of work, done now
 //	{"t":"project_ack","id":"…"}                                         you applied a project_given / project_reward and saved
-//	{"t":"project_sync"}                                                 after a join (and on connect): the world, the featured project, this street, what you are owed
+//	{"t":"project_sync"}                                                 after a join (and on connect): the world, the featured project, this street, the first of what you are owed
 //	{"t":"project_sync","mine":true}                                     the same, and every project you have put anything into (project_mine)
 //	{"t":"project_work_start",…} and {"t":"project_work_stop"}           a run of work began or ended: the street's tool bubbles (projects_crew.go)
 //
@@ -373,6 +373,8 @@ type projects struct {
 	crewRate map[int64]*bucket
 	// The featured project's live side: its notice waiting for Global, its throttled progress (projects_featured.go).
 	feat featuredLive
+	// What is owed goes owedBatch at a time, the next as acks come (owed_pace.go).
+	pace *owedPacer
 }
 
 func newProjects(h *Hub) Module {
@@ -420,6 +422,7 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 	m := &projects{h: h, t: t, offer: map[string][]string{}, st: newProjState(), path: path,
 		boot: strconv.FormatInt(h.Now().UnixMilli(), 36), spawn: func(fn func()) { go fn() }, rng: rand.Float64,
 		workAt: map[int64]time.Time{}, giveAt: map[int64]time.Time{}, secret: homesSecretForTest}
+	m.pace = newOwedPacer(h, m.owedItems)
 	ids := make([]string, 0, len(t.Jobs))
 	for id := range t.Jobs {
 		ids = append(ids, id)
@@ -489,6 +492,7 @@ func (m *projects) Register(r *Registry) {
 	r.OnDisconnect(func(cl *Client) {
 		delete(m.workAt, cl.ID())
 		delete(m.giveAt, cl.ID())
+		m.pace.drop(cl)
 	})
 }
 
@@ -1030,12 +1034,14 @@ func (m *projects) ack(cl *Client, frame json.RawMessage) {
 				m.st.Owed[cl.ID()] = list
 			}
 			m.save()
-			return
+			break
 		}
 	}
+	m.pace.acked(cl, msg.ID) // the next of what is owed takes the freed slot
 }
 
-// owe keeps a message for a player until they ack it, and sends it now when they are online.
+// owe keeps a message for a player until they ack it, and sends it now when they are online
+// (behind any older ones still owed: owed_pace.go).
 func (m *projects) owe(player int64, id string, msg map[string]any) {
 	b, _ := json.Marshal(msg)
 	for _, o := range m.st.Owed[player] {
@@ -1045,8 +1051,18 @@ func (m *projects) owe(player int64, id string, msg map[string]any) {
 	}
 	m.st.Owed[player] = append(m.st.Owed[player], projOwed{ID: id, Msg: b})
 	if cl := m.h.ClientLocked(player); cl != nil {
-		m.h.SendLocked(cl, json.RawMessage(b))
+		m.pace.now(cl, owedItem{ID: id, Msg: b})
 	}
+}
+
+// owedItems is everything owed to a player, oldest first (owed_pace.go reads it at each top-up).
+func (m *projects) owedItems(player int64) []owedItem {
+	list := m.st.Owed[player]
+	out := make([]owedItem, len(list))
+	for i, o := range list {
+		out[i] = owedItem{ID: o.ID, Msg: o.Msg}
+	}
+	return out
 }
 
 // —— Finishing a phase ——
@@ -1373,8 +1389,9 @@ func (m *projects) broadcast(jobID string) {
 	}
 }
 
-// sync answers project_sync: the finished projects, this street's board and every message owed,
-// and with "mine" the asker's own projects (project_mine, mine below).
+// sync answers project_sync: the finished projects, this street's board and the oldest messages owed
+// (owedBatch of them, the rest as those are acked: owed_pace.go), and with "mine" the asker's own
+// projects (project_mine, mine below).
 func (m *projects) sync(cl *Client, frame json.RawMessage) {
 	var ask struct {
 		Mine bool `json:"mine"`
@@ -1402,9 +1419,7 @@ func (m *projects) sync(cl *Client, frame json.RawMessage) {
 		}
 		m.h.SendLocked(cl, map[string]any{"t": "project_street", "street": cl.Street(), "now": m.ms(), "jobs": jobs})
 	}
-	for _, o := range m.st.Owed[cl.ID()] {
-		m.h.SendLocked(cl, o.Msg)
-	}
+	m.pace.start(cl, nil)
 	if ask.Mine {
 		m.mine(cl)
 	}

@@ -15,7 +15,7 @@ package main
 // (macOS has no /proc: no machine CPU, load, memory or network there):
 //
 //	{"t":1762819200,"p":12,"w":3,"s":7,"c":23.4,"st":0.2,"pc":11.8,"l1":0.41,"l5":0.38,"l15":0.3,"n":2,
-//	 "mt":3915,"mu":1210,"rss":88,"hp":31.2,"g":161,"du":9.4,"df":40.6,"ni":3145728,"no":5242880,"mi":2400,"mo":9100,"lag":4.1}
+//	 "mt":3915,"mu":1210,"rss":88,"hp":31.2,"g":161,"du":9.4,"df":40.6,"ni":3145728,"no":5242880,"mi":2400,"mo":9100,"lag":4.1,"dc":3}
 //
 //	t    the minute (unix seconds, UTC, on the minute)
 //	p    players in the game now (connected and signed in; one socket per character)
@@ -31,6 +31,8 @@ package main
 //	ni no  network bytes in and out a minute, every interface but lo (/proc/net/dev)
 //	mi mo  socket frames read and written a minute (main.go's read loop and writer)
 //	lag  the slowest frame this minute, ms: from Hub.Handle's start, waiting for the hub's lock, until it let go
+//	dc   sockets that ended a minute (game and /chat/, refused ones too; hub.go's close lines say why).
+//	     Added 2026-11-11: older lines have no dc, and a reader that does not know it skips it.
 //
 // Rates (c, st, pc, ni, no, mi, mo) are over the time since the last sample,
 // scaled to a minute; the first sample after a start covers the part minute
@@ -49,7 +51,7 @@ package main
 // least; the smallest of a fixed set of steps that keeps the rows at most
 // points), each row one bucket that has samples, oldest first, in the order
 // fields names: t the bucket's start, then per bucket the most (p, w, s, cx,
-// l1x, g, lag, n, mt), the mean (pa, c, st, pc, l1, l5, l15, mu, rss, hp, ni,
+// l1x, g, lag, n, mt, dc), the mean (pa, c, st, pc, l1, l5, l15, mu, rss, hp, ni,
 // no, mi, mo) or the newest (du, df); a value no sample in the bucket had is
 // null. machine is now: cpus, mem (MB) and disk (GB) as this machine has them,
 // started and uptime (s) this process's, boot the machine's uptime (s).
@@ -94,9 +96,10 @@ var (
 	healthStarted = time.Now()
 
 	// Counters the socket code bumps (main.go, hub.go); the sampler reads them each minute.
-	healthFramesIn  atomic.Int64
-	healthFramesOut atomic.Int64
-	healthLagMax    atomic.Int64 // microseconds, the slowest Hub.Handle since the last sample
+	healthFramesIn    atomic.Int64
+	healthFramesOut   atomic.Int64
+	healthLagMax      atomic.Int64 // microseconds, the slowest Hub.Handle since the last sample
+	healthDisconnects atomic.Int64 // sockets that ended (hub.go CloseNote, RefusedNote)
 
 	healthFileRe = regexp.MustCompile(`^(\d{4})-(\d{2})\.jsonl$`)
 
@@ -145,6 +148,7 @@ type healthSample struct {
 	Mi  *float64 `json:"mi,omitempty"`
 	Mo  *float64 `json:"mo,omitempty"`
 	Lag *float64 `json:"lag,omitempty"`
+	Dc  *float64 `json:"dc,omitempty"`
 }
 
 // roundTo is x to d decimals, as a value a line may carry.
@@ -249,14 +253,15 @@ type healthProbe struct {
 	proc string
 	dir  string // the disk is this directory's filesystem
 
-	at        time.Time
-	cpu       cpuTimes
-	cpuOK     bool
-	rx, tx    uint64
-	netOK     bool
-	procCPU   time.Duration
-	framesIn  int64
-	framesOut int64
+	at          time.Time
+	cpu         cpuTimes
+	cpuOK       bool
+	rx, tx      uint64
+	netOK       bool
+	procCPU     time.Duration
+	framesIn    int64
+	framesOut   int64
+	disconnects int64
 }
 
 func (p *healthProbe) read(name string) (string, bool) {
@@ -283,6 +288,7 @@ func (p *healthProbe) baseline(now time.Time) {
 	}
 	p.procCPU = processCPU()
 	p.framesIn, p.framesOut = healthFramesIn.Load(), healthFramesOut.Load()
+	p.disconnects = healthDisconnects.Load()
 	healthLagMax.Store(0)
 }
 
@@ -352,6 +358,9 @@ func (p *healthProbe) sample(now time.Time) healthSample {
 	in, out := healthFramesIn.Load(), healthFramesOut.Load()
 	smp.Mi, smp.Mo = perMinute(float64(in-p.framesIn)), perMinute(float64(out-p.framesOut))
 	p.framesIn, p.framesOut = in, out
+	dc := healthDisconnects.Load()
+	smp.Dc = perMinute(float64(dc - p.disconnects))
+	p.disconnects = dc
 	if lag := healthLagMax.Swap(0); lag > 0 {
 		smp.Lag = roundTo(float64(lag)/1000, 1)
 	}
@@ -648,6 +657,8 @@ func (s *healthSample) field(key string) **float64 {
 		return &s.Mo
 	case "lag":
 		return &s.Lag
+	case "dc":
+		return &s.Dc
 	}
 	return nil
 }
@@ -697,6 +708,7 @@ var healthCols = []healthCol{
 	{"mi", 'a', 0, func(s *healthSample) (float64, bool) { return opt(s.Mi) }},
 	{"mo", 'a', 0, func(s *healthSample) (float64, bool) { return opt(s.Mo) }},
 	{"lag", 'x', 1, func(s *healthSample) (float64, bool) { return opt(s.Lag) }},
+	{"dc", 'x', 0, func(s *healthSample) (float64, bool) { return opt(s.Dc) }},
 }
 
 // healthBucket is the smallest step that keeps a span in at most points buckets.

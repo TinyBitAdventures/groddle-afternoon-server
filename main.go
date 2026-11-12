@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -133,14 +134,16 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(maxFrame)
 	ctx := r.Context()
+	start := time.Now()
 
-	claims, ok := s.auth(ctx, conn)
+	claims, ok := s.auth(ctx, conn, start)
 	if !ok {
 		return
 	}
 	// A suspended account never connects, whatever ticket it holds (admin.go).
 	if s.hub.Banned(claims.Sub) {
 		conn.Close(closeBanned, "this account is suspended")
+		RefusedNote(closeBanned, "player "+strconv.FormatInt(claims.Sub, 10)+": this account is suspended", time.Since(start))
 		return
 	}
 	var cl *Client
@@ -157,6 +160,8 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	for {
 		kind, frame, err := conn.Read(ctx)
 		if err != nil {
+			code, reason := readEnd(ctx, err)
+			s.hub.CloseNote(cl, code, reason) // hub.go: one line, the hub's own close or the write's failure first
 			return
 		}
 		healthFramesIn.Add(1) // health.go: frames read a minute
@@ -166,13 +171,31 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// auth waits for the first frame, the ticket.
-func (s *Server) auth(ctx context.Context, conn *websocket.Conn) (Claims, bool) {
+// readEnd is the close code and reason a failed read says: the peer's close frame, a frame over
+// maxFrame (1009, as the websocket library closes it), or a socket that dropped with none (1006).
+func readEnd(ctx context.Context, err error) (int, string) {
+	var ce websocket.CloseError
+	if errors.As(err, &ce) {
+		return int(ce.Code), ce.Reason
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "read limited") {
+		return int(websocket.StatusMessageTooBig), "read limit: " + msg
+	}
+	if ctx.Err() != nil {
+		return 1006, "request ended: " + msg
+	}
+	return 1006, msg
+}
+
+// auth waits for the first frame, the ticket. A refusal logs one line (hub.go RefusedNote).
+func (s *Server) auth(ctx context.Context, conn *websocket.Conn, start time.Time) (Claims, bool) {
 	actx, cancel := context.WithTimeout(ctx, authWait)
 	defer cancel()
 	_, frame, err := conn.Read(actx)
 	if err != nil {
 		conn.Close(closeTicket, "no ticket")
+		RefusedNote(closeTicket, "no ticket: "+err.Error(), time.Since(start))
 		return Claims{}, false
 	}
 	var m struct {
@@ -181,11 +204,13 @@ func (s *Server) auth(ctx context.Context, conn *websocket.Conn) (Claims, bool) 
 	}
 	if json.Unmarshal(frame, &m) != nil || m.T != "auth" {
 		conn.Close(closeTicket, "the first message must be the ticket")
+		RefusedNote(closeTicket, "the first message must be the ticket", time.Since(start))
 		return Claims{}, false
 	}
 	claims, err := s.tickets.Check(m.Ticket)
 	if err != nil {
 		conn.Close(closeTicket, err.Error())
+		RefusedNote(closeTicket, "ticket: "+err.Error(), time.Since(start))
 		return Claims{}, false
 	}
 	return claims, true
@@ -202,6 +227,8 @@ func (s *Server) write(ctx context.Context, conn *websocket.Conn, cl *Client) {
 			err := conn.Write(wctx, websocket.MessageText, b)
 			cancel()
 			if err != nil {
+				why := "write: " + err.Error()
+				cl.wfail.Store(&why) // the close line (hub.go CloseNote) names it
 				conn.CloseNow()
 				return
 			}
@@ -211,6 +238,8 @@ func (s *Server) write(ctx context.Context, conn *websocket.Conn, cl *Client) {
 			err := conn.Ping(pctx)
 			cancel()
 			if err != nil {
+				why := "ping: " + err.Error()
+				cl.wfail.Store(&why)
 				conn.CloseNow()
 				return
 			}
@@ -227,16 +256,9 @@ func (s *Server) write(ctx context.Context, conn *websocket.Conn, cl *Client) {
 				}
 				break
 			}
-			switch cl.why {
-			case closeReplaced:
-				conn.Close(closeReplaced, "this character connected somewhere else")
-			case closeSlow:
-				conn.Close(closeSlow, "too far behind")
-			case closeBooted:
-				conn.Close(closeBooted, "an administrator signed you out")
-			case closeBanned:
-				conn.Close(closeBanned, "this account is suspended")
-			default:
+			if reason, ok := closeReasons[cl.why]; ok { // hub.go
+				conn.Close(websocket.StatusCode(cl.why), reason)
+			} else {
 				conn.CloseNow()
 			}
 			return

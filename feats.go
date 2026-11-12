@@ -273,6 +273,7 @@ type featBucket struct {
 }
 
 type feats struct {
+	pace    *owedPacer // what is owed goes owedBatch at a time (owed_pace.go)
 	h       *Hub
 	t       featTable
 	st      *featState
@@ -326,6 +327,7 @@ func newFeatsWith(h *Hub, t featTable, path string) *feats {
 		t.GameDayMs = 4 * 60 * 60 * 1000
 	}
 	m := &feats{h: h, t: t, st: newFeatState(), path: path, spawn: func(fn func()) { go fn() }, buckets: map[int64]map[string]*featBucket{}}
+	m.pace = newOwedPacer(h, m.owedItems)
 	if path != "" {
 		if err := m.load(); err != nil {
 			log.Printf("feats %s: %v (the Feat is kept in memory only)", path, err)
@@ -343,7 +345,10 @@ func (m *feats) Register(r *Registry) {
 	r.Handle("feat_sync", m.sync)
 	r.Handle("feat_dev", m.devMsg)
 	r.OnConnect(m.connected)
-	r.OnDisconnect(func(cl *Client) { delete(m.buckets, cl.ID()) })
+	r.OnDisconnect(func(cl *Client) {
+		delete(m.buckets, cl.ID())
+		m.pace.drop(cl)
+	})
 	// A module that sees a contribution itself (a hi sign landing, a package left with a Butler) counts it here, at no pace.
 	r.Provide("feats.count", func(id int64, name, feat string, n int64) int64 {
 		run := m.current()
@@ -932,8 +937,18 @@ func (m *feats) owe(player int64, id string, msg map[string]any) {
 	b, _ := json.Marshal(msg)
 	m.st.Owed[player] = append(m.st.Owed[player], featOwed{ID: id, Msg: b})
 	if cl := m.h.ClientLocked(player); cl != nil {
-		m.h.SendLocked(cl, json.RawMessage(b))
+		m.pace.now(cl, owedItem{ID: id, Msg: b})
 	}
+}
+
+// owedItems is everything owed to a player, oldest first (owed_pace.go reads it at each top-up).
+func (m *feats) owedItems(player int64) []owedItem {
+	list := m.st.Owed[player]
+	out := make([]owedItem, len(list))
+	for i, o := range list {
+		out[i] = owedItem{ID: o.ID, Msg: o.Msg}
+	}
+	return out
 }
 
 func (m *feats) ack(cl *Client, frame json.RawMessage) {
@@ -953,9 +968,10 @@ func (m *feats) ack(cl *Client, frame json.RawMessage) {
 				m.st.Owed[cl.ID()] = list
 			}
 			m.save()
-			return
+			break
 		}
 	}
+	m.pace.acked(cl, msg.ID) // the next of what is owed takes the freed slot
 }
 
 // —— What players see ——
@@ -994,9 +1010,7 @@ func (m *feats) sync(cl *Client, _ json.RawMessage) {
 	if r == before { // a new run was just told to everyone
 		m.h.SendLocked(cl, m.stateJSON(r, cl.ID()))
 	}
-	for _, o := range m.st.Owed[cl.ID()] {
-		m.h.SendLocked(cl, o.Msg)
-	}
+	m.pace.start(cl, nil) // the oldest owedBatch; the rest as they are acked (owed_pace.go)
 }
 
 // connected: rewards that got no answer (or came before a restart) are asked again now this player is here.

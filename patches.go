@@ -465,6 +465,7 @@ type patchTimers struct {
 }
 
 type patches struct {
+	pace    *owedPacer // the connect's resend of grants, owedBatch at a time (owed_pace.go)
 	h       *Hub
 	w       *patchWorld
 	ow      *objWorld // the tree tables (data/objects.json rules)
@@ -502,7 +503,7 @@ func newPatches(h *Hub) Module {
 	rand.Read(b[:])
 	w := patchWorldData
 	t := w.rules.Timers
-	g := &patches{h: h, w: w, ow: sharedWorld, plots: map[string]map[string]*pPlot{}, parked: map[string]map[string]*patchRec{},
+	g := &patches{pace: newOwedPacer(h, nil), h: h, w: w, ow: sharedWorld, plots: map[string]map[string]*pPlot{}, parked: map[string]map[string]*patchRec{},
 		holding: map[string]bool{}, limits: map[int64]*objBucket{}, seeded: map[string]int64{}, boot: hex.EncodeToString(b[:]), roll: mrand.Float64, devRoll: -1,
 		timers: patchTimers{clean: t.Clean, dug: t.Dug, min: t.Min, max: t.Max, cycle1: t.Cycle1, cycle: t.Cycle, wood: t.Wood}, resumed: true}
 	if testing.Testing() {
@@ -551,7 +552,10 @@ func (g *patches) Register(r *Registry) {
 		g.resendGrants(cl)
 	})
 	r.OnLeave(func(cl *Client, street string) { g.release(cl.ID(), street) })
-	r.OnDisconnect(func(cl *Client) { delete(g.limits, cl.ID()) })
+	r.OnDisconnect(func(cl *Client) {
+		delete(g.limits, cl.ID())
+		g.pace.drop(cl)
+	})
 	r.OnShutdown(func() { g.save() })
 	r.Provide("patches.adopt", g.adopt)
 	// Slice 2: the Rook (rook.go) and Fertilidust (objects.go handleDust) on Patch trees.
@@ -1707,11 +1711,19 @@ func (g *patches) trimGrants() {
 }
 
 func (g *patches) resendGrants(cl *Client) {
-	for _, gr := range g.grants {
-		if gr.User == cl.ID() {
-			g.h.SendLocked(cl, map[string]any{"t": "patch_grant", "id": gr.ID, "c": gr.C, "n": gr.N})
+	// The grants made before this connect, owedBatch at a time (owed_pace.go): one made from now
+	// on goes with its own answer, as before, so the window never sends it a second time.
+	id, upTo := cl.ID(), g.nowMs()
+	g.pace.start(cl, func() []owedItem {
+		var out []owedItem
+		for _, gr := range g.grants {
+			if gr.User == id && gr.At <= upTo {
+				b, _ := json.Marshal(map[string]any{"t": "patch_grant", "id": gr.ID, "c": gr.C, "n": gr.N})
+				out = append(out, owedItem{ID: gr.ID, Msg: b})
+			}
 		}
-	}
+		return out
+	})
 }
 
 func (g *patches) handleAck(cl *Client, frame json.RawMessage) {
@@ -1721,6 +1733,7 @@ func (g *patches) handleAck(cl *Client, frame json.RawMessage) {
 	if json.Unmarshal(frame, &m) != nil || !strings.HasPrefix(m.ID, "pg-") || len(m.ID) > 40 {
 		return
 	}
+	defer g.pace.acked(cl, m.ID) // after it is gone: the next resend takes its slot
 	for i, gr := range g.grants {
 		if gr.ID == m.ID && gr.User == cl.ID() {
 			g.grants = append(g.grants[:i], g.grants[i+1:]...)

@@ -132,7 +132,7 @@ var inputKinds = map[string]bool{
 
 // ConnectWeb adds a web socket for a character; the game socket, if any, is untouched.
 func (h *Hub) ConnectWeb(c Claims) *Client {
-	cl := &Client{id: c.Sub, name: c.Name, web: true, send: make(chan []byte, sendBuffer), done: make(chan struct{})}
+	cl := &Client{id: c.Sub, name: c.Name, web: true, send: make(chan []byte, sendBuffer), done: make(chan struct{}), at: h.now()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	tabs := h.webs[c.Sub]

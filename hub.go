@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 )
@@ -115,6 +118,15 @@ type Client struct {
 	web     bool
 	ww      *webWatch
 	webRate bucket
+
+	// For the close line (closeNoteLocked): when the socket connected, the last few frames queued
+	// (only their slices are kept; a slow close reads their kinds), what the hub's close saw, and
+	// the writer's own failure (main.go write, set off the hub lock).
+	at     time.Time
+	recent [4][]byte
+	nsent  int
+	detail string
+	wfail  atomic.Pointer[string]
 }
 
 // Hub holds every connected character and the street each stands on.
@@ -147,6 +159,10 @@ type Hub struct {
 
 	// The cone of silence's word for Local chat: the newest signed one per character (G480).
 	cones map[int64]coneWord
+
+	// The close lines' reconnect-loop watch (closeNoteLocked, noteConnectLocked): connects per character a minute.
+	rates      map[int64]*connRate
+	ratesSwept time.Time
 }
 
 // coneWord is whether a character is under the chat cone, as of a signed ticket or groups list made at iat.
@@ -171,7 +187,7 @@ func NewHub(now func() time.Time) *Hub {
 		now = time.Now
 	}
 	h := &Hub{now: now, clients: map[int64]*Client{}, streets: map[string]map[int64]*Client{}, handlers: map[string]func(*Client, json.RawMessage){}, afterFunc: realAfter, provided: map[string]any{},
-		webs: map[int64]map[*Client]bool{}, off: map[int64]bool{}, inputAt: map[int64]time.Time{}, cones: map[int64]coneWord{}}
+		webs: map[int64]map[*Client]bool{}, off: map[int64]bool{}, inputAt: map[int64]time.Time{}, cones: map[int64]coneWord{}, rates: map[int64]*connRate{}}
 	for _, m := range modules {
 		m(h).Register(&Registry{h: h})
 	}
@@ -199,9 +215,10 @@ func (h *Hub) Stats() (players, streets int) {
 
 // Connect adds a character, closing any socket it already had.
 func (h *Hub) Connect(c Claims) *Client {
-	cl := &Client{id: c.Sub, name: c.Name, send: make(chan []byte, sendBuffer), done: make(chan struct{}), chatTokens: chatBurst, chatAt: h.now()}
+	cl := &Client{id: c.Sub, name: c.Name, send: make(chan []byte, sendBuffer), done: make(chan struct{}), chatTokens: chatBurst, chatAt: h.now(), at: h.now()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.noteConnectLocked(cl)
 	if old := h.clients[c.Sub]; old != nil {
 		h.leaveLocked(old)
 		h.closeLocked(old, closeReplaced)
@@ -429,7 +446,11 @@ func (h *Hub) pushLocked(cl *Client, b []byte) {
 	}
 	select {
 	case cl.send <- b:
+		cl.recent[cl.nsent%len(cl.recent)] = b
+		cl.nsent++
 	default:
+		// The close line (main.go) says how far behind and what was being sent.
+		cl.detail = "queue=" + itoa(len(cl.send)) + " last=" + strings.Join(cl.recentKindsLocked(), ",")
 		h.closeLocked(cl, closeSlow)
 		if cl.web {
 			h.dropWebLocked(cl)
@@ -443,6 +464,14 @@ func (h *Hub) pushLocked(cl *Client, b []byte) {
 			}
 		}
 	}
+}
+
+// RoomLocked is how many more frames cl's send queue takes before pushLocked drops it as too far behind.
+func (h *Hub) RoomLocked(cl *Client) int {
+	if cl == nil || cl.closed {
+		return 0
+	}
+	return cap(cl.send) - len(cl.send)
 }
 
 func (h *Hub) closeLocked(cl *Client, why int) {
@@ -511,4 +540,167 @@ func cleanChat(s string) string {
 		s = string(r[:maxChat])
 	}
 	return s
+}
+
+// —— Close lines and the reconnect-loop watch ——
+//
+// Every socket that ends logs one line (main.go socket calls CloseNote), the
+// hub's own closes and the ones it never saw coming alike:
+//
+//	realtime: close player=7 name="Ada" via=game code=4008 reason="too far behind" after=3.4s queue=64 last=project_given,project_given,project_reward,pong
+//	realtime: close player=7 name="Ada" via=game code=1009 reason="read limit: read limited at 8193 bytes" after=41m2s
+//	realtime: close player=7 name="Ada" via=game code=1006 reason="write: failed to write msg: …" after=2h3m
+//	realtime: close player=7 name="Ada" via=game code=1001 reason="" after=12m40s
+//
+// code is the WebSocket close code (the hub's 4001/4008/4010/4011, the peer's
+// own, 1009 for a frame over the read limit, 1006 for a socket that dropped
+// with no close frame). A character that connects more than reconnectLoopMax
+// times in a minute is in a loop: one warning a minute names it, with the last
+// close, and its close lines stop until it settles:
+//
+//	realtime: reconnect loop player=7 name="Ada" connects=6 in 1m0s, 0 close lines held back; last close code=4008 reason="too far behind" queue=64 last=…
+//
+// Refused sockets (no ticket, a bad one, a suspended account) log as
+// "realtime: refused …", at most refusedLogMax lines a minute.
+
+const (
+	reconnectLoopMax = 5
+	refusedLogMax    = 20
+)
+
+// connRate counts one character's connects in a minute.
+type connRate struct {
+	start  time.Time // the minute counted from
+	n      int       // connects since start
+	held   int       // close lines not logged since the last warning
+	warned time.Time // the last loop warning
+	last   string    // the last close: code=… reason=… [detail]
+}
+
+// noteConnectLocked counts a game socket's connect and warns, once a minute, of a reconnect loop.
+func (h *Hub) noteConnectLocked(cl *Client) {
+	now := h.now()
+	if now.Sub(h.ratesSwept) >= time.Minute {
+		h.ratesSwept = now
+		for id, r := range h.rates {
+			if now.Sub(r.start) >= 2*time.Minute && now.Sub(r.warned) >= 2*time.Minute {
+				delete(h.rates, id)
+			}
+		}
+	}
+	r := h.rates[cl.id]
+	if r == nil {
+		r = &connRate{}
+		h.rates[cl.id] = r
+	}
+	if now.Sub(r.start) >= time.Minute {
+		r.start, r.n = now, 0
+	}
+	r.n++
+	if r.n > reconnectLoopMax && (r.warned.IsZero() || now.Sub(r.warned) >= time.Minute) {
+		log.Printf("realtime: reconnect loop player=%d name=%q connects=%d in %s, %d close lines held back; last close %s", cl.id, cl.name, r.n, now.Sub(r.start).Round(time.Second), r.held, r.last)
+		r.warned, r.held = now, 0
+	}
+}
+
+// looping: is this character in a reconnect loop now (its close lines are held back)?
+func (r *connRate) looping(now time.Time) bool {
+	return r != nil && ((r.n > reconnectLoopMax && now.Sub(r.start) < time.Minute) || (!r.warned.IsZero() && now.Sub(r.warned) < 2*time.Minute))
+}
+
+// CloseNote logs one line for a socket that ended (main.go socket). code and reason are what the
+// socket saw (the peer's close, a read or write failure); a close the hub made itself (cl.why)
+// takes their place. It also counts the close for the health sample.
+func (h *Hub) CloseNote(cl *Client, code int, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.closeNoteLocked(cl, code, reason)
+}
+
+func (h *Hub) closeNoteLocked(cl *Client, code int, reason string) {
+	healthDisconnects.Add(1)
+	if cl.why != 0 {
+		code, reason = cl.why, closeReasons[cl.why]
+	} else if w := cl.wfail.Load(); w != nil {
+		code, reason = 1006, *w
+	}
+	via := "game"
+	if cl.web {
+		via = "web"
+	}
+	what := "code=" + itoa(code) + " reason=" + strconv.Quote(reason)
+	if cl.detail != "" {
+		what += " " + cl.detail
+	}
+	now := h.now()
+	if !cl.web {
+		if r := h.rates[cl.id]; r != nil {
+			r.last = what
+			if r.looping(now) {
+				r.held++
+				return
+			}
+		}
+	}
+	after := time.Duration(0)
+	if !cl.at.IsZero() {
+		after = now.Sub(cl.at).Round(100 * time.Millisecond)
+	}
+	log.Printf("realtime: close player=%d name=%q via=%s %s after=%s", cl.id, cl.name, via, what, after)
+}
+
+// closeReasons are the hub's close codes as the socket sends them (main.go write).
+var closeReasons = map[int]string{
+	closeReplaced: "this character connected somewhere else",
+	closeSlow:     "too far behind",
+	closeBooted:   "an administrator signed you out",
+	closeBanned:   "this account is suspended",
+}
+
+// recentKindsLocked: the kinds ("t") of the last few frames queued for cl, oldest first.
+func (cl *Client) recentKindsLocked() []string {
+	out := []string{}
+	n := len(cl.recent)
+	for i := 0; i < n; i++ {
+		k := cl.nsent - n + i
+		if k < 0 {
+			continue
+		}
+		var m struct {
+			T string `json:"t"`
+		}
+		if json.Unmarshal(cl.recent[k%n], &m) != nil || m.T == "" {
+			m.T = "?"
+		}
+		out = append(out, m.T)
+	}
+	return out
+}
+
+// refusedLog throttles the refused-socket lines: at most refusedLogMax a minute, then a count.
+var refusedLog struct {
+	sync.Mutex
+	start time.Time
+	n     int
+	held  int
+}
+
+// RefusedNote logs a socket refused before it was a client (main.go auth, a suspended account).
+func RefusedNote(code int, reason string, after time.Duration) {
+	healthDisconnects.Add(1)
+	refusedLog.Lock()
+	defer refusedLog.Unlock()
+	now := time.Now()
+	if now.Sub(refusedLog.start) >= time.Minute {
+		if refusedLog.held > 0 {
+			log.Printf("realtime: refused %d more sockets in the last minute (lines held back)", refusedLog.held)
+		}
+		refusedLog.start, refusedLog.n, refusedLog.held = now, 0, 0
+	}
+	refusedLog.n++
+	if refusedLog.n > refusedLogMax {
+		refusedLog.held++
+		return
+	}
+	log.Printf("realtime: refused code=%d reason=%s after=%s", code, strconv.Quote(reason), after.Round(100*time.Millisecond))
 }

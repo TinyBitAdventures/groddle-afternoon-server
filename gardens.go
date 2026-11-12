@@ -442,6 +442,7 @@ type gardenGrant struct {
 }
 
 type gardens struct {
+	pace    *owedPacer // the connect's resend of grants, owedBatch at a time (owed_pace.go)
 	h       *Hub
 	w       *gardenWorld
 	off     bool
@@ -468,7 +469,7 @@ type gardens struct {
 func newGardens(h *Hub) Module {
 	var b [4]byte
 	rand.Read(b[:])
-	g := &gardens{h: h, w: gardenWorldData, plots: map[string]map[string]*gPlot{}, holding: map[string]bool{}, limits: map[int64]*objBucket{},
+	g := &gardens{pace: newOwedPacer(h, nil), h: h, w: gardenWorldData, plots: map[string]map[string]*gPlot{}, holding: map[string]bool{}, limits: map[int64]*objBucket{},
 		boot: hex.EncodeToString(b[:]), waterMs: gardenWorldData.waterMs, lockMs: gardenWorldData.lockMs, resumed: true}
 	if testing.Testing() {
 		g.off = gardensOffForTest
@@ -503,7 +504,10 @@ func (g *gardens) Register(r *Registry) {
 		g.resume()
 		g.resendGrants(cl)
 	})
-	r.OnDisconnect(func(cl *Client) { delete(g.limits, cl.ID()) })
+	r.OnDisconnect(func(cl *Client) {
+		delete(g.limits, cl.ID())
+		g.pace.drop(cl)
+	})
 	r.OnShutdown(func() { g.save() })
 }
 
@@ -1043,11 +1047,19 @@ func (g *gardens) trimGrants() {
 }
 
 func (g *gardens) resendGrants(cl *Client) {
-	for _, gr := range g.grants {
-		if gr.User == cl.ID() {
-			g.h.SendLocked(cl, map[string]any{"t": "garden_grant", "id": gr.ID, "c": gr.C, "n": gr.N})
+	// The grants made before this connect, owedBatch at a time (owed_pace.go): one made from now
+	// on goes with its own answer, as before, so the window never sends it a second time.
+	id, upTo := cl.ID(), g.nowMs()
+	g.pace.start(cl, func() []owedItem {
+		var out []owedItem
+		for _, gr := range g.grants {
+			if gr.User == id && gr.At <= upTo {
+				b, _ := json.Marshal(map[string]any{"t": "garden_grant", "id": gr.ID, "c": gr.C, "n": gr.N})
+				out = append(out, owedItem{ID: gr.ID, Msg: b})
+			}
 		}
-	}
+		return out
+	})
 }
 
 func (g *gardens) handleAck(cl *Client, frame json.RawMessage) {
@@ -1057,6 +1069,7 @@ func (g *gardens) handleAck(cl *Client, frame json.RawMessage) {
 	if json.Unmarshal(frame, &m) != nil || !strings.HasPrefix(m.ID, "gg-") || len(m.ID) > 40 {
 		return
 	}
+	defer g.pace.acked(cl, m.ID) // after it is gone: the next resend takes its slot
 	for i, gr := range g.grants {
 		if gr.ID == m.ID && gr.User == cl.ID() {
 			g.grants = append(g.grants[:i], g.grants[i+1:]...)
