@@ -449,8 +449,8 @@ func TestTheShippedQuoinData(t *testing.T) {
 	if len(d.streets) < 1000 {
 		t.Fatalf("only %d streets", len(d.streets))
 	}
-	// Hechey Track, the fresh multiplayer start: the outdoor eight.
-	if n := len(d.streets["GLI2V0UN7RD1T2J"]); n != 8 {
+	// Hechey Track, the fresh multiplayer start: its 2012 file's 36 (30 where the snaps show them, G271).
+	if n := len(d.streets["GLI2V0UN7RD1T2J"]); n != 36 {
 		t.Fatalf("Hechey Track has %d quoins", n)
 	}
 	for tsid, spots := range d.streets {
