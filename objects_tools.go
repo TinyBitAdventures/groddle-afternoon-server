@@ -24,7 +24,8 @@ package main
 // site being slow.
 //
 // Refusals use the source's lines, obj_no code "no_tool":
-//   - a rock: "You'll need a pick first." (rock_*.js conditions, is_pick)
+//   - a rock: "You'll need a pick first." (rock_*.js conditions, is_pick); a Metal Rock: "You'll
+//     need a Fancy Pick first." (rock_metal_1.js 198-202)
 //   - a Wood Tree: wood_tree.js:678 (is_hatchet 673: hatchet or class_axe)
 //   - a Mortar Barnacle or Ice Nubbin: "You'll need a working scraper first." (mortar_barnacle.js:332, ice_knob.js:356)
 //   - a Dirt Pile: "You need a working shovel." (dirt_pile.js:109)
@@ -53,12 +54,14 @@ type toolNeed struct {
 }
 
 var (
-	toolPick    = toolNeed{"pick", []string{"pick", "fancy_pick"}, "You'll need a pick first."}
-	toolHatchet = toolNeed{"hatchet", []string{"hatchet", "class_axe"}, "You can't just pluck planks from a tree! You need something to gently extract them with. A hatchet, maybe?"}
-	toolScraper = toolNeed{"scraper", []string{"scraper", "super_scraper"}, "You'll need a working scraper first."}
-	toolShovel  = toolNeed{"shovel", []string{"shovel", "ace_of_spades"}, "You need a working shovel."}
-	toolPeat    = toolNeed{"shovel", []string{"shovel", "ace_of_spades"}, "You'll need a working shovel first."}
-	toolCan     = toolNeed{"can", []string{"watering_can", "irrigator_9000"}, "That's going to be tough without a watering can :("}
+	toolPick = toolNeed{"pick", []string{"pick", "fancy_pick"}, "You'll need a pick first."}
+	// A Metal Rock takes only a Fancy Pick (rock_metal_1.js conditions 198-202, drop_ok_code 183-185).
+	toolFancyPick = toolNeed{"fancy_pick", []string{"fancy_pick"}, "You'll need a Fancy Pick first."}
+	toolHatchet   = toolNeed{"hatchet", []string{"hatchet", "class_axe"}, "You can't just pluck planks from a tree! You need something to gently extract them with. A hatchet, maybe?"}
+	toolScraper   = toolNeed{"scraper", []string{"scraper", "super_scraper"}, "You'll need a working scraper first."}
+	toolShovel    = toolNeed{"shovel", []string{"shovel", "ace_of_spades"}, "You need a working shovel."}
+	toolPeat      = toolNeed{"shovel", []string{"shovel", "ace_of_spades"}, "You'll need a working shovel first."}
+	toolCan       = toolNeed{"can", []string{"watering_can", "irrigator_9000"}, "That's going to be tough without a watering can :("}
 	// A shared public garden (gardens.go): the plots' own lines (js/garden.js waterPlot, clearPlot), as
 	// the source answers only with a talkback (include/garden.js 217-228 broken_watering_can, 326-330 broken_hoe).
 	toolGardenCan = toolNeed{"can", []string{"watering_can", "irrigator_9000"}, "You need a Watering Can to water plots."}
@@ -75,6 +78,8 @@ var (
 // toolFor is the tool a verb on spot needs, or nil.
 func toolFor(spot *objSpot, verb string) *toolNeed {
 	switch {
+	case spot.kind == "rock" && verb == "mine" && spot.class == "rock_metal_1":
+		return &toolFancyPick
 	case spot.kind == "rock" && verb == "mine":
 		return &toolPick
 	case spot.kind == "wood" && verb == "harvest":
@@ -156,7 +161,7 @@ func (o *objects) withTool(cl *Client, street string, need *toolNeed, refuse fun
 				return
 			}
 			held := map[string]bool{}
-			for _, n := range []toolNeed{toolPick, toolHatchet, toolScraper, toolShovel, toolCan, toolHoe} {
+			for _, n := range []toolNeed{toolPick, toolFancyPick, toolHatchet, toolScraper, toolShovel, toolCan, toolHoe} {
 				for _, cls := range n.classes {
 					held[n.group] = held[n.group] || classes[cls]
 				}

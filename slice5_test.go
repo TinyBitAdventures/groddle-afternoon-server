@@ -108,9 +108,14 @@ func TestToolGatedTakesNeedAToolTheLedgerHolds(t *testing.T) {
 	r.drain(b)
 
 	// Bo's page claims a pick the ledger never saw: the source's line, and the rock is untouched.
+	// A Metal Rock asks for a Fancy Pick (rock_metal_1.js conditions 198-202).
+	want, pick := "You'll need a pick first.", "pick"
+	if rock.class == "rock_metal_1" {
+		want, pick = "You'll need a Fancy Pick first.", "fancy_pick"
+	}
 	r.act(b, 1, "rock:0", "mine", nil)
 	r.advance(0)
-	if no := r.only(b, "obj_no"); no["code"] != "no_tool" || no["message"] != "You'll need a pick first." {
+	if no := r.only(b, "obj_no"); no["code"] != "no_tool" || no["message"] != want {
 		t.Fatalf("a swing without a pick answered %v", no)
 	}
 	if r.mod.streets[defaultStreet]["rock:0"] != nil {
@@ -123,7 +128,7 @@ func TestToolGatedTakesNeedAToolTheLedgerHolds(t *testing.T) {
 	if n := strings.Count(strings.Join(l.calls, ","), "has 2"); n != 1 {
 		t.Fatalf("has calls for Bo: %d", n)
 	}
-	l.give(2, "pick", 1)
+	l.give(2, pick, 1)
 	r.now = r.now.Add(toolNoFresh)
 	r.act(b, 3, "rock:0", "mine", nil)
 	r.advance(0)

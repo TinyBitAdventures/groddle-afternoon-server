@@ -91,6 +91,17 @@ package main
 // is the client's first draw); the bonus items are Loam when either Loam came. Peat Bogs have no
 // helpers in the source (peat_1.js), so they have none here.
 //
+// Every use that started is paid (rules-b audit, 2026-11-12): the source checked isUseable as a node's
+// verb or a rock's swing started and never at completion (mortar_barnacle.js 232-311, ice_knob.js
+// 217-335, jellisac.js 149-242, peat_1.js 233-316, dirt_pile.js 293-486, include/mining.js 248-383),
+// so two players at one node both got their take, the counts clamping (scrape and scoop states back
+// to 1, peat at 0, dirt at 1, a rock at 0). A client says when a use starts ({"t":"obj_dig"} for a
+// Mortar Barnacle, Ice Nubbin, Jellisac, Dirt Pile or Peat Bog, obj_mine for a rock); a landing from
+// a player who started while it was ready is paid even after another's emptied it, and its "before"
+// is the ready state the swing found. Help scrape (include/scraping.js, ice_knob.js 270-317): an
+// Ice Nubbin's scrapers help each other as diggers do, one more Ice for each other scraper
+// ("help":{"n":2,"items":2,"class":"ice","by":[…]}); the verb reads "Help scrape" while another scrapes.
+//
 // State: {"id":"rock:2","chunks":43,"mega":false,"in":0,"miners":[3,7]} (in: ms to the
 // respawn; miners: who is swinging at it now, so the verb reads "Help mine"),
 // {"id":"node:peat_1:0","units":3,"in":120000} (in: ms to the next +1; a Paper
@@ -190,7 +201,7 @@ var (
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
 		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true, "pickup": true}
-	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true, "herd": true}
+	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true, "herd": true, "rube": true}
 )
 
 // The source's refusals (items/*.js), with the remake's copy where the source
@@ -1026,7 +1037,18 @@ type verdict struct {
 	got     tradeGoods // what the player takes, credited to the site's ledger
 	also    []*liveObj // other objects the verb changed
 	ev      string     // the street sees the verb happen (obj_ev, objects_creatures.go)
+	// before, when set, is the state the player's swing started from, sent as "before" in place of
+	// the object's state now: a swing that started while the node was ready lands even after
+	// someone else's emptied it (useNode, mine), and the client's own rules run on that state.
+	before map[string]any
 }
+
+// crewNodes are the nodes whose uses the server hears start (obj_dig "start", at the swing's
+// start, as the source's handlers run isUseable then and never again at completion:
+// mortar_barnacle.js 232-311, ice_knob.js 217-335, jellisac.js 149-242, peat_1.js 233-316,
+// dirt_pile.js 293-486). An Ice Nubbin's scrapers help each other (include/scraping.js) and a Dirt
+// Pile's diggers (dirt_pile.js addDigger); the others only keep who is at work.
+var crewNodes = map[string]bool{"mortar_barnacle": true, "ice_knob": true, "jellisac": true, "dirt_pile": true, "peat_1": true}
 
 // objFruit is each trant's fruit (js/trants.js:115-120; items/trant_*.js).
 var objFruit = map[string]string{"trant_fruit": "cherry", "trant_egg": "egg_plain", "trant_bean": "bean_plain", "trant_bubble": "plain_bubble", "trant_spice": "all_spice", "trant_gas": "general_vapour"}
@@ -1213,6 +1235,9 @@ func (o *objects) finishAct(cl *Client, m objAct, street string, ob *liveObj, be
 		o.forget(street, ob)
 		return
 	}
+	if v.before != nil {
+		before = v.before
+	}
 	msg := map[string]any{"t": "obj_ok", "req": m.Req, "id": m.ID, "verb": m.Verb, "before": before, "obj": after}
 	for k, val := range v.extra {
 		msg[k] = val
@@ -1255,8 +1280,11 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 		return refuse("bad_verb", "You can't do that to a rock.")
 	}
 	rule := o.w.rules.Rocks[ob.spot.class]
-	// isUseable / startMining 215-217.
-	if ob.chunks <= 0 {
+	// isUseable / startMining 215-217, checked as the swing starts (obj_mine "start"): a swing that
+	// started while the rock had chunks lands even when another player's emptied it since
+	// (onMiningComplete 293-383 never checks again; the rock just goes on to 0).
+	late := ob.chunks <= 0
+	if late && !ob.mining(miner) {
 		return refuse("empty", notReady["rock"])
 	}
 	// onMiningComplete 293-305: randInt per rock type, the top roll with max_luck.
@@ -1285,7 +1313,10 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 	ob.removeMiner(miner, false)
 	// 383: the whole take comes off, even past what is left.
 	ob.chunks -= taken + bonus
-	if ob.chunks <= 0 {
+	if late {
+		// Already empty and on its respawn clock: it stays at 0 (the take was the swing's own).
+		ob.chunks = 0
+	} else if ob.chunks <= 0 {
 		ob.chunks = 0
 		ob.mega = false
 		// onRespawn 143-170: 0/5/10/20% by type come back at 150, half as likely
@@ -1301,8 +1332,13 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 	if bonus > 0 {
 		extra["help"] = map[string]any{"bonus": bonus, "by": by}
 	}
+	v := verdict{ok: true, extra: extra, got: creditItem(rule.Type, taken+bonus)}
+	if late {
+		// The client's rules run on the rock as the swing found it.
+		v.before = map[string]any{"id": ob.spot.id, "chunks": taken + bonus, "mega": false, "in": 0}
+	}
 	// js/mining.js: the chunk is the rock's type (chunkId), the whole take and the help bonus.
-	return verdict{ok: true, extra: extra, got: creditItem(rule.Type, taken+bonus)}
+	return v
 }
 
 // chopWood is items/wood_tree.js harvest (conditions 485-497, doHarvest/endHarvest 725-790) on the
@@ -1416,7 +1452,7 @@ func (o *objects) handleDig(cl *Client, frame json.RawMessage) {
 	}
 	street := cl.Street()
 	spot := o.spotOf(street, m.ID)
-	if street == "" || spot == nil || spot.kind != "node" || spot.class != "dirt_pile" {
+	if street == "" || spot == nil || spot.kind != "node" || !crewNodes[spot.class] {
 		return
 	}
 	ob := o.get(street, spot)
@@ -1435,7 +1471,18 @@ func (o *objects) handleDig(cl *Client, frame json.RawMessage) {
 	ob.removeMiner(cl.ID(), true)
 	helping := len(ob.miners) > 0
 	ob.addMiner(cl.ID())
-	o.h.SendLocked(cl, map[string]any{"t": "obj_dig", "id": m.ID, "helping": helping})
+	if spot.class == "ice_knob" {
+		// include/scraping.js addScraper 92-101: the newcomer is helped by everyone already scraping too.
+		for _, other := range ob.miners {
+			if other != cl.ID() {
+				ob.helpers[cl.ID()][other]++
+			}
+		}
+	}
+	if spot.class == "dirt_pile" || spot.class == "ice_knob" {
+		// "Help dig" (dirt_pile.js getVerbLabel 273-281) and "Help scrape" (include/scraping.js 3-18).
+		o.h.SendLocked(cl, map[string]any{"t": "obj_dig", "id": m.ID, "helping": helping})
+	}
 	o.broadcast(street, 0, ob)
 }
 
@@ -1508,13 +1555,31 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 	if rule.Model == "tend" {
 		return o.tendPaper(street, ob, verb, perks, rule)
 	}
-	if ob.units < rule.Ready {
+	// The source checked isUseable when the verb started, never at completion: a use that started
+	// (obj_dig "start") while the node was ready lands even after another player's emptied it, and
+	// each finisher is paid. The counts clamp as the source's do (below).
+	late := ob.units < rule.Ready
+	if late && !(crewNodes[class] && ob.mining(user)) {
 		return refuse("not_ready", notReady[class])
+	}
+	var before map[string]any
+	if late {
+		before = o.state(ob)
+		before["units"] = rule.Ready
+		before["in"] = 0
+		delete(before, "diggers")
 	}
 	var dig verdict
 	if class == "dirt_pile" {
 		// The crew's bonus, read before the dig comes off (onDigComplete 293-462).
-		dig = o.digHelp(ob, user, skill)
+		dig = o.digHelp(ob, user, skill, perks["rube"])
+	}
+	var scrape verdict
+	if class == "ice_knob" {
+		// include/scraping.js getBonus 137-140: one more Ice for each other scraper (ice_knob.js 270-317).
+		scrape = o.scrapeHelp(ob, user)
+	} else if class != "dirt_pile" && ob.mining(user) {
+		ob.removeMiner(user, false)
 	}
 	if rule.After != nil {
 		// mortar_barnacle.js / ice_knob.js / jellisac.js: back to the first state.
@@ -1526,10 +1591,38 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 	// The regrow timer restarts on every use (resource-nodes.js harvestResourceNode).
 	o.schedule(street, ob, o.regrowDelay(rule), o.regrowNode)
 	if class == "dirt_pile" {
+		dig.before = before
 		return dig
 	}
+	if class == "ice_knob" {
+		scrape.before = before
+		return scrape
+	}
 	y := objNodeYield[class]
-	return verdict{ok: true, got: creditItem(y.c, y.n)}
+	return verdict{ok: true, got: creditItem(y.c, y.n), before: before}
+}
+
+// scrapeHelp is ice_knob.js onScrapingComplete 270-317 for one landed scrape: one more Ice for
+// each other player who scraped the nubbin while this scrape ran (getBonus: num_keys of the
+// scraper's helpers), "You got more ice with the help you received from ..." (the helpers named);
+// then the scraper is off the nubbin, its helpers kept for the others (removeScraper(pc, false)).
+// The credit is the scrape's least yield plus the bonus.
+func (o *objects) scrapeHelp(ob *liveObj, scraper int64) verdict {
+	n, by := 0, []string{}
+	for id := range ob.helpers[scraper] {
+		n++
+		if cl := o.h.ClientLocked(id); cl != nil {
+			by = append(by, cl.Name())
+		}
+	}
+	sort.Strings(by)
+	ob.removeMiner(scraper, false)
+	y := objNodeYield["ice_knob"]
+	v := verdict{ok: true, got: creditItem(y.c, y.n+n)}
+	if n > 0 {
+		v.extra = map[string]any{"help": map[string]any{"n": n, "items": n, "class": "ice", "by": by}}
+	}
+	return v
 }
 
 // digHelp is dirt_pile.js onDigComplete 293-462 for one landed dig: the skill package's own Loam
@@ -1540,10 +1633,14 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 // Loam when either Loam came (bonus_item_class). The digger is off the pile, its helpers kept for
 // the others (removeDigger(pc, false), 484). What the server decided is credited: the yield (the
 // skill's bonus_amount of Earth or Loam; a drop's Loam goes through the budget) and the bonus.
-func (o *objects) digHelp(ob *liveObj, digger int64, skill string) verdict {
+func (o *objects) digHelp(ob *liveObj, digger int64, skill string, rube bool) verdict {
 	pkg, ok := o.w.rules.Dig[skill]
 	if !ok {
 		pkg = o.w.rules.Dig["no_skill"]
+	}
+	if rube {
+		// Rubeweed: the package's drop chance x1.25, at most 100 (inc_skill_packages.js 538-541).
+		pkg.Drop = math.Min(100, pkg.Drop*1.25)
 	}
 	n, by := 0, []string{}
 	for id := range ob.helpers[digger] {
