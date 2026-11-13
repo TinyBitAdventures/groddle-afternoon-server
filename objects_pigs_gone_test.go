@@ -90,7 +90,11 @@ func TestACapturedStreetPiggyLeavesForEveryoneUntilTheNextGameDay(t *testing.T) 
 	if no := r.only(b, "obj_no"); no["code"] != "gone" {
 		t.Fatalf("Bo's pet on a captured Piggy answered %v", no)
 	}
-	// 383-386: one capture per player per street per 42 "game days".
+	// 383-386: one capture per player per street per 42 "game days" (Ada walks over to pig:3 first, so
+	// the answer is the limit and never the reach, wherever the planner lays the Piggies).
+	other := sharedWorld.streets[defaultStreet]["pig:3"]
+	r.send(a, map[string]any{"t": "move", "x": other.x, "y": other.y})
+	r.drain(a)
 	l.give(1, "pig_bait", 1)
 	r.now = r.now.Add(time.Second)
 	r.act(a, 5, "pig:3", "capture", herd)

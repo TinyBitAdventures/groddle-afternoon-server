@@ -107,6 +107,10 @@ func TestGuanoGrowsByTheClockOnAnEmptyStreetAndEveryoneSeesTheSamePile(t *testin
 	if no := r.only(b, "obj_no"); no["code"] != "gone" || no["message"] != guanoGone {
 		t.Fatalf("Bo's late pickup answered %v", no)
 	}
+	// Bo walks to the second Batterfly (wherever the planner lays it) for its pile.
+	second := sharedWorld.streets[street]["batterfly:1"]
+	r.send(b, map[string]any{"t": "move", "x": second.x, "y": second.y})
+	r.drain(b)
 	r.act(b, 2, "batterfly:1", "pickup", nil)
 	if ok := r.only(b, "obj_ok"); num(ok["take"]) != 3 || strings.Join(*got, ",") != "1:take:guanox3,2:take:guanox3" {
 		t.Fatalf("Bo's pickup answered %v, credited %v", ok, *got)
