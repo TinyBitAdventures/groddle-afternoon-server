@@ -156,7 +156,8 @@ func TestSummonRefusals(t *testing.T) {
 	delete(r.ign.ign, [2]int64{2, 1})
 
 	// Where the summoner stands (inc_teleportation.js 776-806).
-	for street, text := range map[string]string{"HOME_1": summonTextThem, "HOUSE_1": summonTextThem, "RACE_5": summonTextHere, "TRAIN_3": summonTextHere} {
+	// G668: someone else's house is refused (your own home is not: TestSummonIntoHomes).
+	for street, text := range map[string]string{"HOUSE_5": summonTextThem, "HOME_x": summonTextHere, "RACE_5": summonTextHere, "TRAIN_3": summonTextHere} {
 		r.at(ada, street, 0, 0)
 		drain(ada)
 		refused(2, text)
@@ -377,5 +378,142 @@ func TestSummonIntoAPartySpaceRefusalsAndDecline(t *testing.T) {
 	}
 	if texts(bm) != "" {
 		t.Fatalf("Bo heard %q", texts(bm))
+	}
+}
+
+// newSummonHomesRig is newSummonRig with the homes module (and its test secret) as well.
+func newSummonHomesRig(t *testing.T) (*summonRig, *homes) {
+	var hm *homes
+	sp := &spaceRig{partyRig: &partyRig{t: t, now: time.Unix(1_700_000_000, 0)}}
+	r := &summonRig{spaceRig: sp, ign: &fakeIgnores{ign: map[[2]int64]bool{}}}
+	savedSecret := homesSecretForTest
+	homesSecretForTest = homesTestSecret
+	saved := modules
+	modules = []moduleFactory{
+		func(h *Hub) Module { sp.m = newParties(h).(*parties); return sp.m },
+		func(h *Hub) Module { r.s = newSummons(h).(*summons); return r.s },
+		func(h *Hub) Module { hm = newHomes(h).(*homes); return hm },
+		func(h *Hub) Module { return r.ign },
+	}
+	sp.hub = NewHub(func() time.Time { return sp.now })
+	modules = saved
+	homesSecretForTest = savedSecret
+	sp.hub.afterFunc = func(d time.Duration, fn func()) func() bool {
+		tm := &rigTimer{d: d, fn: fn}
+		sp.timers = append(sp.timers, tm)
+		return func() bool { was := !tm.stopped; tm.stopped = true; return was }
+	}
+	return r, hm
+}
+
+// homePassFor is the site's visit pass (Neighbours.php) for visitor to owner's home.
+func (r *summonRig) homePassFor(cl *Client, owner int64, key bool) {
+	k := 0
+	if key {
+		k = 1
+	}
+	tok := signBuddy(homesTestSecret, map[string]any{"k": "home", "sub": cl.ID(), "o": owner, "name": "Owner", "key": k, "iat": r.now.Unix(), "exp": r.now.Add(30 * time.Minute).Unix()})
+	r.do(cl, map[string]any{"t": "home_pass", "token": tok})
+	drain(cl)
+}
+
+// summonAll runs one summons from ada to bo through to summon_go, returning it.
+func (r *summonRig) summonAll(t *testing.T, ada, bo *Client) map[string]any {
+	t.Helper()
+	r.tick()
+	r.do(ada, map[string]any{"t": "summon", "id": bo.ID()})
+	summonOne(t, drain(ada), "summon_waiting")
+	summonOne(t, drain(bo), "summon_asked")
+	r.do(bo, map[string]any{"t": "summon_answer", "from": ada.ID(), "accept": true})
+	summonOne(t, drain(ada), "summon_pay")
+	r.do(ada, map[string]any{"t": "summon_paid", "id": bo.ID(), "ok": true})
+	return summonOne(t, drain(bo), "summon_go")
+}
+
+// G668: inc_teleportation.js 799-806 in a home.
+func TestSummonIntoHomes(t *testing.T) {
+	r, hm := newSummonHomesRig(t)
+	ada, bo := r.connect(1, "Ada"), r.connect(2, "Bo")
+	r.at(bo, "GSTREET2", 0, 0)
+	drain(bo)
+
+	// The owner summons anyone into their own home street, house or Tower floor.
+	for _, street := range []string{"HOME_1", "TOWER_1_2", "HOUSE_1"} {
+		r.at(ada, street, 300, -50)
+		drain(ada)
+		g := r.summonAll(t, ada, bo)
+		if g["street"] != street || g["x"] != float64(320) {
+			t.Fatalf("%s: go %v", street, g)
+		}
+	}
+
+	// Into the house: the site's pass as for any visit, then in for that one arrival.
+	r.join(bo, "HOUSE_1")
+	if got := buddyKinds(drain(bo)); got != "error:home_private" {
+		t.Fatalf("no pass, no house: %s", got)
+	}
+	r.homePassFor(bo, 1, false)
+	r.join(bo, "HOUSE_1")
+	if f := drain(bo); f[0]["t"] != "street" {
+		t.Fatalf("summoned in: %v", f)
+	}
+	drain(ada)
+	r.join(bo, "HOME_1")
+	r.join(bo, "HOUSE_1")
+	if got := kinds(drain(bo), "error"); len(got) != 1 || got[0]["code"] != "home_locked" {
+		t.Fatalf("a second arrival is no key: %v", got)
+	}
+
+	// The arrival waits homeSummonLife at most, and only while the owner is online.
+	r.summonAll(t, ada, bo)
+	r.now = r.now.Add(homeSummonLife + time.Second)
+	r.join(bo, "HOUSE_1")
+	if got := kinds(drain(bo), "error"); len(got) != 1 || got[0]["code"] != "home_locked" {
+		t.Fatalf("a late arrival: %v", got)
+	}
+	r.homePassFor(bo, 1, false)
+	r.summonAll(t, ada, bo)
+	if hm.called[2][1].IsZero() {
+		t.Fatal("no arrival kept")
+	}
+	r.do(bo, map[string]any{"t": "leave"})
+	r.hub.Disconnect(bo)
+	if hm.called[2] != nil {
+		t.Fatal("a disconnect keeps the arrival")
+	}
+}
+
+func TestSummonFromSomeoneElsesHome(t *testing.T) {
+	r, _ := newSummonHomesRig(t)
+	ada, bo, cy := r.connect(1, "Ada"), r.connect(2, "Bo"), r.connect(5, "Cy")
+	r.at(bo, "GSTREET2", 0, 0)
+	r.at(cy, "HOME_5", 0, 0)
+	drain(bo)
+	drain(cy)
+	r.homePassFor(ada, 5, false)
+	// A visitor on someone's public home street or Tower floor (inc_pols.js 448-458).
+	for _, street := range []string{"HOME_5", "TOWER_5_0"} {
+		r.at(ada, street, 100, -10)
+		drain(ada)
+		drain(cy)
+		if g := r.summonAll(t, ada, bo); g["street"] != street {
+			t.Fatalf("%s: go %v", street, g)
+		}
+	}
+	// Not someone the owner blocks; not out of someone else's house.
+	r.ign.ign[[2]int64{5, 2}] = true
+	r.tick()
+	r.do(ada, map[string]any{"t": "summon", "id": 2})
+	if m := summonOne(t, drain(ada), "summon_refused"); m["text"] != summonTextThem {
+		t.Fatalf("blocked by the owner: %v", m)
+	}
+	delete(r.ign.ign, [2]int64{5, 2})
+	r.homePassFor(ada, 5, true)
+	r.at(ada, "HOUSE_5", 0, 0)
+	drain(ada)
+	r.tick()
+	r.do(ada, map[string]any{"t": "summon", "id": 2})
+	if m := summonOne(t, drain(ada), "summon_refused"); m["text"] != summonTextThem {
+		t.Fatalf("someone else's house: %v", m)
 	}
 }

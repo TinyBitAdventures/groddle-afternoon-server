@@ -47,9 +47,16 @@ package main
 //     here." (inc_teleportation.js:776-797). In the remake that is any street
 //     id with an underscore (RACE_, CROWNS_, MAYHEM_, TRAIN_ …) and no street
 //     at all (a quest room or a scene, which the client leaves the street for).
-//   - Into a home: only what pols_canEnter lets the target into
-//     (799-806, "You can't summon them here."). Here no home: entering one
-//     needs the site's signed pass (homes.go), which a summons does not carry.
+//   - Into a home (799-806): the owner summons anyone into their own home
+//     street, house or Tower (pols_canEnter is not asked of the owner); a
+//     visitor on someone's home street or Tower floor, which are public
+//     (inc_pols.js 448-458), summons anyone that owner does not block; from
+//     inside someone else's house it is "You can't summon them here." (ours:
+//     the source asked pols_canEnter and then left the target at the door
+//     outside, 663-665; a target's key is the site's, not known here). The
+//     target's game fetches the site's pass as for any visit (homes.go
+//     GateJoin), and a summons into the owner's house lets the target in for
+//     that one arrival (homes.go homes.summoned), never as a key.
 //   - Into a Party Space (682-687, main.js:3899-3913): the target is asked
 //     "<name> would like to invite you to their party in <space>. Do you
 //     accept?", and Yes joins the summoner's party and enters the space
@@ -212,9 +219,30 @@ func (m *summons) place(from, to *Client) (why, text, party string) {
 		}
 		return "here", summonTextHere, ""
 	case strings.HasPrefix(street, homeStreetPrefix), strings.HasPrefix(street, houseStreetPrefix), strings.HasPrefix(street, towerStreetPrefix):
-		return "them", summonTextThem, ""
+		return m.homePlace(from, to, street)
 	case strings.Contains(street, "_"):
 		return "here", summonTextHere, ""
+	}
+	return "", "", ""
+}
+
+// homePlace is can_summon 799-806 in a home: the owner's own (street, house, Tower floor), or
+// someone's public home street or Tower floor the owner does not block the target from.
+func (m *summons) homePlace(from, to *Client, street string) (why, text, party string) {
+	owner, house := homeOwner(street)
+	if t := towerOwner(street); t > 0 {
+		owner, house = t, false
+	}
+	switch {
+	case owner == 0:
+		return "here", summonTextHere, ""
+	case owner == from.ID():
+		return "", "", ""
+	case house:
+		return "them", summonTextThem, ""
+	}
+	if ign, ok := m.h.ProvidedLocked("buddies.ignoring").(func(int64, int64) bool); ok && ign(owner, to.ID()) {
+		return "them", summonTextThem, ""
 	}
 	return "", "", ""
 }
@@ -415,6 +443,12 @@ func (m *summons) paid(cl *Client, frame json.RawMessage) {
 		log.Printf("summon: %d summoned %d into Party Space %s", q.from, q.to, street)
 		m.h.SendLocked(to, map[string]any{"t": "summon_go", "from": from, "street": street, "party": true})
 		return
+	}
+	// Into the owner's own house: in for this one arrival (homes.go), as the source's teleport was.
+	if owner, house := homeOwner(street); house && owner == q.from {
+		if let, ok := m.h.ProvidedLocked("homes.summoned").(func(visitor, owner int64)); ok {
+			let(q.to, owner)
+		}
 	}
 	x, y := cl.Pos()
 	log.Printf("summon: %d summoned %d to %s", q.from, q.to, street)

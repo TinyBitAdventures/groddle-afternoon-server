@@ -72,6 +72,7 @@ const (
 	towerFloorsMax    = 9                // config_base.js towers MAX_FLOORS (the floor under construction is index 8 at most)
 	homeKnockWait     = 20 * time.Second // inc_houses.js:146 the knock prompt's timeout 20
 	homePassLife      = time.Hour        // ours: the longest a pass is honoured, whatever it says
+	homeSummonLife    = 2 * time.Minute  // ours: how long a summons into the owner's house waits for its arrival
 	homeTellLife      = 2 * time.Minute  // the longest a key proof is honoured
 	homePassBurst     = 12
 	homePassEvery     = 2 * time.Second
@@ -108,6 +109,7 @@ type homes struct {
 	passes map[int64]map[int64]*homePass   // visitor -> owner -> pass
 	authed map[int64]map[int64]bool        // owner -> visitors let in (house_auth), while the owner is online
 	asked  map[int64]map[int64]func() bool // owner -> visitors knocking now (house_auth_req) -> stop the wait
+	called map[int64]map[int64]time.Time   // visitor -> owner -> until: summoned into the owner's house, one arrival (G668)
 	spent  *proofJournal                   // proofs used until they expire (proofs.go: kept across a restart)
 	rates  map[string]*bucket
 }
@@ -123,7 +125,7 @@ func newHomes(h *Hub) Module {
 		secret, _ = readSecret(path)
 	}
 	return &homes{h: h, secret: secret, passes: map[int64]map[int64]*homePass{}, authed: map[int64]map[int64]bool{},
-		asked: map[int64]map[int64]func() bool{}, spent: sharedProofs(), rates: map[string]*bucket{}}
+		asked: map[int64]map[int64]func() bool{}, called: map[int64]map[int64]time.Time{}, spent: sharedProofs(), rates: map[string]*bucket{}}
 }
 
 func (m *homes) Register(r *Registry) {
@@ -132,6 +134,13 @@ func (m *homes) Register(r *Registry) {
 	r.Handle("home_answer", m.answer)
 	r.Handle("home_key_tell", m.keyTell)
 	r.GateJoin(m.gate)
+	// G668, summon.go: the owner summoned visitor into their house; the next join of it lets them in.
+	r.Provide("homes.summoned", func(visitor, owner int64) {
+		if m.called[visitor] == nil {
+			m.called[visitor] = map[int64]time.Time{}
+		}
+		m.called[visitor][owner] = m.h.Now().Add(homeSummonLife)
+	})
 	r.OnJoin(m.joined)
 	r.OnDisconnect(m.disconnected)
 }
@@ -299,6 +308,16 @@ func (m *homes) gate(cl *Client, street string) (bool, string, string) {
 	if !house || p.key || (m.authed[owner][cl.ID()] && m.h.ClientLocked(owner) != nil) {
 		return true, "", ""
 	}
+	// G668: summoned in by the owner (online): this one arrival, never a key.
+	if until, ok := m.called[cl.ID()][owner]; ok {
+		delete(m.called[cl.ID()], owner)
+		if len(m.called[cl.ID()]) == 0 {
+			delete(m.called, cl.ID())
+		}
+		if !until.Before(m.h.Now()) && m.h.ClientLocked(owner) != nil {
+			return true, "", ""
+		}
+	}
 	return false, "home_locked", homeTextLocked
 }
 
@@ -317,6 +336,7 @@ func (m *homes) joined(cl *Client) {
 func (m *homes) disconnected(cl *Client) {
 	id := cl.ID()
 	delete(m.passes, id)
+	delete(m.called, id)
 	for _, stop := range m.asked[id] {
 		stop()
 	}
