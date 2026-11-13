@@ -26,11 +26,13 @@ package main
 //
 //	{"t":"summon_waiting","id":8,"name":"Bo","timeout":30}                       to the summoner: "Waiting for Bo to confirm."
 //	{"t":"summon_asked","from":{"id":7,"name":"Ada"},"street":"GA5…","party":"Toxic Moon","timeout":30}   to the target ("party" only into a Party Space)
+//	  … "street":"HOUSE_5","door":{"owner":5,"name":"Cy"}                       from inside someone else's house: the target goes to its front door
 //	{"t":"summon_gone","from":7}                                                 to the target: that summons is over (offline, answered elsewhere)
 //	{"t":"summon_refused","id":8,"name":"Bo","why":"…","text":"…"}               to the summoner
-//	{"t":"summon_pay","id":8,"name":"Bo"}                                        to the summoner: Bo said yes, pay now (teleportation_summon)
+//	{"t":"summon_pay","id":8,"name":"Bo"}                                        to the summoner: Bo said yes, pay now (teleportation_summon; "door" as asked)
 //	{"t":"summon_declined","id":8,"name":"Bo","text":"Bo did not accept your summons."}
 //	{"t":"summon_go","from":{"id":7,"name":"Ada"},"street":"GA5…","x":120,"y":-80,"party":false}   to the target: go there
+//	{"t":"summon_go","from":{…},"street":"HOME_5","door":{"owner":5,"name":"Cy"},"party":false}  to the target: the front door of Cy's house
 //	{"t":"summon_failed","text":"Oops. Something happened with that teleport."}  to the target, after a Yes that could not go through
 //
 // Rules kept from the source:
@@ -50,13 +52,23 @@ package main
 //   - Into a home (799-806): the owner summons anyone into their own home
 //     street, house or Tower (pols_canEnter is not asked of the owner); a
 //     visitor on someone's home street or Tower floor, which are public
-//     (inc_pols.js 448-458), summons anyone that owner does not block; from
-//     inside someone else's house it is "You can't summon them here." (ours:
-//     the source asked pols_canEnter and then left the target at the door
-//     outside, 663-665; a target's key is the site's, not known here). The
-//     target's game fetches the site's pass as for any visit (homes.go
-//     GateJoin), and a summons into the owner's house lets the target in for
-//     that one arrival (homes.go homes.summoned), never as a key.
+//     (inc_pols.js 448-458), summons anyone that owner does not block. From
+//     inside someone else's house the target goes to that house's front door
+//     on its home street, as the source's teleportation_summon 663-665 did
+//     (a summoner who owns neither the house nor is summoning its owner, the
+//     house not public: pols_get_entrance_outside, inc_pols.js 948-962, the
+//     house's door_out link, the spot a player stands on after walking out
+//     of the front door), and the target knocks or uses a key as any visitor
+//     does. Ours: the source first asked pols_canEnter of the target
+//     (799-806) and refused a target without a key; here no key is asked
+//     (the site keeps keys), so nobody is let in by a summons into someone
+//     else's house; the owner summoned into their own house goes in (663,
+//     !pols_is_owner(pc)). The house's door spot is the owner's home as the
+//     site reads it (the target's game builds the street from it), never the
+//     summoner's word. The target's game fetches the site's pass as for any
+//     visit (homes.go GateJoin), and a summons into the owner's house lets
+//     the target in for that one arrival (homes.go homes.summoned), never as
+//     a key.
 //   - Into a Party Space (682-687, main.js:3899-3913): the target is asked
 //     "<name> would like to invite you to their party in <space>. Do you
 //     accept?", and Yes joins the summoner's party and enters the space
@@ -79,6 +91,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -227,7 +240,8 @@ func (m *summons) place(from, to *Client) (why, text, party string) {
 }
 
 // homePlace is can_summon 799-806 in a home: the owner's own (street, house, Tower floor), or
-// someone's public home street or Tower floor the owner does not block the target from.
+// someone's public home street or Tower floor, or the door of their house, the owner does not
+// block the target from.
 func (m *summons) homePlace(from, to *Client, street string) (why, text, party string) {
 	owner, house := homeOwner(street)
 	if t := towerOwner(street); t > 0 {
@@ -236,15 +250,35 @@ func (m *summons) homePlace(from, to *Client, street string) (why, text, party s
 	switch {
 	case owner == 0:
 		return "here", summonTextHere, ""
-	case owner == from.ID():
+	case owner == from.ID(), house && owner == to.ID():
+		// The owner's own home; or the house's owner summoned into it (663: pols_is_owner(pc)).
 		return "", "", ""
-	case house:
-		return "them", summonTextThem, ""
 	}
+	// Someone's home street, Tower floor or house (its front door, doorOf): not a target the owner blocks.
 	if ign, ok := m.h.ProvidedLocked("buddies.ignoring").(func(int64, int64) bool); ok && ign(owner, to.ID()) {
 		return "them", summonTextThem, ""
 	}
 	return "", "", ""
+}
+
+// doorOf is teleportation_summon 663-665: from inside someone else's house (not the target's
+// own) the target goes to its front door on the owner's home street; the owner, or 0.
+func doorOf(from, to *Client) int64 {
+	owner, house := homeOwner(from.Street())
+	if !house || owner == from.ID() || owner == to.ID() {
+		return 0
+	}
+	return owner
+}
+
+// door is what the two players are told of that door: whose house it is (the name the site
+// signed in the summoner's pass, or the owner's own online; "" when neither is known).
+func (m *summons) door(from *Client, owner int64) map[string]any {
+	name := ""
+	if fn, ok := m.h.ProvidedLocked("homes.ownerName").(func(visitor, owner int64) string); ok {
+		name = fn(from.ID(), owner)
+	}
+	return map[string]any{"owner": owner, "name": name}
 }
 
 // target is the target's side the server can see: online, unblocked, on a street.
@@ -327,6 +361,9 @@ func (m *summons) ask(cl *Client, frame json.RawMessage) {
 	if party != "" {
 		asked["party"] = party
 	}
+	if owner := doorOf(cl, to); owner > 0 {
+		asked["door"] = m.door(cl, owner)
+	}
 	m.h.SendLocked(to, asked)
 }
 
@@ -387,7 +424,11 @@ func (m *summons) answer(cl *Client, frame json.RawMessage) {
 		m.end(q)
 		m.send(q.to, map[string]any{"t": "summon_failed", "text": summonTextOops})
 	})
-	m.h.SendLocked(from, map[string]any{"t": "summon_pay", "id": q.to, "name": q.toName})
+	pay := map[string]any{"t": "summon_pay", "id": q.to, "name": q.toName}
+	if owner := doorOf(from, cl); owner > 0 {
+		pay["door"] = m.door(from, owner)
+	}
+	m.h.SendLocked(from, pay)
 }
 
 // fail is a Yes that cannot go through: the summoner hears why, the target "Oops" (614).
@@ -442,6 +483,14 @@ func (m *summons) paid(cl *Client, frame json.RawMessage) {
 		}
 		log.Printf("summon: %d summoned %d into Party Space %s", q.from, q.to, street)
 		m.h.SendLocked(to, map[string]any{"t": "summon_go", "from": from, "street": street, "party": true})
+		return
+	}
+	// 663-665: from inside someone else's house, its front door outside; no x: the door's spot is
+	// the owner's home street as the site reads it, which the target's game builds.
+	if owner := doorOf(cl, to); owner > 0 {
+		home := homeStreetPrefix + strconv.FormatInt(owner, 10)
+		log.Printf("summon: %d summoned %d to the door of house %d", q.from, q.to, owner)
+		m.h.SendLocked(to, map[string]any{"t": "summon_go", "from": from, "street": home, "door": m.door(cl, owner), "party": false})
 		return
 	}
 	// Into the owner's own house: in for this one arrival (homes.go), as the source's teleport was.

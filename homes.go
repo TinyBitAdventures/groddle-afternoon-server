@@ -141,6 +141,16 @@ func (m *homes) Register(r *Registry) {
 		}
 		m.called[visitor][owner] = m.h.Now().Add(homeSummonLife)
 	})
+	// summon.go door: whose house the summoner stands in, by the site's word (their pass) or the owner's socket.
+	r.Provide("homes.ownerName", func(visitor, owner int64) string {
+		if cl := m.h.ClientLocked(owner); cl != nil {
+			return cl.Name()
+		}
+		if p := m.pass(visitor, owner); p != nil {
+			return p.name
+		}
+		return ""
+	})
 	r.OnJoin(m.joined)
 	r.OnDisconnect(m.disconnected)
 }

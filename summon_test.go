@@ -156,8 +156,8 @@ func TestSummonRefusals(t *testing.T) {
 	delete(r.ign.ign, [2]int64{2, 1})
 
 	// Where the summoner stands (inc_teleportation.js 776-806).
-	// G668: someone else's house is refused (your own home is not: TestSummonIntoHomes).
-	for street, text := range map[string]string{"HOUSE_5": summonTextThem, "HOME_x": summonTextHere, "RACE_5": summonTextHere, "TRAIN_3": summonTextHere} {
+	// Someone else's house sends the target to its door (TestSummonFromSomeoneElsesHouseToItsDoor).
+	for street, text := range map[string]string{"HOUSE_x": summonTextHere, "HOME_x": summonTextHere, "RACE_5": summonTextHere, "TRAIN_3": summonTextHere} {
 		r.at(ada, street, 0, 0)
 		drain(ada)
 		refused(2, text)
@@ -500,20 +500,92 @@ func TestSummonFromSomeoneElsesHome(t *testing.T) {
 			t.Fatalf("%s: go %v", street, g)
 		}
 	}
-	// Not someone the owner blocks; not out of someone else's house.
-	r.ign.ign[[2]int64{5, 2}] = true
-	r.tick()
-	r.do(ada, map[string]any{"t": "summon", "id": 2})
-	if m := summonOne(t, drain(ada), "summon_refused"); m["text"] != summonTextThem {
-		t.Fatalf("blocked by the owner: %v", m)
-	}
-	delete(r.ign.ign, [2]int64{5, 2})
+	// Not someone the owner blocks, here or from inside their house.
 	r.homePassFor(ada, 5, true)
-	r.at(ada, "HOUSE_5", 0, 0)
+	for _, street := range []string{"HOME_5", "HOUSE_5"} {
+		r.at(ada, street, 0, 0)
+		drain(ada)
+		r.ign.ign[[2]int64{5, 2}] = true
+		r.tick()
+		r.do(ada, map[string]any{"t": "summon", "id": 2})
+		if m := summonOne(t, drain(ada), "summon_refused"); m["text"] != summonTextThem {
+			t.Fatalf("%s, blocked by the owner: %v", street, m)
+		}
+		delete(r.ign.ign, [2]int64{5, 2})
+	}
+}
+
+// Austin 2026-11-13, inc_teleportation.js 663-665: from inside someone else's house the target
+// goes to its front door on the owner's home street, never inside, and with or without a key.
+func TestSummonFromSomeoneElsesHouseToItsDoor(t *testing.T) {
+	r, hm := newSummonHomesRig(t)
+	ada, bo, cy := r.connect(1, "Ada"), r.connect(2, "Bo"), r.connect(5, "Cy")
+	r.at(bo, "GSTREET2", 0, 0)
+	r.at(cy, "HOUSE_5", 0, 0)
+	drain(bo)
+	drain(cy)
+	r.homePassFor(ada, 5, true)
+	r.at(ada, "HOUSE_5", 300, -40)
 	drain(ada)
+	drain(cy)
+
 	r.tick()
 	r.do(ada, map[string]any{"t": "summon", "id": 2})
-	if m := summonOne(t, drain(ada), "summon_refused"); m["text"] != summonTextThem {
-		t.Fatalf("someone else's house: %v", m)
+	summonOne(t, drain(ada), "summon_waiting")
+	asked := summonOne(t, drain(bo), "summon_asked")
+	door, _ := asked["door"].(map[string]any)
+	if asked["street"] != "HOUSE_5" || door["owner"] != float64(5) || door["name"] != "Cy" {
+		t.Fatalf("asked %v", asked)
+	}
+	r.do(bo, map[string]any{"t": "summon_answer", "from": 1, "accept": true})
+	if p := summonOne(t, drain(ada), "summon_pay"); p["door"].(map[string]any)["name"] != "Cy" {
+		t.Fatalf("pay %v", p)
+	}
+	r.do(ada, map[string]any{"t": "summon_paid", "id": 2, "ok": true})
+	g := summonOne(t, drain(bo), "summon_go")
+	if g["street"] != "HOME_5" || g["door"].(map[string]any)["owner"] != float64(5) || g["x"] != nil || g["party"] != false {
+		t.Fatalf("go %v", g)
+	}
+	if hm.called[2] != nil {
+		t.Fatal("a summons to the door let them in")
+	}
+	// At the door, as any visitor: the street with the site's pass; the house still wants a key or a knock.
+	r.join(bo, "HOME_5")
+	if got := buddyKinds(drain(bo)); got != "error:home_private" {
+		t.Fatalf("no pass, no home street: %s", got)
+	}
+	r.homePassFor(bo, 5, false)
+	r.join(bo, "HOME_5")
+	if f := drain(bo); f[0]["t"] != "street" {
+		t.Fatalf("at the door: %v", f)
+	}
+	r.join(bo, "HOUSE_5")
+	if got := kinds(drain(bo), "error"); len(got) != 1 || got[0]["code"] != "home_locked" {
+		t.Fatalf("no key, no way in: %v", got)
+	}
+	r.at(bo, "GSTREET2", 0, 0)
+	drain(bo)
+	drain(cy)
+
+	// The owner summoned into their own house goes in (663: pols_is_owner(pc)), beside the summoner.
+	r.at(cy, "GSTREET2", 0, 0)
+	drain(cy)
+	drain(ada)
+	if g := r.summonAll(t, ada, cy); g["street"] != "HOUSE_5" || g["x"] != float64(320) || g["door"] != nil {
+		t.Fatalf("the owner: %v", g)
+	}
+
+	// The owner offline: the name the site signed in the summoner's pass ("Owner" in homePassFor).
+	r.hub.Disconnect(cy)
+	drain(ada)
+	if g := r.summonAll(t, ada, bo); g["street"] != "HOME_5" || g["door"].(map[string]any)["name"] != "Owner" {
+		t.Fatalf("owner offline: %v", g)
+	}
+
+	// The summoner's own house is still inside (TestSummonIntoHomes), with no door.
+	r.at(ada, "HOUSE_1", 10, 0)
+	drain(ada)
+	if g := r.summonAll(t, ada, bo); g["street"] != "HOUSE_1" || g["door"] != nil {
+		t.Fatalf("own house: %v", g)
 	}
 }
