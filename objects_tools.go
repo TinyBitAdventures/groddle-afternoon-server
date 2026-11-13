@@ -84,7 +84,7 @@ func toolFor(spot *objSpot, verb string) *toolNeed {
 		return &toolPick
 	case spot.kind == "wood" && verb == "harvest":
 		return &toolHatchet
-	case spot.kind == "tree" && verb == "water":
+	case (spot.kind == "tree" || spot.kind == "wood") && verb == "water":
 		return &toolCan
 	case spot.kind != "node":
 		return nil

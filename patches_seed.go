@@ -201,7 +201,8 @@ func (g *patches) plantSeed(s patchSeed, now int64) string {
 		t.day = g.today()
 		if t.wood() {
 			t.maturity = int(clamp(int64(s.Maturity), 1, 6))
-			t.count, t.woodPetted, t.woodWatered = max(s.Count, 0), max(s.WoodPetted, 0), max(s.WoodWatered, 0)
+			t.count = max(s.Count, 0)
+			t.woodCare.pets, t.woodCare.waters = max(s.WoodPetted, 0), max(s.WoodWatered, 0)
 		} else {
 			t.maturity, t.health = int(clamp(int64(s.Maturity), 1, 10)), int(clamp(int64(s.Health), 1, 10))
 			t.cap = g.ow.capAt(t.class, t.maturity, t.health)

@@ -550,7 +550,8 @@ func TestPatchTreeCareOnceADayHarvestPerPlayer(t *testing.T) {
 	b := r.at(2, "Bo", oldMainStreet, "patch:0")
 	tr := r.tree(a, "patch:0", "bean_spice")
 	r.pact(a, 1, "patch:0", "harvest", nil)
-	if no := r.no(a, "small"); no["message"] != "This tree is too small to harvest." {
+	// No maturity gate (trant_fruit.js harvest conditions 496-503): a young tree has no fruit.
+	if no := r.no(a, "empty"); no["message"] != treeNoFruit {
 		t.Fatal(no)
 	}
 	tr.maturity, tr.health = 5, 7
@@ -744,7 +745,7 @@ func TestPatchWoodTreeCareHarvestAndBackToAPatch(t *testing.T) {
 		next := gameEpochMs + (r.g.today()+1)*gameDayMs
 		r.advance(time.Duration(next-r.now.UnixMilli()+100) * time.Millisecond)
 	}
-	if tr.maturity != 2 || tr.woodPetted != 0 {
+	if tr.maturity != 2 || tr.woodCare.pets != 0 {
 		t.Fatalf("after two days of care: %+v", tr)
 	}
 	r.pact(a, 20, "patch:0", "harvest", nil)

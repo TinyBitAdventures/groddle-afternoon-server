@@ -169,7 +169,7 @@ func (g *patches) dust(street, key string, skip []string) []string {
 		t := p.tree
 		grew := false
 		if t.wood() {
-			grew = woodDust(&t.treeCore)
+			grew = woodDust(&t.treeCore, &t.woodCare, &t.count)
 		} else {
 			grew = g.ow.treeDust(&t.treeCore, t.class)
 			if g.rooked(street, p) {

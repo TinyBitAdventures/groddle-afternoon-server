@@ -63,7 +63,10 @@ package main
 // snapshot says "creatures":true when this server shares the street animals, "animals" names them
 // and "spots" gives each Batterfly's, Heli Kitty's and Crab's place ({"batterfly:0":[x,y]}).
 //
-// A Wood Tree is tree:<i> too: {"id":"tree:3","maturity":5,"count":1}.
+// A Wood Tree is tree:<i> too: {"id":"tree:3","maturity":5,"count":1}, with its care once tended
+// ("pets","waters","petted","watered": trees.go woodTend, everyone's pet and water every 5 minutes
+// each, verbs pet and water; obj_ok "matured","maturity" when it grew). Chopped to maturity 0 it dies
+// for everyone 2 s on, a Patch (wood_tree.js onDie).
 //
 // Tree death (G334): a street tree is everyone's, so its poison and its death are the server's.
 // A pour of Tree Poison (trant_base / wood_tree apply_poison, the potion's onPourComplete) starts
@@ -262,7 +265,11 @@ type objRules struct {
 	Nodes   map[string]nodeRule           `json:"nodes"`
 	Harvest map[string]int                `json:"harvest"`
 	Care    map[string]map[string]float64 `json:"care"`
-	Trants  map[string][][]int            `json:"trants"`
+	// WoodCare is a Wood Tree's pet and water success rates (percent) by Light Green Thumb rank
+	// (js/trant-care.js wood_pet / wood_water), WoodMap its maturityMap (wood_tree.js 889-896).
+	WoodCare map[string]map[string]float64 `json:"woodCare"`
+	WoodMap  []int                         `json:"woodMap"`
+	Trants   map[string][][]int            `json:"trants"`
 	// Prod is each trant's fruitProdMap (include/trants.js onFruitCycle 1043-1054): what one
 	// health rise pushes back on, by maturity and health.
 	Prod map[string][][]int `json:"prod"`
@@ -527,6 +534,8 @@ type liveObj struct {
 	resetAt   time.Time      // Paper Tree: tending flags clear
 	woodCount int            // wood: harvest_count (wood_tree.js 732-782)
 	woodBy    map[int64]bool // wood: who harvested it this game day (the source's intervals[today][pc])
+	woodCare  woodCare       // wood: its care counts, when its marks clear, each player's 5-minute clocks (trees.go)
+	woodDie   func() bool    // wood: chopped to maturity 0, onDie two seconds on (wood_tree.js 788)
 
 	// tree, wood: Tree Poison's die timer and who poured it; dead once it ran out (or the Rook
 	// struck a tree at health 1), with deadBy the poisoner (0: the Rook).
@@ -801,7 +810,7 @@ func (o *objects) isFresh(ob *liveObj) bool {
 	case "tree":
 		return ob.fruit == ob.cap && ob.maturity == s.maturity && ob.health == s.health && !ob.petted && !ob.watered && !ob.dead && ob.poisonEnd.IsZero()
 	case "wood":
-		return ob.maturity == s.maturity && ob.woodCount == 0 && len(ob.woodBy) == 0 && !ob.dead && ob.poisonEnd.IsZero()
+		return ob.maturity == s.maturity && ob.woodCount == 0 && len(ob.woodBy) == 0 && woodCareFresh(&ob.treeCore, &ob.woodCare) && !ob.dead && ob.poisonEnd.IsZero()
 	}
 	if isCreature(s.kind) {
 		return o.creatureFresh(ob)
@@ -848,6 +857,10 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 	if spot.kind == "wood" && ob.day < o.today() {
 		// A new game day: everyone may harvest it again (canHarvest by intervals[today]).
 		ob.day, ob.woodBy = o.today(), nil
+	}
+	if spot.kind == "wood" {
+		// Its care marks clear 10 minutes after both were set (onNeedsReset), on no day.
+		woodCareExpire(&ob.treeCore, &ob.woodCare, o.h.Now().UnixMilli())
 	}
 	return ob
 }
@@ -907,7 +920,12 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		}
 		return m
 	case "wood":
-		return o.deathState(ob, map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount})
+		m := map[string]any{"id": s.id, "maturity": ob.maturity, "count": ob.woodCount}
+		if c := ob.woodCare; c.pets > 0 || c.waters > 0 || ob.petted || ob.watered {
+			// Its care toward the next maturity (js/street-objects.js applyWoodState).
+			m["pets"], m["waters"], m["petted"], m["watered"] = c.pets, c.waters, ob.petted, ob.watered
+		}
+		return o.deathState(ob, m)
 	case "chicken", "butterfly", "batterfly", "kitty", "crab", "dragon":
 		return o.creatureState(ob)
 	default:
@@ -1207,8 +1225,10 @@ func (o *objects) actOn(cl *Client, m objAct, street string, spot *objSpot, perk
 		v = o.pour(street, ob, m.Verb, cl.ID(), m.Ms)
 	case o.rooked(street, spot.id):
 		v = refuse("rooked", "It's rooked. Revive it first.")
+	case spot.kind == "wood" && (m.Verb == "pet" || m.Verb == "water"):
+		v = o.tendWood(ob, m.Verb, m.Skill, cl.ID())
 	case spot.kind == "wood":
-		v = o.chopWood(ob, m.Verb, cl.ID())
+		v = o.chopWood(street, ob, m.Verb, cl.ID())
 	default:
 		v = o.tendTree(ob, m.Verb, m.Skill)
 	}
@@ -1343,14 +1363,48 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 
 // chopWood is items/wood_tree.js harvest (conditions 485-497, doHarvest/endHarvest 725-790) on the
 // shared tree: once a game day for each player; every second harvest (any player's) takes one
-// maturity, and a wee tree (maturity 2 or less) loses one each time; at 0 it is cleared for
-// everyone (onDie: the remake keeps a patch). The planks, energy and Hatchet wear are the
+// maturity, and a wee tree (maturity 2 or less) loses one each time. At 0 it dies for everyone two
+// seconds on (endHarvest 779-781, onDie 858-868: replaceWith('patch'), no Planks), so everyone
+// gets the Patch (killTree, patches.go adopt). The planks, energy and Hatchet wear are the
 // harvester's own (js/woodcutting.js harvestWoodTree, from "before").
-func (o *objects) chopWood(ob *liveObj, verb string, harvester int64) verdict {
+func (o *objects) chopWood(street string, ob *liveObj, verb string, harvester int64) verdict {
 	if verb != "harvest" {
 		return refuse("bad_verb", "You can't do that to a Wood Tree here.")
 	}
-	return woodChop(&ob.treeCore, &ob.woodCount, &ob.woodBy, harvester)
+	v := woodChop(&ob.treeCore, &ob.woodCare, &ob.woodCount, &ob.woodBy, harvester)
+	if v.ok && ob.maturity <= 0 {
+		o.armWoodDie(street, ob, woodDieDelay)
+	}
+	return v
+}
+
+// woodDieDelay is wood_tree.js endHarvest 788: apiSetTimerX('onDie', 2000).
+const woodDieDelay = 2 * time.Second
+
+// armWoodDie fells a Wood Tree chopped to maturity 0, d from now (also after a restart: resume).
+func (o *objects) armWoodDie(street string, ob *liveObj, d time.Duration) {
+	if ob.woodDie != nil {
+		ob.woodDie()
+	}
+	ob.woodDie = o.h.After(d, func() {
+		ob.woodDie = nil
+		if o.streets[street][ob.spot.id] != ob || ob.dead || ob.maturity > 0 {
+			return
+		}
+		o.killTree(street, ob, 0)
+	})
+}
+
+// tendWood is a pet or water on a street Wood Tree (trees.go woodTend): everyone's care counts toward
+// its next maturity, each player on their own 5-minute clocks. The energy, mood, iMG, can wear and
+// drops are the tender's own (js/trant-care.js performTrantCare, with the server's roll).
+func (o *objects) tendWood(ob *liveObj, verb, skill string, who int64) verdict {
+	rates := o.w.rules.WoodCare[verb]
+	rate, ok := rates[skill]
+	if !ok {
+		rate = rates["no_skill"]
+	}
+	return woodTend(&ob.treeCore, &ob.woodCare, &ob.woodCount, verb, who, o.h.Now().UnixMilli(), rate, o.roll(), o.w.rules.WoodMap)
 }
 
 // helpMineBonus is mining.js 335-337: min(i+1, 4) for each of up to 9 helps.
@@ -2041,7 +2095,7 @@ func (o *objects) fertilize(street string, ob *liveObj) bool {
 		return false
 	}
 	if ob.spot.kind == "wood" {
-		return woodDust(&ob.treeCore)
+		return woodDust(&ob.treeCore, &ob.woodCare, &ob.woodCount)
 	}
 	changed := o.w.treeDust(&ob.treeCore, ob.spot.class)
 	if o.rooked(street, ob.spot.id) {

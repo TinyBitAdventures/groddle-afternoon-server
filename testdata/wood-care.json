@@ -1,0 +1,549 @@
+[
+ {
+  "name": "one player: a pet and a water every 5 minutes each (canPet / canWater 614-640)",
+  "maturity": 1,
+  "steps": [
+   {
+    "at": 0,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "not_wanted"
+   },
+   {
+    "at": 2000,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 299999,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "not_wanted"
+   },
+   {
+    "at": 300000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "not_wanted"
+   },
+   {
+    "at": 302000,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   }
+  ],
+  "end": {
+   "maturity": 2,
+   "pets": 0,
+   "waters": 0,
+   "petted": true,
+   "watered": true
+  }
+ },
+ {
+  "name": "two players' care counts together, each on their own clocks",
+  "maturity": 2,
+  "steps": [
+   {
+    "at": 0,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 10,
+    "who": 2,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 20,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 30,
+    "who": 2,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 40,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "not_wanted"
+   },
+   {
+    "at": 300000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300020,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   }
+  ],
+  "end": {
+   "maturity": 3,
+   "pets": 0,
+   "waters": 0,
+   "petted": true,
+   "watered": true
+  }
+ },
+ {
+  "name": "a failed roll counts nothing and starts no clock (no skill: pet 80%, water 90%)",
+  "maturity": 1,
+  "steps": [
+   {
+    "at": 0,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0.85,
+    "expect": "failed"
+   },
+   {
+    "at": 1,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 2,
+    "who": 1,
+    "verb": "water",
+    "roll": 0.95,
+    "expect": "failed"
+   },
+   {
+    "at": 3,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   }
+  ],
+  "end": {
+   "maturity": 1,
+   "pets": 1,
+   "waters": 1,
+   "petted": true,
+   "watered": true
+  }
+ },
+ {
+  "name": "the marks clear 10 minutes after the last tending that found both (onNeedsReset 904-909, timer reset), and growth waits for both",
+  "maturity": 1,
+  "steps": [
+   {
+    "at": 0,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1000000,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1000001,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "grew"
+   }
+  ],
+  "end": {
+   "maturity": 2,
+   "pets": 0,
+   "waters": 0,
+   "petted": true,
+   "watered": true
+  }
+ },
+ {
+  "name": "a mighty tree takes care and never grows past 6",
+  "maturity": 6,
+  "steps": [
+   {
+    "at": 0,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   }
+  ],
+  "end": {
+   "maturity": 6,
+   "pets": 2,
+   "waters": 2,
+   "petted": true,
+   "watered": true
+  }
+ },
+ {
+  "name": "one player grows a maturity-1 tree to 6 in 20 rounds, 95 minutes (maturityMap 2,3,4,5,6)",
+  "maturity": 1,
+  "steps": [
+   {
+    "at": 0,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 300001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   },
+   {
+    "at": 600000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 600001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 900000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 900001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1200000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1200001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   },
+   {
+    "at": 1500000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1500001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1800000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 1800001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 2100000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 2100001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 2400000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 2400001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   },
+   {
+    "at": 2700000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 2700001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3000000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3000001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3300000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3300001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3600000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3600001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3900000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 3900001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   },
+   {
+    "at": 4200000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 4200001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 4500000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 4500001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 4800000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 4800001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 5100000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 5100001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 5400000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 5400001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 5700000,
+    "who": 1,
+    "verb": "pet",
+    "roll": 0,
+    "expect": "ok"
+   },
+   {
+    "at": 5700001,
+    "who": 1,
+    "verb": "water",
+    "roll": 0,
+    "expect": "grew"
+   }
+  ],
+  "end": {
+   "maturity": 6,
+   "pets": 0,
+   "waters": 0,
+   "petted": true,
+   "watered": true
+  }
+ }
+]

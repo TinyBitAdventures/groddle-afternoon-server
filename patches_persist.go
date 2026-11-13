@@ -38,26 +38,30 @@ type patchSeedRec struct {
 }
 
 type patchTreeRec struct {
-	Class       string         `json:"class"`
-	Maturity    int            `json:"maturity"`
-	Health      int            `json:"health,omitempty"`
-	Fruit       int            `json:"fruit,omitempty"`
-	Cap         int            `json:"cap,omitempty"`
-	Petted      bool           `json:"petted,omitempty"`
-	Watered     bool           `json:"watered,omitempty"`
-	Day         int64          `json:"day"`
-	GrownAt     int64          `json:"grownAt"`
-	CycleAt     int64          `json:"cycleAt,omitempty"`
-	Count       int            `json:"count,omitempty"`
-	WoodPetted  int            `json:"woodPetted,omitempty"`
-	WoodWatered int            `json:"woodWatered,omitempty"`
-	ClearedAt   int64          `json:"clearedAt,omitempty"`
-	WoodBy      []int64        `json:"woodBy,omitempty"`
-	Harvests    map[string]int `json:"harvests,omitempty"`
-	HDay        int64          `json:"hday,omitempty"`
-	PoisonEnd   int64          `json:"poisonEnd,omitempty"`
-	PoisonBy    int64          `json:"poisonBy,omitempty"`
-	RookNext    int64          `json:"rookNext,omitempty"`
+	Class       string `json:"class"`
+	Maturity    int    `json:"maturity"`
+	Health      int    `json:"health,omitempty"`
+	Fruit       int    `json:"fruit,omitempty"`
+	Cap         int    `json:"cap,omitempty"`
+	Petted      bool   `json:"petted,omitempty"`
+	Watered     bool   `json:"watered,omitempty"`
+	Day         int64  `json:"day"`
+	GrownAt     int64  `json:"grownAt"`
+	CycleAt     int64  `json:"cycleAt,omitempty"`
+	Count       int    `json:"count,omitempty"`
+	WoodPetted  int    `json:"woodPetted,omitempty"`
+	WoodWatered int    `json:"woodWatered,omitempty"`
+	// A Wood Tree's care beyond its counts (trees.go woodCare): when its marks clear, each player's clocks.
+	WoodReset   int64           `json:"woodReset,omitempty"`
+	WoodPetAt   map[int64]int64 `json:"woodPetAt,omitempty"`
+	WoodWaterAt map[int64]int64 `json:"woodWaterAt,omitempty"`
+	ClearedAt   int64           `json:"clearedAt,omitempty"`
+	WoodBy      []int64         `json:"woodBy,omitempty"`
+	Harvests    map[string]int  `json:"harvests,omitempty"`
+	HDay        int64           `json:"hday,omitempty"`
+	PoisonEnd   int64           `json:"poisonEnd,omitempty"`
+	PoisonBy    int64           `json:"poisonBy,omitempty"`
+	RookNext    int64           `json:"rookNext,omitempty"`
 }
 
 type patchRec struct {
@@ -98,7 +102,8 @@ func (g *patches) record(p *pPlot) *patchRec {
 	}
 	if t := p.tree; t != nil {
 		tr := &patchTreeRec{Class: t.class, Maturity: t.maturity, Health: t.health, Fruit: t.fruit, Cap: t.cap, Petted: t.petted, Watered: t.watered,
-			Day: t.day, GrownAt: t.grownAt, CycleAt: t.cycleAt, Count: t.count, WoodPetted: t.woodPetted, WoodWatered: t.woodWatered,
+			Day: t.day, GrownAt: t.grownAt, CycleAt: t.cycleAt, Count: t.count, WoodPetted: t.woodCare.pets, WoodWatered: t.woodCare.waters,
+			WoodReset: t.woodCare.resetAt, WoodPetAt: copyClocks(t.woodCare.petAt), WoodWaterAt: copyClocks(t.woodCare.waterAt),
 			ClearedAt: t.clearedAt, HDay: t.hday, PoisonEnd: t.poisonEnd, PoisonBy: t.poisonBy, RookNext: t.rookNext}
 		for id := range t.woodBy {
 			tr.WoodBy = append(tr.WoodBy, id)
@@ -136,9 +141,14 @@ func (g *patches) fromRecord(spot *patchSpot, r *patchRec) *pPlot {
 		if tr == nil || !patchTrees[tr.Class] {
 			return nil
 		}
-		t := &pTree{class: tr.Class, grownAt: tr.GrownAt, cycleAt: tr.CycleAt, count: tr.Count, woodPetted: tr.WoodPetted, woodWatered: tr.WoodWatered,
+		t := &pTree{class: tr.Class, grownAt: tr.GrownAt, cycleAt: tr.CycleAt, count: tr.Count,
+			woodCare:  woodCare{pets: max(0, tr.WoodPetted), waters: max(0, tr.WoodWatered), resetAt: max(0, tr.WoodReset), petAt: copyClocks(tr.WoodPetAt), waterAt: copyClocks(tr.WoodWaterAt)},
 			clearedAt: tr.ClearedAt, hday: tr.HDay, poisonEnd: tr.PoisonEnd, poisonBy: tr.PoisonBy, rookNext: tr.RookNext}
 		t.maturity, t.health, t.fruit, t.cap, t.petted, t.watered, t.day = tr.Maturity, tr.Health, tr.Fruit, tr.Cap, tr.Petted, tr.Watered, tr.Day
+		if t.wood() && t.petted && t.watered && t.woodCare.resetAt == 0 {
+			// A file from the daily model: those marks were the day's, long since reset.
+			t.petted, t.watered = false, false
+		}
 		if !t.wood() && (t.maturity < 1 || t.maturity > 10 || t.health < 1 || t.health > 10) {
 			return nil
 		}

@@ -48,7 +48,7 @@ package main
 //	{"t":"patch_ok","req":3,"id":"patch:0","verb":"tend","now":ms,"before":Plot,"plot":Plot,…extra}
 //	        tend start "lock"; dig start "diggers"; dig, harvest, clear "grant":{"id","c","n"}; plant,
 //	        poison, antidote "use" (the ledger's take, applied once); Seedling pet "petted","first",
-//	        "third","owner","grew"; tree pet/water "roll","success","grew" (a Wood Tree "matured");
+//	        "third","owner","grew"; tree pet/water "roll","success","grew" (a Wood Tree "matured","maturity");
 //	        harvest "take","harvests","limit"; poison "poison" (ms); trantsform "use","from","to"
 //	{"t":"patch_no","req":3,"id":"patch:0","verb":"tend","code":"busy","message":"…","now":ms,"plot":Plot}
 //	{"t":"patch_grant","id":"pg-…","c":"plank","n":25}             on connect: a grant not acknowledged yet
@@ -87,9 +87,9 @@ package main
 //   - Tree: the shared tree rules (trees.go, the same as a street tree's): pet and water once a game
 //     day for the whole tree, success rolled here; harvest each player's own Arborology limit a game
 //     day (Ours: the plan's decision 5, enforced here); maturity rolls every 10 then 20 minutes with
-//     maturityGrowChance, caught up after downtime. A Wood Tree grows by care (wood_tree.js
-//     maturityMap), each player harvests once a game day, and at maturity 0 it is a weedy Patch 2 s
-//     later (onDie). Neglect and old age are not run (register G45, as in solo and objects.go).
+//     maturityGrowChance, caught up after downtime. A Wood Tree grows by care (trees.go woodTend:
+//     each player pets and waters it every 5 minutes, everyone's counts toward maturityMap), each
+//     player harvests once a game day, and at maturity 0 it is a weedy Patch 2 s later (onDie). Neglect and old age are not run (register G45, as in solo and objects.go).
 //   - Poison: the 3-minute clock (applyPoison 1268-1274), anyone's antidote; a trant then becomes its
 //     dead class, a Wood Tree a weedy Patch and 25 Planks for the poisoner.
 //   - Clear a dead tree (trant_*_dead.js clear 75-110): the first clear wins 25 Planks
@@ -391,12 +391,13 @@ type pTree struct {
 	class string // trant_* or wood_tree
 	treeCore
 	grownAt, cycleAt int64
-	// Wood Tree: harvest_count, the care counts toward the next maturity (maturityMap), when it was
-	// harvested down to 0, and who harvested it this game day.
-	count                   int
-	woodPetted, woodWatered int
-	clearedAt               int64
-	woodBy                  map[int64]bool
+	// Wood Tree: harvest_count, its care (trees.go woodCare: the counts toward the next maturity,
+	// when its marks clear, each player's 5-minute clocks), when it was harvested down to 0, and who
+	// harvested it this game day.
+	count     int
+	woodCare  woodCare
+	clearedAt int64
+	woodBy    map[int64]bool
 	// A trant: each player's harvests on hday (Ours: the per-player Arborology limit).
 	harvests map[int64]int
 	hday     int64
@@ -770,7 +771,8 @@ func (g *patches) advance(street string, p *pPlot, now int64) bool {
 		today := g.dayOf(now)
 		if t.day < today {
 			if t.wood() {
-				t.day, t.petted, t.watered = today, false, false
+				// Its harvesters' day; its care runs on no day (woodCare's clocks, below).
+				t.day = today
 			} else {
 				g.ow.treeNewDay(&t.treeCore, t.class, today)
 			}
@@ -778,6 +780,9 @@ func (g *patches) advance(street string, p *pPlot, now int64) bool {
 		}
 		if t.hday < today && (len(t.harvests) > 0 || len(t.woodBy) > 0) {
 			t.hday, t.harvests, t.woodBy = today, nil, nil
+		}
+		if t.wood() && woodCareExpire(&t.treeCore, &t.woodCare, now) {
+			changed = true // onNeedsReset 904-909: the marks clear for everyone
 		}
 	}
 	return changed
@@ -811,10 +816,11 @@ func (g *patches) due(p *pPlot) int64 {
 			if t.maturity <= 0 && t.clearedAt > 0 {
 				pick(t.clearedAt + g.timers.wood)
 			}
+			pick(t.woodCare.resetAt)
 		} else if t.maturity < 10 && g.w.chance(t.maturity, t.health) > 0 {
 			pick(t.cycleAt + g.cycleMs(t.maturity))
 		}
-		if t.petted || t.watered || len(t.harvests) > 0 || len(t.woodBy) > 0 {
+		if (!t.wood() && (t.petted || t.watered)) || len(t.harvests) > 0 || len(t.woodBy) > 0 {
 			pick(gameEpochMs + (g.dayOf(g.nowMs())+1)*gameDayMs + 50)
 		}
 	}
@@ -923,7 +929,7 @@ func (g *patches) view(p *pPlot, now int64) map[string]any {
 	if t := p.tree; t != nil {
 		tv := map[string]any{"class": t.class, "maturity": t.maturity, "petted": t.petted, "watered": t.watered, "grownAt": t.grownAt}
 		if t.wood() {
-			tv["count"], tv["woodPetted"], tv["woodWatered"] = t.count, t.woodPetted, t.woodWatered
+			tv["count"], tv["woodPetted"], tv["woodWatered"] = t.count, t.woodCare.pets, t.woodCare.waters
 			if t.clearedAt > 0 {
 				tv["clearedAt"] = t.clearedAt
 			}
@@ -1391,7 +1397,7 @@ func (g *patches) water(rp *patchReply, p *pPlot) {
 		rp.no("rooked", patchRooked)
 		return
 	}
-	if v, no := g.careRefusal(p.tree, "water"); no {
+	if v, no := g.careRefusal(p.tree, "water", rp.cl.ID()); no {
 		rp.no(v.code, v.message)
 		return
 	}
@@ -1408,7 +1414,19 @@ func (g *patches) water(rp *patchReply, p *pPlot) {
 	})
 }
 
-func (g *patches) careRefusal(t *pTree, verb string) (verdict, bool) {
+// careRefusal is a tree's "not now" before anything is used: a Wood Tree within this player's own 5
+// minutes (trees.go woodCareWait; wood_tree.js 525, 564), a trant already tended this window.
+func (g *patches) careRefusal(t *pTree, verb string, who int64) (verdict, bool) {
+	if t.wood() {
+		if woodCareWait(&t.woodCare, verb, who, g.nowMs()) > 0 {
+			word := "petted"
+			if verb == "water" {
+				word = "watered"
+			}
+			return refuse("not_wanted", "I don't want to be "+word+" right now!"), true
+		}
+		return verdict{}, false
+	}
 	if verb == "pet" && t.petted {
 		return refuse("not_wanted", "This tree was already petted today."), true
 	}
@@ -1419,8 +1437,8 @@ func (g *patches) careRefusal(t *pTree, verb string) (verdict, bool) {
 }
 
 // care is a pet or a water on a grown tree: a trant by the shared rules (trees.go treeCare); a Wood
-// Tree (js/trant-care.js wood_pet / wood_water, js/patches.js noteWoodTreeCare): each new petting and
-// watering counts, and once both are done and both counts reach maturityMap[m-1] it gains a maturity.
+// Tree by trees.go woodTend, the same as a street Wood Tree: every player's care counts, each on their
+// own 5-minute clocks, and both counts at maturityMap[m-1] grow it one maturity ("matured").
 func (g *patches) care(rp *patchReply, p *pPlot, verb string) {
 	t := p.tree
 	if !t.wood() {
@@ -1432,36 +1450,17 @@ func (g *patches) care(rp *patchReply, p *pPlot, verb string) {
 		rp.ok(v.extra, false)
 		return
 	}
-	if v, no := g.careRefusal(t, verb); no {
-		rp.no(v.code, v.message)
-		return
-	}
 	rates := g.w.rules.WoodCare[verb]
 	rate, ok := rates[rp.m.Skill]
 	if !ok {
 		rate = rates["no_skill"]
 	}
-	roll := g.rnd()
-	success := roll*100 < rate
-	extra := map[string]any{"roll": roll, "success": success}
-	if success {
-		if verb == "pet" {
-			t.petted = true
-			t.woodPetted++
-		} else {
-			t.watered = true
-			t.woodWatered++
-		}
-		if t.petted && t.watered && t.maturity >= 1 && t.maturity < 6 {
-			need := g.w.rules.WoodMap[t.maturity-1]
-			if t.woodPetted >= need && t.woodWatered >= need {
-				t.maturity++
-				t.count, t.woodPetted, t.woodWatered = 0, 0, 0
-				extra["matured"] = true
-			}
-		}
+	v := woodTend(&t.treeCore, &t.woodCare, &t.count, verb, rp.cl.ID(), g.nowMs(), rate, g.rnd(), g.w.rules.WoodMap)
+	if !v.ok {
+		rp.no(v.code, v.message)
+		return
 	}
-	rp.ok(extra, extra["matured"] == true)
+	rp.ok(v.extra, v.extra["matured"] == true)
 }
 
 func (g *patches) harvest(rp *patchReply, p *pPlot) {
@@ -1485,18 +1484,15 @@ func (g *patches) harvest(rp *patchReply, p *pPlot) {
 				return
 			}
 			t := p.tree
-			v := woodChop(&t.treeCore, &t.count, &t.woodBy, who)
+			v := woodChop(&t.treeCore, &t.woodCare, &t.count, &t.woodBy, who)
 			if !v.ok {
 				rp.no(v.code, v.message)
 				return
 			}
 			t.hday = g.today()
 			if t.maturity <= 0 {
-				// onDie: a Patch 2 s on (wood_tree.js 788).
+				// onDie: a Patch 2 s on (wood_tree.js 788). A harvest it survives zeroed its care counts (woodChop).
 				t.clearedAt = g.nowMs()
-			} else if t.woodPetted > 0 || t.woodWatered > 0 {
-				// endHarvest zeroes the care counts when the tree survives the harvest.
-				t.woodPetted, t.woodWatered = 0, 0
 			}
 			n := v.got.Items[0].N
 			gr := g.grant(who, "plank", n)
@@ -1512,7 +1508,8 @@ func (g *patches) harvest(rp *patchReply, p *pPlot) {
 	if !ok {
 		limit = g.w.rules.HarvestLimit["no_skill"]
 	}
-	if t.maturity >= 3 && t.fruit > 0 && t.harvests[who] >= limit {
+	// include/trants.js performHarvest 233-243: the fruit first (treeHarvest), then the day's limit.
+	if t.fruit > 0 && t.harvests[who] >= limit {
 		times := "time"
 		if limit > 1 {
 			times = "times"

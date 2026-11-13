@@ -41,31 +41,37 @@ var objectsFileForTest string
 
 // objRec is one touched object as the file keeps it. Times are Unix ms (0: none).
 type objRec struct {
-	Kind      string          `json:"k"`
-	Chunks    int             `json:"chunks,omitempty"`
-	Mega      bool            `json:"mega,omitempty"`
-	NextMega  bool            `json:"nextMega,omitempty"`
-	Units     int             `json:"units,omitempty"`
-	Petted    bool            `json:"petted,omitempty"`
-	Watered   bool            `json:"watered,omitempty"`
-	ResetAt   int64           `json:"resetAt,omitempty"`
-	Fruit     int             `json:"fruit,omitempty"`
-	Health    int             `json:"health,omitempty"`
-	Maturity  int             `json:"maturity,omitempty"`
-	Day       int64           `json:"day,omitempty"`
-	WoodCount int             `json:"woodCount,omitempty"`
-	WoodBy    []int64         `json:"woodBy,omitempty"`
-	PoisonEnd int64           `json:"poisonEnd,omitempty"`
-	PoisonBy  int64           `json:"poisonBy,omitempty"`
-	Dead      bool            `json:"dead,omitempty"`
-	DeadBy    int64           `json:"deadBy,omitempty"`
-	Mood      int             `json:"mood,omitempty"`
-	Hunger    int             `json:"hunger,omitempty"`
-	Daily     bool            `json:"daily,omitempty"`
-	Croak     bool            `json:"croak,omitempty"`
-	TickAt    int64           `json:"tickAt,omitempty"`
-	Petters   map[int64]int64 `json:"petters,omitempty"`
-	Due       int64           `json:"due,omitempty"`
+	Kind      string  `json:"k"`
+	Chunks    int     `json:"chunks,omitempty"`
+	Mega      bool    `json:"mega,omitempty"`
+	NextMega  bool    `json:"nextMega,omitempty"`
+	Units     int     `json:"units,omitempty"`
+	Petted    bool    `json:"petted,omitempty"`
+	Watered   bool    `json:"watered,omitempty"`
+	ResetAt   int64   `json:"resetAt,omitempty"`
+	Fruit     int     `json:"fruit,omitempty"`
+	Health    int     `json:"health,omitempty"`
+	Maturity  int     `json:"maturity,omitempty"`
+	Day       int64   `json:"day,omitempty"`
+	WoodCount int     `json:"woodCount,omitempty"`
+	WoodBy    []int64 `json:"woodBy,omitempty"`
+	// A Wood Tree's care (trees.go woodCare): its counts, when its marks clear, each player's clocks.
+	WoodPets    int             `json:"woodPets,omitempty"`
+	WoodWaters  int             `json:"woodWaters,omitempty"`
+	WoodReset   int64           `json:"woodReset,omitempty"`
+	WoodPetAt   map[int64]int64 `json:"woodPetAt,omitempty"`
+	WoodWaterAt map[int64]int64 `json:"woodWaterAt,omitempty"`
+	PoisonEnd   int64           `json:"poisonEnd,omitempty"`
+	PoisonBy    int64           `json:"poisonBy,omitempty"`
+	Dead        bool            `json:"dead,omitempty"`
+	DeadBy      int64           `json:"deadBy,omitempty"`
+	Mood        int             `json:"mood,omitempty"`
+	Hunger      int             `json:"hunger,omitempty"`
+	Daily       bool            `json:"daily,omitempty"`
+	Croak       bool            `json:"croak,omitempty"`
+	TickAt      int64           `json:"tickAt,omitempty"`
+	Petters     map[int64]int64 `json:"petters,omitempty"`
+	Due         int64           `json:"due,omitempty"`
 	// Street animals (objects_creatures.go) and a Piggy's nibbles: each player's uses on UsesDay,
 	// today's tally, the path's lag and hold, a Chicken's egg, a Batterfly's food counter.
 	Uses    map[int64]map[string]int `json:"uses,omitempty"`
@@ -149,6 +155,11 @@ func (o *objects) record(ob *liveObj) *objRec {
 	for id := range ob.woodBy {
 		r.WoodBy = append(r.WoodBy, id)
 	}
+	if ob.spot.kind == "wood" {
+		c := ob.woodCare
+		r.WoodPets, r.WoodWaters, r.WoodReset = c.pets, c.waters, c.resetAt
+		r.WoodPetAt, r.WoodWaterAt = copyClocks(c.petAt), copyClocks(c.waterAt)
+	}
 	sort.Slice(r.WoodBy, func(i, j int) bool { return r.WoodBy[i] < r.WoodBy[j] })
 	if len(ob.petters) > 0 {
 		r.Petters = make(map[int64]int64, len(ob.petters))
@@ -186,6 +197,13 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 		ob.maturity = clamp(r.Maturity, 0, 6)
 		ob.woodCount = clamp(r.WoodCount, 0, 1)
 		ob.day = r.Day
+		// A file from before Wood Tree care had none: nothing counted, nobody waiting.
+		ob.petted, ob.watered = r.Petted, r.Watered
+		ob.woodCare = woodCare{pets: max(0, r.WoodPets), waters: max(0, r.WoodWaters), resetAt: max(0, r.WoodReset),
+			petAt: copyClocks(r.WoodPetAt), waterAt: copyClocks(r.WoodWaterAt)}
+		if ob.petted && ob.watered && ob.woodCare.resetAt == 0 {
+			ob.petted, ob.watered = false, false
+		}
 		for _, id := range r.WoodBy {
 			if ob.woodBy == nil {
 				ob.woodBy = map[int64]bool{}
@@ -391,6 +409,10 @@ func (o *objects) resume() {
 						o.killTree(street, ob, ob.poisonBy)
 					}
 				}
+				if ob.spot.kind == "wood" && !ob.dead && ob.maturity <= 0 && ob.poisonEnd.IsZero() {
+					// Chopped to 0 before a restart: onDie still owed.
+					o.armWoodDie(street, ob, 0)
+				}
 			case "pig":
 				pigs = true
 				// On its way to food when the server stopped: the trip carries on from its clock
@@ -489,4 +511,18 @@ func (o *objects) kept(fn func(cl *Client, frame json.RawMessage)) func(cl *Clie
 		fn(cl, frame)
 		o.saveSoon()
 	}
+}
+
+// copyClocks copies a Wood Tree's per-player clocks (nil when empty).
+func copyClocks(m map[int64]int64) map[int64]int64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[int64]int64, len(m))
+	for id, at := range m {
+		if id != 0 && at > 0 {
+			out[id] = at
+		}
+	}
+	return out
 }

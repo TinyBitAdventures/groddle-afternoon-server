@@ -47,7 +47,7 @@ func TestPatchAStreetThePilotNeverHadIsShared(t *testing.T) {
 		t.Fatalf("Bo saw the Seedling grow as %v", fr)
 	}
 	r.pact(b, 2, "patch:0", "harvest", nil)
-	r.no(b, "small")
+	r.no(b, "empty") // a young tree has no fruit (no maturity gate)
 }
 
 // writeSeed puts a seed file where the module reads it.
