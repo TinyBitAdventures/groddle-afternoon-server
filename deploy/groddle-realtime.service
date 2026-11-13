@@ -28,7 +28,7 @@ ExecStart=/opt/groddle-realtime/groddle-realtime -addr 127.0.0.1:8793 -secret-fi
   -patches-seed /var/lib/groddle-realtime/realtime-patches-seed.json \
   -rook-file /var/lib/groddle-realtime/realtime-rook.json -quoins-file /var/lib/groddle-realtime/realtime-quoins.json \
   -crowns-file /var/lib/groddle-realtime/realtime-crowns.json -mayhem-file /var/lib/groddle-realtime/realtime-mayhem.json -party-file /var/lib/groddle-realtime/realtime-party.json \
-  -bans-file /var/lib/groddle-realtime/realtime-bans.json -uses-file /var/lib/groddle-realtime/realtime-uses.json \
+  -bans-file /var/lib/groddle-realtime/realtime-bans.json -uses-file /var/lib/groddle-realtime/realtime-uses.json -toys-file /var/lib/groddle-realtime/realtime-toys.json \
   -proofs-file /var/lib/groddle-realtime/realtime-proofs.jsonl -im-file /var/lib/groddle-realtime/realtime-im.json -chat-store-file /var/lib/groddle-realtime/realtime-chat-store.json \
   -play-time-file /var/lib/groddle-realtime/realtime-play-time.json -chatlog-dir /var/lib/groddle-realtime/chatlog -chatlog-days 30 -health-dir /var/lib/groddle-realtime/health
 Restart=always
