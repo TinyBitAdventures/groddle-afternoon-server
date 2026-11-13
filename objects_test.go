@@ -230,7 +230,7 @@ func TestTheServerChecksWhereAndWhat(t *testing.T) {
 	spot := sharedWorld.streets[defaultStreet]["rock:1"]
 	a := r.player(1, "Ada", defaultStreet, spot.x+objReachX+10, spot.y)
 	r.act(a, 1, "rock:1", "mine", nil)
-	if no := r.only(a, "obj_no"); no["code"] != "far" {
+	if no := r.only(a, "obj_no"); no["code"] != "far" || no["message"] != objTextFar {
 		t.Fatalf("a swing from across the street answered %v", no)
 	}
 	for _, id := range []string{"rock:99", "tree:x", "node:peat_1:9", "rock:1;drop"} {
@@ -446,7 +446,7 @@ func TestFertilidustGrowsTheStreetsTreesForEveryone(t *testing.T) {
 	// Fertilidust Lite: the tree named, if it is near.
 	r.now = r.now.Add(time.Second)
 	r.send(b, map[string]any{"t": "obj_dust", "req": 2, "id": "tree:3"})
-	if no := r.only(b, "obj_no"); no["code"] != "far" {
+	if no := r.only(b, "obj_no"); no["code"] != "far" || no["message"] != objTextFar {
 		t.Fatalf("a Lite dust from across the street answered %v", no)
 	}
 	r.send(a, map[string]any{"t": "obj_dust", "req": 3, "id": "tree:3"})
@@ -691,5 +691,32 @@ func TestAWoodTreeIsSharedButEachPlayerHarvestsItOnceADay(t *testing.T) {
 	r.act(a, 4, id, "harvest", nil)
 	if got := tree(r.only(a, "obj_ok")); num(got["maturity"]) != 4 || num(got["count"]) != 1 {
 		t.Fatalf("the next day Ada may harvest again: %v", got)
+	}
+}
+
+// #307/#308: a tab left open across releases drew shared rocks where its own build placed them; the
+// server's far refusal on a thing that never moves says a reload fixes it, in plain words and short.
+// A walker (Piggy, Chicken) keeps the plain line: each page walks those its own way.
+func TestTheFarLineSaysAnOldPageNeedsAReload(t *testing.T) {
+	for _, bad := range []string{"\u2014", "\u2013"} {
+		if strings.Contains(objTextFar, bad) {
+			t.Fatalf("the far line holds a dash: %q", objTextFar)
+		}
+	}
+	if !strings.Contains(objTextFar, "out of date") || !strings.Contains(objTextFar, "reload") || len(objTextFar) > 120 {
+		t.Fatalf("the far line should say, short, that the game may be out of date and a reload fixes it: %q", objTextFar)
+	}
+	if objTextFarWalker != "You need to be closer." {
+		t.Fatalf("a walker's far line changed: %q", objTextFarWalker)
+	}
+	r := newObjRig(t)
+	ch := sharedWorld.streets[defaultStreet]["chicken:0"]
+	if ch == nil {
+		t.Skip("no chicken on the default street")
+	}
+	far := r.player(1, "Di", defaultStreet, ch.x+10000, ch.y)
+	r.act(far, 1, "chicken:0", "wait", nil)
+	if no := r.only(far, "obj_no"); no["code"] != "far" || no["message"] != objTextFarWalker {
+		t.Fatalf("a far wait at a Chicken answered %v", no)
 	}
 }

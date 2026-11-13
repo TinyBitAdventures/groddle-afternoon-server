@@ -181,6 +181,17 @@ const (
 	objReachX = 700
 	objReachY = 500
 
+	// objTextFar is the far refusal on a rock, tree, node or dust target, which never moves: the
+	// player's page drew it where this server's layout (data/objects.json) does, unless the page is
+	// from an older build (#307/#308: server v0.29.0 moved 3,426 shared spots to their 2012 places and
+	// a v0.35.0 tab stood beside rocks the server held elsewhere). The server cannot know where an
+	// old page drew a thing, so the line says what to do. A newer page also shows its Update ready
+	// notice again on this refusal (update-ready-feature updateReminder).
+	objTextFar = "You need to be closer. If you are right beside it, your game may be out of date: reloading the page fixes it."
+	// objTextFarWalker is the far refusal on a Piggy or a street animal: each page walks those its own
+	// way, so a reload would not bring it closer.
+	objTextFarWalker = "You need to be closer."
+
 	// The rooked tree's fruit push (rookFruit): onRookedStep 6 at 12 s (events_add 12), then
 	// onRookedComplaint's drop and lift, 2000 ms apart (apiSetTimer 2000).
 	rookFruitFirst = 12 * time.Second
@@ -1114,15 +1125,18 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		return
 	}
 	reachX, reachY := float64(objReachX), float64(objReachY)
+	farText := objTextFar
 	if spot.kind == "pig" {
 		// A Piggy wanders and walks to food, each client's its own way: about two screens.
 		reachX, reachY = pigReachX, pigReachY
+		farText = objTextFarWalker
 	}
 	if isCreature(spot.kind) {
 		reachX, reachY = creatureReach(spot)
+		farText = objTextFarWalker
 	}
 	if x, y := cl.Pos(); math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY {
-		no("far", "You need to be closer.", nil)
+		no("far", farText, nil)
 		return
 	}
 	if m.Verb == "food" {
@@ -2031,7 +2045,7 @@ func (o *objects) handleDust(cl *Client, frame json.RawMessage) {
 			return
 		}
 		if x, y := cl.Pos(); math.Abs(x-tx) > objReachX || math.Abs(y-ty) > objReachY {
-			no("far", "You need to be closer.")
+			no("far", objTextFar)
 			return
 		}
 		if patchKey == "" {
