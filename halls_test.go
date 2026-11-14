@@ -169,3 +169,33 @@ func TestIdleBureaucratsStrollTheSameForEveryone(t *testing.T) {
 		t.Fatalf("a newcomer sees the same walk: %v", b[0])
 	}
 }
+
+func TestAPlayersBureaucratPosesAreRelayedAtMostFifteenASecond(t *testing.T) {
+	r, m := hallsRig(t)
+	ada := r.hub.Connect(Claims{Sub: 1, Name: "Ada"})
+	bo := r.hub.Connect(Claims{Sub: 2, Name: "Bo"})
+	r.join(ada, testHall, 300)
+	r.join(bo, testHall, 320)
+	r.do(ada, map[string]any{"t": "hall_ask", "kind": "greet", "x": 300})
+	drain(ada)
+	drain(bo)
+	// A flood at one instant: the burst is relayed, the rest only move the clerk.
+	for i := 0; i < 100; i++ {
+		r.do(ada, map[string]any{"t": "hall_pose", "i": 0, "x": 500 + i, "face": "left", "anim": "walk1"})
+	}
+	if n := len(kinds(drain(bo), "hall_pose")); n != hallPoseBurst {
+		t.Fatalf("relayed %d", n)
+	}
+	if c := m.rooms[testHall].clerks[0]; c.x != 599 {
+		t.Fatalf("the clerk stands at %v", c.x)
+	}
+	// The game's own pace (one every 200 ms) is relayed every time.
+	r.now = r.now.Add(10 * time.Second)
+	for i := 0; i < 50; i++ {
+		r.now = r.now.Add(200 * time.Millisecond)
+		r.do(ada, map[string]any{"t": "hall_pose", "i": 0, "x": 700 + i, "face": "left", "anim": "walk1"})
+	}
+	if n := len(kinds(drain(bo), "hall_pose")); n != 50 {
+		t.Fatalf("an honest walk relayed %d of 50", n)
+	}
+}

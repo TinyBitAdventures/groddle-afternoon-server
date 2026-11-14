@@ -70,11 +70,13 @@ func TestASlowClientDroppedByTheHubGoesOffline(t *testing.T) {
 	saved := modules
 	modules = append(append([]moduleFactory{}, saved...), func(h *Hub) Module { mod = &echoModule{h: h}; return mod })
 	defer func() { modules = saved }()
-	hub := NewHub(nil)
+	now := time.Unix(1_700_000_000, 0)
+	hub := NewHub(func() time.Time { return now })
 	slow := hub.Connect(Claims{Sub: 1, Name: "Ada"})
 	fast := hub.Connect(Claims{Sub: 2, Name: "Bo"})
 	hub.Handle(slow, []byte(`{"t":"join","street":"ONE"}`))
 	for i := 0; i < sendBuffer+5; i++ {
+		now = now.Add(joinEvery) // within the joins a socket may make (hub.go joinRate)
 		hub.Handle(fast, []byte(`{"t":"join","street":"ONE"}`))
 	}
 	if !slow.closed || slow.why != closeSlow {

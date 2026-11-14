@@ -251,6 +251,7 @@ func TestKoulatoCountsEveryArrivalAndTheThirtiethBringsTheJars(t *testing.T) {
 	// Bo walks on and off 28 times: each is an arrival (a join from elsewhere).
 	bo := joinAt(r.hub, 2, "Bo", "GA5101HF7F429V5", 0, 0)
 	for i := 0; i < 28; i++ {
+		r.now = r.now.Add(2 * joinEvery) // two joins a turn, within joinRate (hub.go)
 		send(r.hub, bo, map[string]any{"t": "join", "street": koulatoStreet, "x": 900, "y": 1100})
 		send(r.hub, bo, map[string]any{"t": "join", "street": "GA5101HF7F429V5", "x": 0, "y": 0})
 		frames(bo) // a full send queue drops a client as too slow

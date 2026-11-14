@@ -128,7 +128,17 @@ type halls struct {
 	known map[string]bool
 	rooms map[string]*hallRoom
 	rng   func() float64
+	poses map[int64]*bucket // hall_pose relays a player may make (hallPoseBurst, hallPoseEvery)
 }
+
+// Ours: the poses a player's clerks relay to the street, 15 a second with a burst of 30. The game
+// sends one every HALL_POSE_MS (200 ms, js/halls-mp.js) for a clerk that moved, so a player walking
+// two clerks at once stays under it. A pose past it still moves the clerk here; only its relay is
+// skipped, and the next relayed pose carries where the clerk stands.
+const (
+	hallPoseBurst = 30
+	hallPoseEvery = time.Second / 15
+)
 
 func init() { modules = append(modules, newHalls) }
 
@@ -141,7 +151,7 @@ func newHalls(h *Hub) Module {
 }
 
 func newHallsWith(h *Hub, d hallsData) *halls {
-	m := &halls{h: h, d: d, known: map[string]bool{}, rooms: map[string]*hallRoom{}, rng: rand.Float64}
+	m := &halls{h: h, d: d, known: map[string]bool{}, rooms: map[string]*hallRoom{}, rng: rand.Float64, poses: map[int64]*bucket{}}
 	for _, hl := range d.Halls {
 		m.known[hl.Street] = true
 	}
@@ -156,6 +166,7 @@ func (m *halls) Register(r *Registry) {
 	r.Handle("hall_done", m.done)
 	r.OnJoin(m.onJoin)
 	r.OnLeave(m.onLeave)
+	r.OnDisconnect(func(cl *Client) { delete(m.poses, cl.ID()) })
 }
 
 // where a clerk stands now (a walk moves it at its speed towards to).
@@ -466,6 +477,14 @@ func (m *halls) pose(cl *Client, frame json.RawMessage) {
 		c.anim = msg.Anim
 	}
 	c.touched = m.h.Now()
+	b := m.poses[cl.ID()]
+	if b == nil {
+		b = &bucket{}
+		m.poses[cl.ID()] = b
+	}
+	if !b.take(c.touched, hallPoseBurst, hallPoseEvery) {
+		return
+	}
 	m.h.BroadcastStreetLocked(r.street, map[string]any{"t": "hall_pose", "i": msg.I, "x": c.x, "face": c.dir, "anim": c.anim}, cl.ID())
 }
 

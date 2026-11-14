@@ -84,7 +84,23 @@ const (
 	chatBurst   = 5
 	chatEvery   = time.Second
 	typingEvery = 4 * time.Second // ChatArea.as:65 ACTIVITY_TIMER 4000
+
+	// Ours: street joins a socket may make, about two a second with a burst of four (a door, a
+	// teleport and the subway one after another). A join past it is not refused: it waits for the next
+	// token, and a newer join replaces one still waiting, so the player always lands on the street they
+	// asked for last. Every "left" broadcast follows a join, so this bounds those too.
+	joinBurst = 4
+	joinEvery = 500 * time.Millisecond
 )
+
+// joinAsk is a join frame's street and pose.
+type joinAsk struct {
+	Street string
+	X, Y   *float64
+	Dir    int
+	Anim   string
+	Look   json.RawMessage
+}
 
 var (
 	streetRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
@@ -118,6 +134,9 @@ type Client struct {
 
 	moveWindow time.Time
 	moveCount  int
+	joinRate   bucket      // joinBurst, joinEvery
+	joinNext   *joinAsk    // a join waiting for joinRate
+	joinWait   func() bool // its timer
 	chatTokens float64
 	chatAt     time.Time
 	typingAt   time.Time
@@ -326,33 +345,12 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 			h.replyLocked(cl, "bad_street", "That street name is not one the game uses.")
 			return
 		}
-		if len(m.Look) > maxLook || (len(m.Look) > 0 && !json.Valid(m.Look)) {
-			m.Look = nil
+		ask := &joinAsk{Street: m.Street, X: m.X, Y: m.Y, Dir: m.Dir, Anim: m.Anim, Look: m.Look}
+		if cl.joinNext != nil || !cl.joinRate.take(h.now(), joinBurst, joinEvery) {
+			h.holdJoinLocked(cl, ask)
+			return
 		}
-		for _, gate := range h.joinGates {
-			if ok, code, message := gate(cl, m.Street); !ok {
-				h.replyLocked(cl, code, message)
-				return
-			}
-		}
-		h.leaveLocked(cl)
-		cl.street = m.Street
-		cl.player = Player{ID: cl.id, Name: cl.name, X: coord(m.X), Y: coord(m.Y), Dir: sign(m.Dir), Anim: word(m.Anim, "idle"), Look: m.Look}
-		room := h.streets[m.Street]
-		if room == nil {
-			room = map[int64]*Client{}
-			h.streets[m.Street] = room
-		}
-		others := make([]Player, 0, len(room))
-		for _, o := range room {
-			others = append(others, o.player)
-		}
-		room[cl.id] = cl
-		h.queueLocked(cl, map[string]any{"t": "street", "street": m.Street, "players": others})
-		h.broadcastLocked(cl, map[string]any{"t": "joined", "player": cl.player})
-		for _, fn := range h.onJoin {
-			fn(cl)
-		}
+		h.joinLocked(cl, ask)
 	case "move":
 		if cl.street == "" || !h.allowMoveLocked(cl) {
 			return
@@ -409,6 +407,7 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		}
 		h.broadcastLocked(cl, map[string]any{"t": "emoted", "id": cl.id, "e": e})
 	case "leave":
+		h.dropJoinLocked(cl)
 		h.leaveLocked(cl)
 	case "ping":
 		h.queueLocked(cl, map[string]any{"t": "pong"})
@@ -420,6 +419,68 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 			return
 		}
 		h.replyLocked(cl, "bad_frame", "That message kind is not one the server knows.")
+	}
+}
+
+// joinLocked puts cl on a street (the join frame): the street's players to cl, cl to them.
+func (h *Hub) joinLocked(cl *Client, m *joinAsk) {
+	if len(m.Look) > maxLook || (len(m.Look) > 0 && !json.Valid(m.Look)) {
+		m.Look = nil
+	}
+	for _, gate := range h.joinGates {
+		if ok, code, message := gate(cl, m.Street); !ok {
+			h.replyLocked(cl, code, message)
+			return
+		}
+	}
+	h.leaveLocked(cl)
+	cl.street = m.Street
+	cl.player = Player{ID: cl.id, Name: cl.name, X: coord(m.X), Y: coord(m.Y), Dir: sign(m.Dir), Anim: word(m.Anim, "idle"), Look: m.Look}
+	room := h.streets[m.Street]
+	if room == nil {
+		room = map[int64]*Client{}
+		h.streets[m.Street] = room
+	}
+	others := make([]Player, 0, len(room))
+	for _, o := range room {
+		others = append(others, o.player)
+	}
+	room[cl.id] = cl
+	h.queueLocked(cl, map[string]any{"t": "street", "street": m.Street, "players": others})
+	h.broadcastLocked(cl, map[string]any{"t": "joined", "player": cl.player})
+	for _, fn := range h.onJoin {
+		fn(cl)
+	}
+}
+
+// holdJoinLocked keeps a join past joinRate until the next token (a newer one replaces it).
+func (h *Hub) holdJoinLocked(cl *Client, ask *joinAsk) {
+	cl.joinNext = ask
+	if cl.joinWait != nil {
+		return
+	}
+	cl.joinWait = h.After(joinEvery, func() {
+		cl.joinWait = nil
+		next := cl.joinNext
+		if next == nil || cl.closed {
+			cl.joinNext = nil
+			return
+		}
+		if !cl.joinRate.take(h.now(), joinBurst, joinEvery) {
+			h.holdJoinLocked(cl, next)
+			return
+		}
+		cl.joinNext = nil
+		h.joinLocked(cl, next)
+	})
+}
+
+// dropJoinLocked forgets a join still waiting (the player left the street meanwhile).
+func (h *Hub) dropJoinLocked(cl *Client) {
+	cl.joinNext = nil
+	if cl.joinWait != nil {
+		cl.joinWait()
+		cl.joinWait = nil
 	}
 }
 
