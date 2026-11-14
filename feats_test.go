@@ -270,6 +270,83 @@ func TestFeatActsFixTheAmountAndCountAStreetOnce(t *testing.T) {
 	}
 }
 
+// G754 (#328, #335): location.js 213-217, a first visit to a street always spawns a Qurazy; the five a game day
+// (location.js:255) only limits repeat visits. A street's first credit for a player takes no pace, once ever (kept
+// across runs and restarts); later ones are repeats, within the pace, a street at most once a game day.
+func TestFeatRambleCountsEveryFirstVisitAndFiveRepeatsADay(t *testing.T) {
+	table := featTableForTest(t)
+	if a := table.Feats["qurazy_quoin_collecting"].Acts["quoin"]; a.N != 1 || a.Dedupe != "first-street" {
+		t.Fatalf("the Ramble's quoin act: %+v", a)
+	}
+	start := featRunStart(t, table, "qurazy_quoin_collecting")
+	path := filepath.Join(t.TempDir(), "feats.json")
+	r := newFeatRig(t, path, nil, start.Add(time.Hour), nil)
+	a := r.player(1, "Ada")
+	drain(a)
+	street := func(i int) string { return fmt.Sprintf("GA5101HF7F%03dQ", i) }
+	quoin := func(r *featRig, cl *Client, s string) map[string]any {
+		return r.add(cl, "qurazy_quoin_collecting", 9, "act", "quoin", "street", s)
+	}
+	// Twelve new streets in a row: every one counts (the old pace stopped at five).
+	for i := 0; i < 12; i++ {
+		got := quoin(r, a, street(i))
+		if num(got["n"]) != 1 || got["street"] != street(i) {
+			t.Fatalf("first visit %d counts 1 and names its street: %v", i, got)
+		}
+		r.now = r.now.Add(20 * time.Second)
+	}
+	if got := quoin(r, a, "L"+street(3)[1:]); got["reason"] != "already" || num(got["mine"]) != 12 {
+		t.Fatalf("the same street (its L twin) once a game day: %v", got)
+	}
+	if got := r.add(a, "qurazy_quoin_collecting", 1, "act", "quoin"); got["reason"] != "street" {
+		t.Fatalf("a Qurazy names its street: %v", got)
+	}
+	// The next game day: repeat visits to streets already credited, five then the pace.
+	r.now = r.now.Add(time.Duration(table.GameDayMs) * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		if got := quoin(r, a, street(i)); num(got["n"]) != 1 {
+			t.Fatalf("repeat %d within the five: %v", i, got)
+		}
+	}
+	if got := quoin(r, a, street(5)); got["reason"] != "pace" || got["street"] != street(5) {
+		t.Fatalf("the sixth repeat waits for the pace: %v", got)
+	}
+	// A new street still counts at once.
+	if got := quoin(r, a, street(40)); num(got["n"]) != 1 || num(got["mine"]) != 18 {
+		t.Fatalf("a first visit is not held by the repeat pace: %v", got)
+	}
+	r.fire(time.Second) // the save
+
+	// A restart keeps which streets paid their first visit.
+	r2 := newFeatRig(t, path, nil, r.now.Add(time.Minute), nil)
+	a = r2.player(1, "Ada")
+	drain(a)
+	for i := 6; i < 11; i++ {
+		if got := quoin(r2, a, street(i)); num(got["n"]) != 1 {
+			t.Fatalf("repeat %d after the restart: %v", i, got)
+		}
+	}
+	if got := quoin(r2, a, street(11)); got["reason"] != "pace" {
+		t.Fatalf("street 11 paid its first visit before the restart: a repeat, held by the pace: %v", got)
+	}
+	if got := quoin(r2, a, street(41)); num(got["n"]) != 1 {
+		t.Fatalf("a new street after the restart: %v", got)
+	}
+	// Bo has his own first visits on Ada's streets.
+	b := r2.player(2, "Bo")
+	drain(b)
+	for i := 0; i < 7; i++ {
+		if got := quoin(r2, b, street(i)); num(got["n"]) != 1 {
+			t.Fatalf("Bo's first visit %d: %v", i, got)
+		}
+	}
+	// A run kept from before G754 (dedupe "street", key id|street) is not paid a first visit twice.
+	r2.m.st.Run.Seen["2|"+street(50)] = true
+	if got := quoin(r2, b, street(50)); num(got["n"]) != 1 || r2.m.buckets[2]["qurazy_quoin_collecting"].have != 4 || slices.Contains(r2.m.st.FirstStreets[2], street(50)) {
+		t.Fatalf("credited under the old key: a repeat, from Bo's five: %v %+v", got, r2.m.buckets[2]["qurazy_quoin_collecting"])
+	}
+}
+
 // G172: bag_butler.js 3802-3805, +2 for the first package left with a Butler; each neighbour's
 // HOME_<id> counts once a run.
 func TestFeatGoodNeighborCountsEachButlerOnce(t *testing.T) {

@@ -69,7 +69,11 @@ package main
 // caps a report at the Feat's burst and lets each player add to each Feat at
 // most pace.n every pace.everyMs (a bucket), so a forged client counts no
 // faster than an honest one; a streak counts once per street per game day
-// (location.js 1041-1055) and a qurazy quoin once per street per Feat. Other
+// (location.js 1041-1055). A qurazy quoin (G754) counts at no pace the first
+// time a street is credited for a player, ever (location.js 213-217: a first
+// visit always spawns one), and after that within the pace (location.js:255,
+// five a game day, which only limits repeat visits), each street at most once
+// a game day (location.js 248-253: not where one was found lately). Other
 // modules that see a contribution themselves count it through
 // Provide("feats.count") with no pace.
 //
@@ -117,6 +121,7 @@ const (
 	featTop         = 5 // the top contributors players see
 	featMaxN        = 100_000
 	featKeepSeen    = 20_000
+	featKeepFirst   = 4_000   // the streets kept per player for first-street (the archive has 1,422)
 	featKeepDays    = 4       // UTC days of active players kept
 	featDayMax      = 100_000 // the most players one day keeps (a bound)
 )
@@ -138,7 +143,7 @@ type featPace struct {
 
 type featAct struct {
 	N      int64  `json:"n"`
-	Dedupe string `json:"dedupe"` // "street" (once per Feat) | "street-day" (once per game day) | ""
+	Dedupe string `json:"dedupe"` // "street" (once per Feat) | "street-day" (once per game day) | "first-street" (see firstStreet) | ""
 }
 
 type featDef struct {
@@ -249,13 +254,15 @@ type featState struct {
 	// DaysSince: ms the count began; a day before it is unknown (a partial day would undercount).
 	Days      map[string][]int64 `json:"days,omitempty"`
 	DaysSince int64              `json:"daysSince,omitempty"`
+	// FirstStreets: per player, the streets whose first-visit Qurazy was credited (dedupe "first-street", G754), any run.
+	FirstStreets map[int64][]string `json:"firstStreets,omitempty"`
 }
 
 // featGoals is a run's three goals.
 type featGoals struct{ Goal, Bonus, Super int64 }
 
 func newFeatState() *featState {
-	return &featState{Ever: map[int64][]string{}, Rewarded: map[int64][]string{}, Credits: map[string]*featCredit{}, Owed: map[int64][]featOwed{}}
+	return &featState{Ever: map[int64][]string{}, Rewarded: map[int64][]string{}, Credits: map[string]*featCredit{}, Owed: map[int64][]featOwed{}, FirstStreets: map[int64][]string{}}
 }
 
 // featLedger is the site's ledger for Feat rewards: put got in, once per id.
@@ -387,6 +394,9 @@ func (m *feats) load() error {
 	}
 	if st.Owed == nil {
 		st.Owed = map[int64][]featOwed{}
+	}
+	if st.FirstStreets == nil {
+		st.FirstStreets = map[int64][]string{}
 	}
 	if r := st.Run; r != nil {
 		if _, ok := m.t.Feats[r.Feat]; !ok {
@@ -627,8 +637,12 @@ func topRows(sorted []*featEntry) []featTopRow {
 
 // —— Contributions ——
 
-func (m *feats) reply(cl *Client, run *featRun, feat string, n int64, reason string) {
+// reply is the feat_counted answer; street (a report that named one) goes back, so the game knows which report it answers.
+func (m *feats) reply(cl *Client, run *featRun, feat string, n int64, reason, street string) {
 	msg := map[string]any{"t": "feat_counted", "feat": feat, "n": n, "run": int64(0), "total": int64(0), "mine": int64(0), "place": 0}
+	if street != "" {
+		msg["street"] = street
+	}
 	if run != nil {
 		msg["run"], msg["total"] = run.Run, run.Total
 		if e := run.idx[cl.ID()]; e != nil {
@@ -687,38 +701,47 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 		Street string `json:"street"`
 	}
 	if json.Unmarshal(frame, &msg) != nil || len(msg.Feat) > 40 || len(msg.Act) > 16 {
-		m.reply(cl, nil, "", 0, "bad")
+		m.reply(cl, nil, "", 0, "bad", "")
 		return
+	}
+	street := ""
+	if streetRe.MatchString(msg.Street) {
+		street = msg.Street
 	}
 	run := m.current()
 	if msg.Feat != run.Feat {
-		m.reply(cl, run, msg.Feat, 0, "not_today")
+		m.reply(cl, run, msg.Feat, 0, "not_today", street)
 		return
 	}
 	def := m.t.Feats[run.Feat]
 	n := msg.N
 	key := ""
+	paced := true
+	first := ""
 	if len(def.Acts) > 0 {
 		a, ok := def.Acts[msg.Act]
 		if !ok {
-			m.reply(cl, run, msg.Feat, 0, "act")
+			m.reply(cl, run, msg.Feat, 0, "act", street)
 			return
 		}
 		n = a.N
 		if a.Dedupe != "" {
-			if !streetRe.MatchString(msg.Street) {
-				m.reply(cl, run, msg.Feat, 0, "street")
+			if street == "" {
+				m.reply(cl, run, msg.Feat, 0, "street", "")
 				return
 			}
 			switch a.Dedupe {
-			case "street-day":
-				key = fmt.Sprintf("%d|%d|%s", cl.ID(), floorDiv(m.ms()-m.t.EpochMs, m.t.GameDayMs), gStreet(msg.Street))
+			case "street-day", "first-street":
+				key = fmt.Sprintf("%d|%d|%s", cl.ID(), floorDiv(m.ms()-m.t.EpochMs, m.t.GameDayMs), gStreet(street))
 			default:
-				key = fmt.Sprintf("%d|%s", cl.ID(), gStreet(msg.Street))
+				key = fmt.Sprintf("%d|%s", cl.ID(), gStreet(street))
 			}
 			if run.Seen[key] {
-				m.reply(cl, run, msg.Feat, 0, "already")
+				m.reply(cl, run, msg.Feat, 0, "already", street)
 				return
+			}
+			if a.Dedupe == "first-street" && m.firstStreet(run, cl.ID(), gStreet(street)) {
+				paced, first = false, gStreet(street)
 			}
 		}
 	}
@@ -727,19 +750,37 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 	}
 	n = min(n, featMaxN)
 	if n <= 0 {
-		m.reply(cl, run, msg.Feat, 0, "amount")
+		m.reply(cl, run, msg.Feat, 0, "amount", street)
 		return
 	}
-	n = m.take(cl.ID(), run.Feat, def, n)
+	if paced {
+		n = m.take(cl.ID(), run.Feat, def, n)
+	}
 	if n <= 0 {
-		m.reply(cl, run, msg.Feat, 0, "pace")
+		m.reply(cl, run, msg.Feat, 0, "pace", street)
 		return
 	}
 	if key != "" && len(run.Seen) < featKeepSeen {
 		run.Seen[key] = true
 	}
+	if first != "" {
+		m.st.FirstStreets[cl.ID()] = append(m.st.FirstStreets[cl.ID()], first)
+	}
 	m.count(run, cl.ID(), cl.Name(), n)
-	m.reply(cl, run, msg.Feat, n, "")
+	m.reply(cl, run, msg.Feat, n, "", street)
+}
+
+// firstStreet: dedupe "first-street" (G754), true when this player has never been credited for this street,
+// in any run. location.js 213-217: the first visit to a street always spawns a Qurazy (the five-a-day
+// cap, location.js:255, only limits repeat visits), so that credit takes nothing from the pace; a street
+// pays it once ever, which keeps a forged client's total bounded by the streets there are.
+func (m *feats) firstStreet(run *featRun, id int64, street string) bool {
+	had := m.st.FirstStreets[id]
+	if slices.Contains(had, street) || len(had) >= featKeepFirst {
+		return false
+	}
+	// A run from before G754 kept a credited street as id|street (dedupe "street").
+	return !run.Seen[fmt.Sprintf("%d|%s", id, street)]
 }
 
 // count adds n for a player (groups/feat.js increment), tells the goals met and the first contribution.
