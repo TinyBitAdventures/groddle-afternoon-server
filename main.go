@@ -32,7 +32,46 @@ const (
 	authWait  = 5 * time.Second
 	pingEvery = 25 * time.Second
 	maxFrame  = 8192
+
+	// Ours: what one socket may send, a token bucket in the read loop (frameGate). The game sends a move
+	// at most every 100 ms and a handful of other frames around it, so 60 a second with a burst of 120
+	// leaves an honest page below it. Past it the read loop waits for the next token before it reads on,
+	// so a faster sender is paced to the rate (its frames wait in the socket, and then in its own send
+	// queue) and the hub lock is taken at most that often for it. Nothing is dropped: a page catching up
+	// (a burst of acks after a reconnect) only slows.
+	framesPerSec = 60
+	frameBurst   = 120
 )
+
+// frameGate is one socket's token bucket for the frames it sends (framesPerSec, frameBurst).
+type frameGate struct {
+	b      bucket
+	paced  int       // frames that waited since the last line
+	saidAt time.Time // the last paced-frames line
+}
+
+// wait is how long a frame read at now waits for its token (0: it has one, taken).
+func (g *frameGate) wait(now time.Time) time.Duration {
+	every := time.Second / framesPerSec
+	if g.b.take(now, frameBurst, every) {
+		return 0
+	}
+	g.paced++
+	// The bucket is short of one token by 1 - tokens; it refills one every `every`. The token the frame
+	// waits for is spent now, so the bucket stays in step with the frames let through.
+	d := time.Duration((1 - g.b.tokens) * float64(every))
+	g.b.tokens--
+	return max(d, time.Millisecond)
+}
+
+// note says, at most once a minute, how many frames a socket had to wait for.
+func (g *frameGate) note(now time.Time, id int64) {
+	if g.paced < frameBurst || now.Sub(g.saidAt) < time.Minute {
+		return
+	}
+	log.Printf("realtime: player=%d sent frames faster than %d a second: %d paced", id, framesPerSec, g.paced)
+	g.paced, g.saidAt = 0, now
+}
 
 // version names the build: deploy/install-remote.sh sets it to the release tag (-ldflags -X main.version=...).
 var version = "dev"
@@ -159,6 +198,7 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go s.write(ctx, conn, cl)
+	var gate frameGate
 	for {
 		kind, frame, err := conn.Read(ctx)
 		if err != nil {
@@ -167,6 +207,14 @@ func (s *Server) socket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		healthFramesIn.Add(1) // health.go: frames read a minute
+		now := time.Now()
+		if d := gate.wait(now); d > 0 {
+			gate.note(now, claims.Sub)
+			select {
+			case <-time.After(d):
+			case <-ctx.Done():
+			}
+		}
 		if kind == websocket.MessageText {
 			s.hub.Handle(cl, frame)
 		}
