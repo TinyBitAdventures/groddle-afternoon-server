@@ -577,3 +577,58 @@ func TestGarlicBreathAloneStillStartsTheBreath(t *testing.T) {
 		t.Fatalf("the breath began alone; a second Garlic in it smells of nothing: %v", got)
 	}
 }
+
+// potion_charades.js 521-536: a word drinks the potion, which the site's ledger takes before the game starts;
+// without one the game does not start, and a start that no longer stands gives it back.
+func TestCharadesStartsOnlyWithAPotionTheLedgerTakes(t *testing.T) {
+	r := newVerbsRig(t)
+	led := newFakeUseLedger()
+	r.m.uses.ledger = led
+	r.m.uses.spawn = func(fn func()) { fn() }
+	ada, bo := r.pair()
+	start := func(word string) {
+		r.do(ada, map[string]any{"t": "charades_start", "word": word})
+		r.fire(0) // the ledger's answer comes back under the hub lock
+	}
+	start("apple")
+	if s := verbOne(t, drain(ada), "charades_started"); s["status"] != "refused" || s["why"] != "no_item" || s["text"] != useTextLacks {
+		t.Fatalf("no potion: %v", s)
+	}
+	if len(r.m.games) != 0 || len(kinds(drain(bo), "charades_on")) != 0 {
+		t.Fatal("a game started without a potion")
+	}
+	// An empty word never reaches the ledger: the potion stays.
+	led.give(7, useCharades, 1)
+	calls := len(led.calls)
+	start("!!")
+	if s := verbOne(t, drain(ada), "charades_started"); s["why"] != "empty" || len(led.calls) != calls {
+		t.Fatalf("empty word: %v %v", s, led.calls)
+	}
+	// With one: the ledger takes it and the answer carries its word.
+	start("apple")
+	s := verbOne(t, drain(ada), "charades_started")
+	use, _ := s["use"].(map[string]any)
+	if s["status"] != "ok" || use == nil || use["c"] != useCharades || use["spent"] != true || led.held[7][useCharades] != 0 {
+		t.Fatalf("start: %v held %v", s, led.held[7])
+	}
+	if len(kinds(drain(bo), "charades_on")) != 1 {
+		t.Fatal("the street did not hear the game")
+	}
+	// A start that no longer stands when the ledger answers: the potion goes back (a void), no game.
+	r.m.endCharades(7, r.m.games[7], "timeout", nil)
+	drain(ada)
+	drain(bo)
+	led.give(7, useCharades, 1)
+	var asked func()
+	r.m.uses.spawn = func(fn func()) { asked = fn }
+	r.do(ada, map[string]any{"t": "charades_start", "word": "pear"})
+	r.do(bo, map[string]any{"t": "leave"}) // Bo leaves while the site answers
+	asked()
+	r.fire(0)
+	if s := verbOne(t, drain(ada), "charades_started"); s["status"] != "refused" || s["why"] != "alone" {
+		t.Fatalf("alone by the answer: %v", s)
+	}
+	if len(r.m.games) != 0 {
+		t.Fatal("a game started with nobody to guess")
+	}
+}

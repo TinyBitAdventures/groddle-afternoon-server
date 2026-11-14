@@ -21,7 +21,11 @@ package main
 //   - Charades (items/potion_charades.js 511-552, catalog_buffs.js charades
 //     400-426, main.js 1766-1793, location.js 889-892): the drinker picks a
 //     secret word the server keeps; the first other player on the street to
-//     say it in chat wins 50 iMG and 250 currants.
+//     say it in chat wins 50 iMG and 250 currants. The word drinks the potion
+//     (521-531), and the site's ledger takes it before the game starts
+//     (objects_uses.go, one whole item): a player who holds none is refused,
+//     and a refused start keeps it. charades_started carries "use", and the
+//     drinker's game takes the potion from the pack once by its op.
 //   - Garlic Breath (items/garlic.js 125-156, G429): the first Garlic eaten while
 //     the breath buff is off takes 1 mood per clove, at most 20, from every other
 //     player on the street, who hear "Something smells funky." (garlic_breath).
@@ -53,7 +57,8 @@ package main
 //	{"t":"verb_done","verb":"hug","ref":"…","status":"ok|refused","text":"…","to":{"id":9,"name":"Bo"},"id":"v-…","block":"…","garlic":false}
 //	{"t":"verb_got","verb":"hug","id":"v-…","from":{"id":7,"name":"Ada"},"block":"…","garlic":false}
 //	{"t":"verb_landed","verb":"bestow","id":"v-…","to":{"id":9,"name":"Bo"},"stat":"mood","n":50}   to the giver (no stat: nothing landed, or no answer in kindnessWait)
-//	{"t":"charades_started","status":"ok|refused","text":"…","word":"…","ends":1730000000000}   to the drinker (refused why "word": a bad word, wordfilter.go)
+//	{"t":"charades_started","status":"ok|refused","text":"…","word":"…","ends":1730000000000,"use":{"op","c","left","spent","n"}}
+//	        to the drinker (refused why "word": a bad word, wordfilter.go; "no_item": the ledger holds no potion)
 //	{"t":"charades_on","from":{"id":7,"name":"Ada"},"ends":…,"text":"Ada is playing Charades. …"}   to the street (and to a joiner)
 //	{"t":"charades_end","why":"guessed|ruined|timeout|left","word":"…","winner":{…}}            to the drinker
 //	{"t":"charades_over","from":{…},"why":"…","winner":{…}|null,"text":"…"}                   to the rest of the street
@@ -461,6 +466,43 @@ func (m *verbs) charadesStart(cl *Client, frame json.RawMessage) {
 		refuse("word", charadesTextWord)
 		return
 	}
+	// potion_charades.js 521-531: a word drinks the potion. The site's ledger takes it first (objects_uses.go,
+	// one whole item), so the game starts only for a player who holds one; a refusal, or a start that no
+	// longer stands when the ledger answers, keeps the potion (536: no game, the potion stays).
+	m.uses.ask(cl, useCharades, 1, func(use map[string]any, code, message string) {
+		if code != "" {
+			if cl.Online() {
+				refuse(code, message)
+			}
+			return
+		}
+		why, text := m.charadesBlock(cl, street)
+		if why != "" {
+			m.uses.giveBack(use, cl.ID())
+			if cl.Online() {
+				refuse(why, text)
+			}
+			return
+		}
+		m.playCharades(cl, street, word, use)
+	})
+}
+
+// charadesBlock is why a Charades game can't start for cl on street now ("" when it can).
+func (m *verbs) charadesBlock(cl *Client, street string) (string, string) {
+	switch {
+	case !cl.Online() || cl.Street() != street:
+		return "where", charadesTextWhere
+	case len(m.h.StreetLocked(street)) < 2:
+		return "alone", charadesTextAlone
+	case m.games[cl.ID()] != nil:
+		return "again", charadesTextAgain
+	}
+	return "", ""
+}
+
+// playCharades starts a game with the potion drunk (use: the ledger's word, nil without one).
+func (m *verbs) playCharades(cl *Client, street, word string, use map[string]any) {
 	g := &charadesGame{street: street, word: word, ends: m.h.Now().Add(charadesFor)}
 	id := cl.ID()
 	g.stop = m.h.After(charadesFor, func() {
@@ -469,7 +511,11 @@ func (m *verbs) charadesStart(cl *Client, frame json.RawMessage) {
 		}
 	})
 	m.games[id] = g
-	m.h.SendLocked(cl, map[string]any{"t": "charades_started", "status": "ok", "word": word, "ends": g.ends.UnixMilli()})
+	started := map[string]any{"t": "charades_started", "status": "ok", "word": word, "ends": g.ends.UnixMilli()}
+	if use != nil {
+		started["use"] = use
+	}
+	m.h.SendLocked(cl, started)
 	m.h.BroadcastStreetLocked(street, m.charadesOn(cl, g), id)
 	log.Printf("verbs: %d plays charades on %s", id, street)
 }

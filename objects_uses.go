@@ -93,6 +93,7 @@ const (
 	useSparkle         = "sparkle_powder"
 	useKindness        = "random_kindness"              // verbs.go: its 20 points (random_kindness.js points_capacity)
 	useTrantsform      = "potion_trantsformation_fluid" // patches_trees.go: points_capacity 3 (potion_trantsformation_fluid.js:25)
+	useCharades        = "potion_charades"              // verbs.go: one whole potion a game (potion_charades.js 521-531)
 )
 
 // useOpRe is newUseOp's shape (the site's LedgerUse::isUse).
