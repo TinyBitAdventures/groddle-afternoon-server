@@ -1,6 +1,8 @@
 package main
 
 // Game of Crowns between real players (G334): a Game of Crowns Ticket
+// (spent through the site's ledger before the street hears the challenge, and
+// given back as a credit when it never becomes a game, as races.go does: G734)
 // challenges the street, the players who accept play in one private copy of
 // the arena, and the server referees the crown: who holds it, the tags, the
 // locks, the clock below the play line and the winner, all from the
@@ -242,6 +244,7 @@ type crownRef struct {
 type crownInvite struct {
 	from      crownRef
 	street    string
+	use       map[string]any // the ledger's word on the spent ticket (nil: no ledger, the client's word)
 	opponents []crownRef
 	full      bool
 	at        time.Time
@@ -342,6 +345,7 @@ type crowns struct {
 	spawn   func(func())
 	newID   func() string
 	pick    func(n int) int
+	uses    *useAsker // the Game of Crowns Ticket, through the site's ledger (objects_uses.go)
 }
 
 func init() { modules = append(modules, newCrowns) }
@@ -373,6 +377,7 @@ func newCrownsWith(h *Hub, a *crownsArena) *crowns {
 		asks: map[int64]*crownsAsk{}, owed: map[int64][]crownOwed{},
 		credits: map[string]*crownCredit{}, fates: map[int64]crownFate{},
 		paying: map[int64]string{}, refunds: map[string]*crownRefund{},
+		uses:  newUseAsker(h, "crowns: tickets"),
 		spawn: func(fn func()) { go fn() },
 		newID: func() string {
 			b := make([]byte, 8)
@@ -480,36 +485,86 @@ func crownsPrivate(street string) bool {
 
 // —— Challenges ——
 
+// crownsTicket is the Game of Crowns Ticket (js/game-of-crowns.js CROWNS_TICKET).
+const crownsTicket = "race_ticket_it_game"
+
 func (m *crowns) challenge(cl *Client, _ json.RawMessage) {
 	if !m.allow(cl) {
 		m.refuse(cl, "slow", "Slow down a little.")
 		return
 	}
-	if m.busy(cl.ID()) {
-		m.refuse(cl, "busy", "You are already racing!")
-		return
-	}
 	street := cl.Street()
-	if inNaraka(street) {
-		m.refuse(cl, "dead", raceTooDead) // race_ticket_it_game.js:119
+	if why, text := m.challengeBlock(cl, street); why != "" {
+		m.refuse(cl, why, text)
 		return
 	}
-	if street == "" || crownsPrivate(street) {
-		m.refuse(cl, "street", "You cannot start a race from here.")
+	// race_ticket.js:150: activating spends the ticket. The site's ledger takes it first (objects_uses.go,
+	// one whole item), so only a ticket the player holds opens a challenge; a refusal keeps it.
+	m.uses.ask(cl, crownsTicket, 1, func(use map[string]any, code, message string) {
+		if code != "" {
+			if cl.Online() {
+				m.refuse(cl, code, message)
+			}
+			return
+		}
+		if why, text := m.challengeBlock(cl, street); why != "" || cl.Street() != street {
+			// Moved, croaked or busy while the site answered: the ticket goes back, nothing happened.
+			m.uses.giveBack(use, cl.ID())
+			if cl.Online() {
+				if why == "" {
+					why, text = "street", "You cannot start a race from here."
+				}
+				m.refuse(cl, why, text)
+			}
+			return
+		}
+		m.open(cl, street, use)
+	})
+}
+
+// challengeBlock is why cl can't challenge street now ("" when it can).
+func (m *crowns) challengeBlock(cl *Client, street string) (string, string) {
+	switch {
+	case !cl.Online():
+		return "gone", ""
+	case m.busy(cl.ID()):
+		return "busy", "You are already racing!"
+	case inNaraka(street):
+		return "dead", raceTooDead // race_ticket_it_game.js:119
+	case street == "" || crownsPrivate(street):
+		return "street", "You cannot start a race from here."
+	case len(m.h.StreetLocked(street)) <= 1:
+		// race_ticket.js:121: num_keys(getActivePlayers()) <= 1.
+		return "alone", "You need at least one other player here."
+	}
+	return "", ""
+}
+
+// refundTicket gives a challenge's ticket back to the challenger's ledger (inc_games.js
+// games_invite_timeout 2448-2450): a credit the save may show, as the page puts it back in the pack on
+// crown_failed / crown_ticket with refund. Nothing without a ledger spend (the page's word then).
+func (m *crowns) refundTicket(inv *crownInvite) {
+	if inv == nil || inv.use == nil {
 		return
 	}
-	// race_ticket.js:121: num_keys(getActivePlayers()) <= 1.
-	if len(m.h.StreetLocked(street)) <= 1 {
-		m.refuse(cl, "alone", "You need at least one other player here.")
-		return
-	}
-	inv := &crownInvite{from: crownRef{cl.ID(), cl.Name()}, street: street, at: m.h.Now()}
+	creditLocked(m.h, inv.from.ID, "race", creditItem(crownsTicket, 1))
+	inv.use = nil
+}
+
+// open is games_invite_create (inc_games.js 2387-2419) once the ticket is spent: the street hears the
+// challenge and the challenger waits, told what the ledger took (use).
+func (m *crowns) open(cl *Client, street string, use map[string]any) {
+	inv := &crownInvite{from: crownRef{cl.ID(), cl.Name()}, street: street, use: use, at: m.h.Now()}
 	m.invites[cl.ID()] = inv
 	from := cl.ID()
 	delete(m.fates, from) // a new ticket: the last challenge's fate is told
 	inv.stop = m.h.After(crownsInviteTimeout, func() { m.expire(from, inv) })
-	m.h.SendLocked(cl, map[string]any{"t": "crown_waiting", "from": from, "title": m.a.Title,
-		"text": "Waiting for other players...", "timeout": m.secondsLeft(inv), "have": 0, "need": m.need()})
+	waiting := map[string]any{"t": "crown_waiting", "from": from, "title": m.a.Title,
+		"text": "Waiting for other players...", "timeout": m.secondsLeft(inv), "have": 0, "need": m.need(), "ticket": crownsTicket}
+	if use != nil {
+		waiting["use"] = use
+	}
+	m.h.SendLocked(cl, waiting)
 	m.h.BroadcastStreetLocked(street, m.challengedMsg(inv), from)
 	log.Printf("crowns: %s challenged %s", cl.Name(), street)
 }
@@ -533,6 +588,7 @@ func (m *crowns) withdraw(from int64, text string) {
 		inv.stop()
 	}
 	m.setFate(from, true)
+	m.refundTicket(inv)
 	was := inv.from.Name + " was looking for a challenger for " + m.a.Title + "."
 	for _, o := range inv.opponents {
 		delete(m.joined, o.ID)
@@ -657,6 +713,9 @@ func (m *crowns) start(from int64, inv *crownInvite) {
 	// The arena needs min_retry_players to start at all (instance.js 588).
 	made := len(here) >= m.a.Players.Retry
 	m.setFate(from, !made)
+	if !made {
+		m.refundTicket(inv)
+	}
 	for _, p := range dead {
 		if oc := m.h.ClientLocked(p.ID); oc != nil {
 			m.h.SendLocked(oc, map[string]any{"t": "crown_failed", "text": raceTooDead, "refund": p.ID == from && !made})

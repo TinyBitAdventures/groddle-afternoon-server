@@ -473,3 +473,64 @@ func TestOnlyTheRacersMayEnterTheirInstance(t *testing.T) {
 		t.Fatal("ordinary streets are untouched by the gate")
 	}
 }
+
+// race_ticket.js:150: activating spends the ticket, through the site's ledger before the street hears the
+// challenge; without one there is no challenge, and a challenge that never became a game gives it back.
+func TestARaceChallengeSpendsATicketTheLedgerHolds(t *testing.T) {
+	r := newRaceRig(t)
+	led := newFakeUseLedger()
+	r.m.uses.ledger = led
+	r.m.uses.spawn = func(fn func()) { fn() }
+	got := caughtCredits(r.hub)
+	ada := r.hub.Connect(Claims{Sub: 1, Name: "Ada"})
+	bo := r.hub.Connect(Claims{Sub: 2, Name: "Bo"})
+	r.at(ada, "GA1", 0, 0)
+	r.at(bo, "GA1", 50, 0)
+	drain(ada)
+	drain(bo)
+	challenge := func(msg map[string]any) {
+		r.do(ada, msg)
+		r.fire(0) // the ledger's answer comes back under the hub lock
+	}
+	// No ticket in the ledger: refused, nobody hears a challenge.
+	challenge(map[string]any{"t": "race_challenge", "course": "canyon_run"})
+	if no := one(t, drain(ada), "race_refused"); no["why"] != "no_item" || no["text"] != useTextLacks {
+		t.Fatalf("no ticket: %v", no)
+	}
+	if len(kinds(drain(bo), "race_challenged")) != 0 || len(r.m.invites) != 0 {
+		t.Fatal("a challenge opened without a ticket")
+	}
+	// A ticket for another race does not open this one.
+	challenge(map[string]any{"t": "race_challenge", "course": "canyon_run", "ticket": "race_ticket_grab_em_good"})
+	if no := one(t, drain(ada), "race_refused"); no["why"] != "course" {
+		t.Fatalf("another race's ticket: %v", no)
+	}
+	// A Race Ticket may roll any race: the ledger takes that one, and the answer says so.
+	led.give(1, "race_ticket", 1)
+	challenge(map[string]any{"t": "race_challenge", "course": "canyon_run", "ticket": "race_ticket"})
+	w := one(t, drain(ada), "race_waiting")
+	use, _ := w["use"].(map[string]any)
+	if w["ticket"] != "race_ticket" || use == nil || use["c"] != "race_ticket" || led.held[1]["race_ticket"] != 0 {
+		t.Fatalf("waiting: %v held %v", w, led.held[1])
+	}
+	one(t, drain(bo), "race_challenged")
+	// Nobody takes it: the ticket goes back to the challenger's ledger as a credit.
+	r.fire(raceInviteTimeout)
+	if f := one(t, drain(ada), "race_failed"); f["refund"] != true {
+		t.Fatalf("expired: %v", f)
+	}
+	if len(*got) != 1 || !sameCredit((*got)[0], creditEvent{User: 1, Why: "race", Got: creditItem("race_ticket", 1)}) {
+		t.Fatalf("the ticket back: %+v", *got)
+	}
+	// A challenge that becomes a game keeps its ticket spent.
+	*got = nil
+	led.give(1, "race_ticket_canyon_run", 1)
+	challenge(map[string]any{"t": "race_challenge", "course": "canyon_run"})
+	one(t, drain(ada), "race_waiting")
+	r.do(bo, map[string]any{"t": "race_accept", "from": 1})
+	r.fire(raceStartDelay)
+	one(t, drain(ada), "race_match")
+	if len(*got) != 0 || led.held[1]["race_ticket_canyon_run"] != 0 {
+		t.Fatalf("a game made: %+v %v", *got, led.held[1])
+	}
+}

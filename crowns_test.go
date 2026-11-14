@@ -497,3 +497,44 @@ func TestCrownsArenaData(t *testing.T) {
 		}
 	}
 }
+
+// race_ticket.js:150: a Game of Crowns challenge spends the ticket through the site's ledger before the
+// street hears it; without one there is no challenge, and one nobody takes gives it back.
+func TestACrownsChallengeSpendsATicketTheLedgerHolds(t *testing.T) {
+	r := newCrownRig(t)
+	led := newFakeUseLedger()
+	r.m.uses.ledger = led
+	r.m.uses.spawn = func(fn func()) { fn() }
+	got := caughtCredits(r.hub)
+	ada := r.hub.Connect(Claims{Sub: 1, Name: "Ada"})
+	bo := r.hub.Connect(Claims{Sub: 2, Name: "Bo"})
+	r.at(ada, "GA1", 0, 0)
+	r.at(bo, "GA1", 50, 0)
+	drain(ada)
+	drain(bo)
+	challenge := func() {
+		r.do(ada, map[string]any{"t": "crown_challenge"})
+		r.fire(0) // the ledger's answer comes back under the hub lock
+	}
+	challenge()
+	if no := one(t, drain(ada), "crown_refused"); no["why"] != "no_item" || no["text"] != useTextLacks {
+		t.Fatalf("no ticket: %v", no)
+	}
+	if len(kinds(drain(bo), "crown_challenged")) != 0 || len(r.m.invites) != 0 {
+		t.Fatal("a challenge opened without a ticket")
+	}
+	led.give(1, crownsTicket, 1)
+	challenge()
+	w := one(t, drain(ada), "crown_waiting")
+	if use, _ := w["use"].(map[string]any); use == nil || use["c"] != crownsTicket || led.held[1][crownsTicket] != 0 {
+		t.Fatalf("waiting: %v held %v", w, led.held[1])
+	}
+	one(t, drain(bo), "crown_challenged")
+	r.fire(crownsInviteTimeout)
+	if f := one(t, drain(ada), "crown_failed"); f["refund"] != true {
+		t.Fatalf("expired: %v", f)
+	}
+	if len(*got) != 1 || !sameCredit((*got)[0], creditEvent{User: 1, Why: "race", Got: creditItem(crownsTicket, 1)}) {
+		t.Fatalf("the ticket back: %+v", *got)
+	}
+}

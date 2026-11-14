@@ -65,6 +65,14 @@ package main
 //     left under min_players off at once, as for a racer gone offline, and
 //     the ticket comes back to a challenger whose game never began.
 //
+// The ticket (G734): race_ticket.js:150 spends it at activation, so the site's
+// ledger takes it (objects_uses.go, one whole item of the course's Ticket or
+// a Race Ticket, raceTicket) before the street hears the challenge, and
+// race_waiting carries "use" and "ticket" for the challenger's page to take it
+// from the pack once by its op. A player the ledger holds none for is refused
+// (why "no_item"); a challenge that never becomes a game gives it back as a
+// credit (refundTicket, why "race"), which covers the page putting it back.
+//
 // Ours: an open challenge belongs to the street it was made on (leaving that
 // street or going offline withdraws it, and the ticket comes back);
 // accepting needs you on that street too; a member who drops has raceGrace
@@ -77,7 +85,7 @@ package main
 //
 // Client to server:
 //
-//	{"t":"race_challenge","course":"grab_em_good"}  activated a ticket for that course
+//	{"t":"race_challenge","course":"grab_em_good","ticket":"race_ticket"}  activated a ticket for that course (ticket: which; none: the course's own)
 //	{"t":"race_accept","from":7}                    accept player 7's challenge
 //	{"t":"race_ready","match":"…"}                  Click to Start
 //	{"t":"race_grab","match":"…","i":3}             touched game quoin 3 (Grab 'Em Good)
@@ -90,7 +98,7 @@ package main
 //	{"t":"race_unchallenged","from":7,"text":"…"}   that challenge is gone (filled, expired, withdrawn)
 //	{"t":"race_waiting","from":7,"course":"…","title":"…","text":"Waiting for other players...","timeout":60,"have":0,"need":1}
 //	{"t":"race_failed","course":"…","text":"…","refund":true}   your challenge expired or was withdrawn
-//	{"t":"race_refused","why":"alone|busy|full|gone|street|course|slow|dead","text":"…"}
+//	{"t":"race_refused","why":"alone|busy|full|gone|street|course|slow|dead|no_item|no_answer|slow_down","text":"…"}
 //	{"t":"race_starting","course":"…","title":"…","text":"Starting … in 5 seconds!","in":5000,"players":[…]}
 //	{"t":"race_match","match":"…","street":"RACE_…","course":"…","title":"…","game":"quoin_grab","kind":"quoins",
 //	    "slot":0,"spawn":[x,y],"players":[{"id","name","slot"}],"total":71,"quoins":[[x,y]…] | "finish":[x,y],"autoLeave":120}
@@ -214,6 +222,8 @@ type raceRef struct {
 type raceInvite struct {
 	from      raceRef
 	course    string
+	ticket    string         // the ticket class the challenge spent (raceTicket)
+	use       map[string]any // the ledger's word on it (nil: no ledger, the client's word)
 	street    string
 	opponents []raceRef
 	full      bool
@@ -273,6 +283,7 @@ type races struct {
 	asks    map[int64]*raceAsk
 	fates   map[int64]raceFate
 	newID   func() string
+	uses    *useAsker // the tickets, through the site's ledger (objects_uses.go)
 }
 
 func init() { modules = append(modules, newRaces) }
@@ -300,6 +311,7 @@ func newRacesWith(h *Hub, courses map[string]*raceCourse) *races {
 		matchOf: map[int64]*raceMatch{},
 		asks:    map[int64]*raceAsk{},
 		fates:   map[int64]raceFate{},
+		uses:    newUseAsker(h, "races: tickets"),
 		newID: func() string {
 			b := make([]byte, 8)
 			rand.Read(b)
@@ -395,45 +407,112 @@ func (m *races) challengedMsg(inv *raceInvite) map[string]any {
 
 // —— Challenges ——
 
+// raceTicket is the ticket class a challenge for course spends: the course's own Ticket, or a Race
+// Ticket, which may roll any of them (js/races.js GENERIC_RACE_IDS). A page that names none spent the
+// course's own.
+func raceTicket(course, ticket string) (string, bool) {
+	own := "race_ticket_" + course
+	switch ticket {
+	case "", own:
+		return own, true
+	case "race_ticket":
+		return ticket, true
+	}
+	return "", false
+}
+
 func (m *races) challenge(cl *Client, frame json.RawMessage) {
 	var msg struct {
 		Course string `json:"course"`
+		Ticket string `json:"ticket"`
 	}
 	if json.Unmarshal(frame, &msg) != nil || !courseRe.MatchString(msg.Course) || m.courses[msg.Course] == nil {
 		m.refuse(cl, "course", "That race is not in this remake yet.")
+		return
+	}
+	ticket, ok := raceTicket(msg.Course, msg.Ticket)
+	if !ok {
+		m.refuse(cl, "course", "That ticket is not for that race.")
 		return
 	}
 	if !m.allow(cl) {
 		m.refuse(cl, "slow", "Slow down a little.")
 		return
 	}
-	if m.busy(cl.ID()) {
-		m.refuse(cl, "busy", "You are already racing!")
-		return
-	}
 	street := cl.Street()
-	if inNaraka(street) {
-		m.refuse(cl, "dead", raceTooDead)
+	if why, text := m.challengeBlock(cl, street); why != "" {
+		m.refuse(cl, why, text)
 		return
 	}
-	if street == "" || strings.HasPrefix(street, "RACE_") {
-		m.refuse(cl, "street", "You cannot start a race from here.")
-		return
+	// race_ticket.js:150: activating spends the ticket. The site's ledger takes it first (objects_uses.go,
+	// one whole item), so only a ticket the player holds opens a challenge; a refusal keeps it.
+	m.uses.ask(cl, ticket, 1, func(use map[string]any, code, message string) {
+		if code != "" {
+			if cl.Online() {
+				m.refuse(cl, code, message)
+			}
+			return
+		}
+		if why, text := m.challengeBlock(cl, street); why != "" || cl.Street() != street {
+			// Moved, croaked or busy while the site answered: the ticket goes back, nothing happened.
+			m.uses.giveBack(use, cl.ID())
+			if cl.Online() {
+				if why == "" {
+					why, text = "street", "You cannot start a race from here."
+				}
+				m.refuse(cl, why, text)
+			}
+			return
+		}
+		m.open(cl, msg.Course, street, ticket, use)
+	})
+}
+
+// challengeBlock is why cl can't challenge street now ("" when it can).
+func (m *races) challengeBlock(cl *Client, street string) (string, string) {
+	switch {
+	case !cl.Online():
+		return "gone", ""
+	case m.busy(cl.ID()):
+		return "busy", "You are already racing!"
+	case inNaraka(street):
+		return "dead", raceTooDead
+	case street == "" || strings.HasPrefix(street, "RACE_"):
+		return "street", "You cannot start a race from here."
+	case len(m.h.StreetLocked(street)) <= 1:
+		// race_ticket.js:121: num_keys(getActivePlayers()) <= 1.
+		return "alone", "You need at least one other player here."
 	}
-	// race_ticket.js:121: num_keys(getActivePlayers()) <= 1.
-	if len(m.h.StreetLocked(street)) <= 1 {
-		m.refuse(cl, "alone", "You need at least one other player here.")
-		return
-	}
-	inv := &raceInvite{from: refOf(cl), course: msg.Course, street: street, at: m.h.Now()}
+	return "", ""
+}
+
+// open is games_invite_create (inc_games.js 2387-2419) once the ticket is spent: the street hears the
+// challenge and the challenger waits, told what the ledger took (use).
+func (m *races) open(cl *Client, course, street, ticket string, use map[string]any) {
+	inv := &raceInvite{from: refOf(cl), course: course, street: street, ticket: ticket, use: use, at: m.h.Now()}
 	m.invites[cl.ID()] = inv
 	delete(m.fates, cl.ID()) // a new ticket: the last challenge's fate is told
 	from := cl.ID()
 	inv.stop = m.h.After(raceInviteTimeout, func() { m.expire(from, inv) })
-	game := raceGames[m.courses[msg.Course].Game]
-	m.h.SendLocked(cl, map[string]any{"t": "race_waiting", "from": from, "course": inv.course, "title": m.title(inv.course),
-		"text": "Waiting for other players...", "timeout": m.secondsLeft(inv), "have": 0, "need": game.min - 1})
+	game := raceGames[m.courses[course].Game]
+	waiting := map[string]any{"t": "race_waiting", "from": from, "course": inv.course, "title": m.title(inv.course),
+		"text": "Waiting for other players...", "timeout": m.secondsLeft(inv), "have": 0, "need": game.min - 1, "ticket": ticket}
+	if use != nil {
+		waiting["use"] = use
+	}
+	m.h.SendLocked(cl, waiting)
 	m.h.BroadcastStreetLocked(street, m.challengedMsg(inv), cl.ID())
+}
+
+// refundTicket gives a challenge's ticket back to the challenger's ledger (inc_games.js
+// games_invite_timeout 2448-2450): a credit the save may show, as the page puts it back in the pack on
+// race_failed / race_ticket with refund. Nothing without a ledger spend (the page's word then).
+func (m *races) refundTicket(inv *raceInvite) {
+	if inv == nil || inv.use == nil || inv.ticket == "" {
+		return
+	}
+	creditLocked(m.h, inv.from.ID, "race", creditItem(inv.ticket, 1))
+	inv.use = nil
 }
 
 // expire is games_invite_timeout (inc_games.js 2421-2454).
@@ -455,6 +534,7 @@ func (m *races) withdraw(from int64, text string) {
 		inv.stop()
 	}
 	m.setFate(from, inv.course, true)
+	m.refundTicket(inv)
 	for _, o := range inv.opponents {
 		delete(m.joined, o.ID)
 		if oc := m.h.ClientLocked(o.ID); oc != nil {
@@ -572,6 +652,9 @@ func (m *races) start(from int64, inv *raceInvite) {
 		}
 	}
 	made := len(here) >= game.min
+	if !made {
+		m.refundTicket(inv)
+	}
 	for _, p := range dead {
 		if oc := m.h.ClientLocked(p.ID); oc != nil {
 			m.h.SendLocked(oc, map[string]any{"t": "race_failed", "course": inv.course, "text": raceTooDead, "refund": p.ID == from && !made})
