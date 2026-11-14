@@ -920,6 +920,18 @@ func (m *mayhem) end(rm *mayhemRoom, winner *mayhemRef, why string) {
 func (m *mayhem) reward(rm *mayhemRoom, w mayhemRef) {
 	id := fmt.Sprintf("mayhem-%s-%d-%d", rm.id, rm.round, w.ID)
 	msg := map[string]any{"t": "mayhem_reward", "id": id, "room": rm.id, "round": rm.round, "xp": m.a.Reward.XP, "currants": m.a.Reward.Currants}
+	// prizes.go: the winner and each other player of the round's daily count of paid wins; past it the win pays nothing.
+	var others []int64
+	for _, mem := range rm.members {
+		if mem.playing {
+			others = append(others, mem.ID)
+		}
+	}
+	if !m.h.prizeLocked("mayhem", w.ID, others) {
+		msg["xp"], msg["currants"], msg["prize"] = int64(0), int64(0), false
+		m.owe(w.ID, id, msg)
+		return
+	}
 	if m.ledger == nil || m.a.Reward.Currants <= 0 {
 		if m.ledger == nil && !m.trusted {
 			msg["currants"] = int64(0) // no ledger to put them in

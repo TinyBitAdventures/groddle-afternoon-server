@@ -169,6 +169,9 @@ type Hub struct {
 	// The cone of silence's word for Local chat: the newest signed one per character (G480).
 	cones map[int64]coneWord
 
+	// prizes.go: the day's paid wins per pair of players.
+	prizes *prizeBook
+
 	// The close lines' reconnect-loop watch (closeNoteLocked, noteConnectLocked): connects per character a minute.
 	rates      map[int64]*connRate
 	ratesSwept time.Time

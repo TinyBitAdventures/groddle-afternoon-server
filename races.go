@@ -109,7 +109,7 @@ package main
 //	{"t":"race_grabbed","match":"…","i":3,"id":7,"name":"Ada","x":0,"y":0,"base":10,"crowd":2,
 //	    "scores":[{"id":7,"name":"Ada","score":1}],"remaining":70,"shards":[{"id":8,"x":0,"y":0,"pct":0.31}]}
 //	{"t":"race_grab_refused","match":"…","i":3,"why":"gone|far|street|unknown|slow|state"}
-//	{"t":"race_end","match":"…","winner":{"id":7,"name":"Ada"}|null,"why":"won|left|idle|timeout|short",
+//	{"t":"race_end","match":"…","winner":{"id":7,"name":"Ada"}|null,"why":"won|left|idle|timeout|short","prize":true|false (a win: paid, or past the pair's daily count, prizes.go),
 //	    "left":{"id":8,"name":"Bo"},"scores":[…],"remaining":0,"total":71}
 //
 // A shard's amount is max(round(base * the receiver's own multiplier * pct), 1)
@@ -1006,8 +1006,18 @@ func (m *races) end(mt *raceMatch, winner *raceRef, why string, left *raceRef) {
 		msg["remaining"] = m.remaining(mt)
 		msg["total"] = len(mt.course.Quoins)
 	}
-	m.sendMatch(mt, msg)
+	// prizes.go: a pair's daily count of paid wins; past it the race still ends, it pays nothing.
+	paid := false
 	if winner != nil && why == "won" {
+		var others []int64
+		for _, mem := range mt.members {
+			others = append(others, mem.ID)
+		}
+		paid = m.h.prizeLocked("race", winner.ID, others)
+		msg["prize"] = paid
+	}
+	m.sendMatch(mt, msg)
+	if paid {
 		creditLocked(m.h, winner.ID, "race", tradeGoods{Currants: raceWinCurrants})
 	}
 	if left != nil {

@@ -62,7 +62,7 @@ package main
 //	{"t":"charades_on","from":{"id":7,"name":"Ada"},"ends":…,"text":"Ada is playing Charades. …"}   to the street (and to a joiner)
 //	{"t":"charades_end","why":"guessed|ruined|timeout|left","word":"…","winner":{…}}            to the drinker
 //	{"t":"charades_over","from":{…},"why":"…","winner":{…}|null,"text":"…"}                   to the rest of the street
-//	{"t":"charades_won","from":{…},"xp":50,"currants":250,"text":"…"}                          to the winner
+//	{"t":"charades_won","from":{…},"xp":50,"currants":250,"text":"…"}                          to the winner ("prize":false, 0 and 0: past the pair's daily count, prizes.go)
 //	{"t":"party_blowout","owner":7}                                                           to each player at the party
 //	{"t":"garlic_smell","from":{"id":7,"name":"Ada"},"count":3,"mood":3}                       to every other player on the eater's street
 //
@@ -540,11 +540,18 @@ func (m *verbs) endCharades(id int64, g *charadesGame, why string, winner *Clien
 	}
 	end := map[string]any{"t": "charades_end", "why": why, "word": g.word}
 	over := map[string]any{"t": "charades_over", "from": from, "why": why, "winner": nil}
+	// prizes.go: the guesser and the drinker's daily count of paid wins; past it the guess wins no prize.
+	paid := winner != nil && m.h.prizeLocked("charades", winner.ID(), []int64{id})
+	won := ""
 	switch why {
 	case "guessed":
 		end["winner"] = verbWho(winner)
 		over["winner"] = verbWho(winner)
-		over["text"] = winner.Name() + " guessed correctly! +50 iMG, +250 currants" // main.js:1780
+		won = winner.Name() + " guessed correctly!"
+		if paid {
+			won += " +50 iMG, +250 currants" // main.js:1780
+		}
+		over["text"] = won
 	case "ruined":
 		over["text"] = name + " ruined their own game of charades by saying the answer." // main.js:1771
 	default:
@@ -560,8 +567,12 @@ func (m *verbs) endCharades(id int64, g *charadesGame, why string, winner *Clien
 		}
 	}
 	if winner != nil {
-		m.h.SendLocked(winner, map[string]any{"t": "charades_won", "from": from, "xp": charadesXP, "currants": charadesPrize, "text": winner.Name() + " guessed correctly! +50 iMG, +250 currants"})
-		creditLocked(m.h, winner.ID(), "charades", tradeGoods{Currants: charadesPrize})
+		if paid {
+			m.h.SendLocked(winner, map[string]any{"t": "charades_won", "from": from, "xp": charadesXP, "currants": charadesPrize, "text": won})
+			creditLocked(m.h, winner.ID(), "charades", tradeGoods{Currants: charadesPrize})
+		} else {
+			m.h.SendLocked(winner, map[string]any{"t": "charades_won", "from": from, "xp": 0, "currants": 0, "prize": false, "text": won})
+		}
 	}
 	log.Printf("verbs: %d charades %s on %s", id, why, g.street)
 }

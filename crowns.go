@@ -1212,6 +1212,16 @@ func (m *crowns) end(mt *crownMatch, winner *crownRef, why string) {
 func (m *crowns) reward(mt *crownMatch, w crownRef) {
 	id := fmt.Sprintf("crowns-%s-%d-%d", mt.id, mt.round, w.ID)
 	msg := map[string]any{"t": "crown_reward", "id": id, "match": mt.id, "round": mt.round, "xp": m.a.Reward.XP, "currants": m.a.Reward.Currants}
+	// prizes.go: the winner and each other player's daily count of paid wins; past it the win pays nothing.
+	var others []int64
+	for _, mem := range mt.members {
+		others = append(others, mem.ID)
+	}
+	if !m.h.prizeLocked("crowns", w.ID, others) {
+		msg["xp"], msg["currants"], msg["prize"] = int64(0), int64(0), false
+		m.owe(w.ID, id, msg)
+		return
+	}
 	if m.ledger == nil || m.a.Reward.Currants <= 0 {
 		if m.ledger == nil && !m.trusted {
 			msg["currants"] = int64(0) // no ledger to put them in
