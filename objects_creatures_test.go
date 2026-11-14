@@ -275,6 +275,50 @@ func TestAHoldStillsThePathForEveryone(t *testing.T) {
 // their animation from the other side"): a menu open on a shared Chicken stopped it only on that
 // player's screen while its path ran on, so it jumped ahead when the menu closed and the others saw
 // it walk. A "wait" holds it for everyone (npc.js onInteractionStarting, npc_chicken.js onWaitStart).
+// G755 (#331): Larceny Ladder's Butterflies have their spots high on the street (512 and 789 px down),
+// but every page draws them along the flight floor (js/street-creatures.js flyerAt): about 1,880 and
+// 1,837, the floor under them 1,970 and 1,949. A player on the bottom floor under one, more than
+// 1,000 px below its spot, massages it and holds it (wait) like anyone else.
+func TestAButterflyIsReachedWhereThePageDrawsItOnATallStreet(t *testing.T) {
+	const ladder = "GCR12SD8J4K1PCV"
+	r := newObjRig(t)
+	for _, c := range []struct {
+		id      string
+		spotY   float64
+		x, feet float64 // the floor under it, where a player stands
+	}{{"butterfly:0", 512.3, 1402.5, 1969.7}, {"butterfly:1", 788.7, 495, 1949.4}} {
+		bf := sharedWorld.streets[ladder][c.id]
+		if bf == nil || !bf.fly || bf.x != c.x || bf.y != c.spotY {
+			t.Fatalf("Larceny Ladder's %s: %+v", c.id, bf)
+		}
+		if c.feet-bf.y <= creatureReachY {
+			t.Fatalf("%s: the case needs a player further below the spot than the old reach", c.id)
+		}
+	}
+	a := r.player(1, "Ada", ladder, 1402.5, 1969.7)
+	r.send(a, map[string]any{"t": "obj_sync"})
+	r.drain(a)
+	r.act(a, 1, "butterfly:0", "wait", nil)
+	if c := objOf(r.only(a, "objs"), "butterfly:0"); num(c["hold"]) != 1200 {
+		t.Fatalf("the wait holds it for everyone: %v", c)
+	}
+	r.act(a, 2, "butterfly:0", "massage", nil)
+	if ok := r.only(a, "obj_ok"); ok["verb"] != "massage" {
+		t.Fatalf("the massage answered %v", ok)
+	}
+	b := r.player(2, "Bo", ladder, 495, 1949.4)
+	r.drain(b)
+	r.act(b, 1, "butterfly:1", "massage", nil)
+	r.only(b, "obj_ok")
+	// A Chicken on the same street keeps its reach up and down.
+	ch := sharedWorld.streets[ladder]["chicken:0"]
+	cy := r.player(3, "Cy", ladder, ch.x, ch.y-creatureReachY-10)
+	r.act(cy, 1, "chicken:0", "squeeze", nil)
+	if no := r.only(cy, "obj_no"); no["code"] != "far" {
+		t.Fatalf("a Chicken far above answered %v", no)
+	}
+}
+
 func TestAChickenWaitsForEveryoneWhileAPlayerIsAtIt(t *testing.T) {
 	r := newObjRig(t)
 	ch := sharedWorld.streets[defaultStreet]["chicken:0"]

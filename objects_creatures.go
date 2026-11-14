@@ -404,9 +404,20 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 	return m
 }
 
-// creatureReach is how far from its spot a player may act on it: a flyer crosses the whole street.
+// creatureReach is how far from its spot a player may act on it: a walker crosses the whole street;
+// a flyer the whole street, up and down too (G755, #331). Its spot is the planner's point, but every
+// page draws it along the flight floor, its lift (90 to 134 px) over the floor under it (the game's
+// js/street-creatures.js flyerAt, game.js spawnButterflies): on Larceny Ladder (GCR12SD8J4K1PCV) the
+// spots are 512 and 789 px down and the Butterflies fly at about 1,880 and 1,837, over a bottom floor
+// near 1,970, so a player under the Butterfly they saw was "far" and the refused wait let it fly on:
+// it jumped. The source measured from where the animal
+// was (npc_butterfly.js checkWaiting 1588, distanceFromPlayer within config.verb_radius); the server
+// keeps no flyer's place, so it takes the player's page for it, as it does sideways.
 func creatureReach(spot *objSpot) (float64, float64) {
-	if spot.fly || walker(spot.kind) {
+	if spot.fly {
+		return math.Inf(1), math.Inf(1)
+	}
+	if walker(spot.kind) {
 		return math.Inf(1), creatureReachY
 	}
 	return creatureReachX, creatureReachY
