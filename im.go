@@ -699,7 +699,7 @@ func (m *ims) save() bool {
 	})
 	b, err := json.Marshal(f)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("im %s: %v", m.path, err) // never the text

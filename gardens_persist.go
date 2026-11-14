@@ -102,7 +102,7 @@ func (g *gardens) save() {
 		}
 	}
 	b, _ := json.Marshal(f)
-	if err := writeFileSynced(g.path, b); err != nil {
+	if err := writeStateSoon(g.path, b); err != nil {
 		log.Printf("gardens %s: %v", g.path, err)
 	}
 }

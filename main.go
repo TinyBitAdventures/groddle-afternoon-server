@@ -98,6 +98,7 @@ func main() {
 		defer cancel()
 		httpServer.Shutdown(shut)
 		srv.hub.Shutdown()
+		flushStateWrites("") // statewrite.go: every state the shutdown hooks saved is on disk before exit
 		close(done)
 	}()
 	log.Printf("groddle realtime listening on %s", *addr)

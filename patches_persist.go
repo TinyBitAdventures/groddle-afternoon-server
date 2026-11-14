@@ -270,7 +270,7 @@ func (g *patches) save() {
 		f.Seeded = g.seeded
 	}
 	b, _ := json.Marshal(f)
-	if err := writeFileSynced(g.path, b); err != nil {
+	if err := writeStateSoon(g.path, b); err != nil {
 		log.Printf("patches %s: %v", g.path, err)
 	}
 }

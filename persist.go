@@ -7,7 +7,8 @@ package main
 // ignored): trade.go (-trade-journal), projects.go (-projects-file),
 // feats.go (-feats-file), hi.go (-hi-file), credits.go (-credits-file),
 // objects.go (-objects-file), gardens.go (-gardens-file), patches.go (-patches-file), crowns.go (-crowns-file), party.go (-party-file), admin.go (-bans-file), im.go (-im-file), chatstore.go (-chat-store-file: chat lines waiting for the site), streettoys.go (-toys-file); playtime.go (-play-time-file: players' play time waiting for the site); chatlog.go keeps a directory of daily files (-chatlog-dir, -chatlog-days); health.go a directory of monthly files kept forever (-health-dir). Whole-state files are written through
-// writeFileSynced (projects.go: a temp file, fsync, rename), journals are
+// writeStateSoon (statewrite.go: off the hub lock, through writeFileSynced, projects.go: a temp file,
+// fsync, rename), journals are
 // append-only and compacted. A file that is missing starts the module empty;
 // one that does not parse is moved aside (logged) and the module starts empty
 // and goes on saving, so a bad file never stops the server or the next save.
@@ -51,6 +52,7 @@ func statePath(forTest string, flagValue *string, name string) string {
 // its next save writes a good file. Only a file that cannot be read at all is
 // an error (the caller keeps that module in memory only, as feats.go does).
 func readStateFile(who, path string, v any) (bool, error) {
+	flushStateWrites(path) // statewrite.go: a write still on its way lands first
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil

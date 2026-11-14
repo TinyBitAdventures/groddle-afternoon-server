@@ -271,7 +271,7 @@ func (m *chatStore) save() {
 	m.mu.Unlock()
 	b, err := json.Marshal(f)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("chat store %s: %v", m.path, err) // never the text

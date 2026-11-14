@@ -464,7 +464,7 @@ func (m *playTime) save() {
 	sort.Slice(f.Pending, func(i, j int) bool { return f.Pending[i].User < f.Pending[j].User })
 	b, err := json.Marshal(f)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("play time %s: %v", m.path, err)

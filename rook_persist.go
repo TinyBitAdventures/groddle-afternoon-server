@@ -125,7 +125,7 @@ func (m *rook) save() bool {
 	}
 	b, err := json.Marshal(f)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("rook %s: %v", m.path, err)

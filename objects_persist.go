@@ -475,7 +475,7 @@ func (o *objects) save() bool {
 	}
 	b, err := json.Marshal(f)
 	if err == nil {
-		err = writeFileSynced(o.path, b)
+		err = writeStateSoon(o.path, b)
 	}
 	if err != nil {
 		log.Printf("objects %s: %v", o.path, err)

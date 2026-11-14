@@ -1026,7 +1026,7 @@ func (m *hiModule) save() bool {
 	}
 	b, err := json.Marshal(m.st)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("hi %s: %v", m.path, err)
@@ -1037,6 +1037,7 @@ func (m *hiModule) save() bool {
 }
 
 func (m *hiModule) load() error {
+	flushStateWrites(m.path) // statewrite.go: a write still on its way lands first
 	b, err := os.ReadFile(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

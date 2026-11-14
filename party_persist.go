@@ -177,6 +177,7 @@ func (m *parties) initPersist() {
 
 // load reads the state file into the module; resume arms the timers and asks for the refunds.
 func (m *parties) load() error {
+	flushStateWrites(m.persist.path) // statewrite.go: a write still on its way lands first
 	raw, err := os.ReadFile(m.persist.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -548,7 +549,7 @@ func (m *parties) save() bool {
 	}
 	b, err := json.Marshal(m.record())
 	if err == nil {
-		err = writeFileSynced(m.persist.path, b)
+		err = writeStateSoon(m.persist.path, b)
 	}
 	if err != nil {
 		log.Printf("parties %s: %v", m.persist.path, err)

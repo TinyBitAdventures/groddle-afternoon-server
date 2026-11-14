@@ -7,7 +7,7 @@ package main
 // once and started the day's count again, so the same quoins could be grabbed
 // and credited twice. -quoins-file (default realtime-quoins.json beside
 // -secret-file; off: memory only) is the whole state, written through
-// writeFileSynced within a second of a grab or a respawn. The respawn timers
+// writeStateSoon (off the hub lock) within a second of a grab or a respawn. The respawn timers
 // are armed again on the first connect after a start; a quoin whose time ran
 // out while the server was down is simply back.
 
@@ -141,7 +141,7 @@ func (m *quoinsModule) save() bool {
 	}
 	b, err := json.Marshal(f)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("quoins %s: %v", m.path, err)

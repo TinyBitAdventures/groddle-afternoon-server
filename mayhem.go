@@ -1072,7 +1072,7 @@ func (m *mayhem) save() bool {
 	}
 	b, err := json.Marshal(mayhemSaved{Owed: m.owed, Credits: m.credits})
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("mayhem %s: %v", m.path, err)

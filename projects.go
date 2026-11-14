@@ -509,6 +509,7 @@ func (m *projects) Register(r *Registry) {
 // —— Persistence ——
 
 func (m *projects) load() error {
+	flushStateWrites(m.path) // statewrite.go: a write still on its way lands first
 	b, err := os.ReadFile(m.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -578,7 +579,7 @@ func (m *projects) save() bool {
 	}
 	b, err := json.Marshal(m.st)
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("projects %s: %v", m.path, err)

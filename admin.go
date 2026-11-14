@@ -160,7 +160,7 @@ func (m *admin) saveLocked() {
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	b, _ := json.Marshal(map[string]any{"banned": ids})
-	if err := writeFileSynced(m.path, b); err != nil {
+	if err := writeStateSoon(m.path, b); err != nil {
 		log.Printf("bans %s: %v", m.path, err)
 	}
 }

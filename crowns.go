@@ -1351,14 +1351,14 @@ func (m *crowns) keep(st crownsSaved) {
 	}
 }
 
-// save writes the whole state now; false when it could not (it stays in memory).
+// save hands the whole state to the writer (statewrite.go, off the hub lock); false when it could not be marshalled.
 func (m *crowns) save() bool {
 	if m.path == "" {
 		return true
 	}
 	b, err := json.Marshal(crownsSaved{Owed: m.owed, Credits: m.credits, Refunds: m.refunds})
 	if err == nil {
-		err = writeFileSynced(m.path, b)
+		err = writeStateSoon(m.path, b)
 	}
 	if err != nil {
 		log.Printf("crowns %s: %v", m.path, err)
