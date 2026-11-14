@@ -2,7 +2,7 @@ package main
 
 // The shared quoins' state file (quoins.go): a quoin someone grabbed stays gone
 // for everyone until its respawn_time is up (the longest are an hour), and each
-// player's grabs this game day keep counting towards quoinCreditDaily, across a
+// player's grabs (and currants shards) this game day keep counting towards quoinCreditDaily, across a
 // restart of this server. Without it a restart put every grabbed quoin back at
 // once and started the day's count again, so the same quoins could be grabbed
 // and credited twice. -quoins-file (default realtime-quoins.json beside
@@ -29,6 +29,8 @@ type quoinsFile struct {
 	Gone  map[string]map[string]int64 `json:"gone"`  // street -> spot index -> Unix ms it comes back
 	Day   int64                       `json:"day"`   // the game day of grabs
 	Grabs map[int64]int               `json:"grabs"` // player -> grabs that day
+	// player -> currants shards credited that day (quoins.go credit)
+	Shards map[int64]int `json:"shards,omitempty"`
 }
 
 func (m *quoinsModule) today() int64 {
@@ -77,6 +79,11 @@ func (m *quoinsModule) load() error {
 				m.grabs[id] = quoinDay{day: f.Day, n: c}
 			}
 		}
+		for id, c := range f.Shards {
+			if id > 0 && c > 0 {
+				m.shardsGot[id] = quoinDay{day: f.Day, n: c}
+			}
+		}
 	}
 	m.resumed = n == 0
 	for street, list := range m.due {
@@ -122,6 +129,14 @@ func (m *quoinsModule) save() bool {
 	for id, g := range m.grabs {
 		if g.day == f.Day && g.n > 0 {
 			f.Grabs[id] = g.n
+		}
+	}
+	for id, g := range m.shardsGot {
+		if g.day == f.Day && g.n > 0 {
+			if f.Shards == nil {
+				f.Shards = map[int64]int{}
+			}
+			f.Shards[id] = g.n
 		}
 	}
 	b, err := json.Marshal(f)

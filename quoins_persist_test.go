@@ -92,3 +92,23 @@ func TestGrabbedQuoinsStayGoneAcrossARestart(t *testing.T) {
 		t.Fatalf("five hours on: gone %v, grabs %v", gone, r.mod.grabs)
 	}
 }
+
+func TestTheDaysCreditedShardsCountAcrossARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "quoins.json")
+	start := time.UnixMilli(gameEpochMs + 2000*gameDayMs + 60_000)
+	r := newQuoinRigAt(t, path, start)
+	caughtCredits(r.hub)
+	ada := joinAt(r.hub, 1, "Ada", "GQTEST", 4000, touchY)
+	joinAt(r.hub, 2, "Bo", "GQTEST", 4010, touchY)
+	send(r.hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 3})
+	lastOf(t, ada, "quoin_got")
+	r.advance(time.Second) // the save
+	r = newQuoinRigAt(t, path, r.now.Add(10*time.Second))
+	if g := r.mod.shardsGot[2]; g.n != 1 {
+		t.Fatalf("Bo's shards after the restart: %+v", g)
+	}
+	r = newQuoinRigAt(t, path, r.now.Add(5*time.Hour))
+	if len(r.mod.shardsGot) != 0 {
+		t.Fatalf("a new game day: %+v", r.mod.shardsGot)
+	}
+}

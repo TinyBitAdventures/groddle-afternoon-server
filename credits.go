@@ -7,9 +7,11 @@ package main
 //
 //   - quoins.go: a currants quoin's grab, its benefit times the grabber's
 //     multiplier (items/quoin.js 161-174; the multiplier as the client reports
-//     it, at most the source's quoin_capacity_limit 100, config_base.js:252),
+//     it, at most what the ticket's level could have bought, quoinMultCeiling,
+//     and never past the source's quoin_capacity_limit 100, config_base.js:252),
 //     while the grabber has grabbed fewer than quoinCreditDaily quoins this
-//     game day; and each currants shard (quoin.js 107-118).
+//     game day; and that grab's currants shards (quoin.js 107-118), each
+//     receiver's first quoinCreditDaily of the game day.
 //   - races.go: the winner's 100 currants (players/inc_games.js:1374
 //     games_end_race, :1574 games_end_quoin_grab).
 //   - objects.go: what a player takes from a shared rock, tree, Wood Tree or

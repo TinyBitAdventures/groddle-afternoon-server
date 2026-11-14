@@ -19,8 +19,11 @@ package main
 // 159) and applying the reward stay with the claimer's client, as in solo.
 // Currants are the ledger's, so a currants grab and each currants shard are
 // also credited to the site (credits.go): the benefit times the multiplier
-// the claimer reported (quoin_status, capped at the source's 100), for the
-// first quoinCreditDaily grabs of a game day.
+// the claimer reported (quoin_status), held to what the level on the
+// player's ticket could have bought (quoinMultCeiling, at most the source's
+// 100), for the first quoinCreditDaily grabs of a game day; and a grab
+// within that count credits its currants shards, each receiver's first
+// quoinCreditDaily shards of the game day.
 // Personal quoins (Qurazy, quest and demo quoins, private instances) never
 // come here.
 //
@@ -86,6 +89,64 @@ const (
 	statusPerSec = 4
 	maxQuoinMult = 100.0
 )
+
+// The quoin multiplier a level can have bought (quoinMultCeiling). The
+// multiplier only grows by buying "Add {amount} To Your Quoin Multiplier"
+// cards with imagination (js/imagination.js optionRows, GSJS
+// inc_data_imagination.js 6050 imagination_get_quoin_multiplier), each unit
+// at its tier's cost_per (the tier is the whole part of the multiplier now),
+// and imagination comes with xp (js/progression.js: gameplay rewards add to
+// both). The margins are ours, generous so honest play never meets the
+// ceiling: the xp a level can hold is taken a level up (a level gained
+// since the ticket), three times over (imagination from food and other
+// sources that give no xp) plus quoinMultSpare, and one more whole card on
+// top (a 1.0 card bought just under a tier's edge).
+const (
+	quoinMultSpare  = 10000
+	quoinMultMargin = 3
+)
+
+// quoinMultTiers is cost_per by tier, 1 through 25 (imagination-data.js
+// quoin_multiplier options; options 100 repeats 25's 50000 to the cap).
+var quoinMultTiers = [...]float64{200, 400, 1200, 3000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000, 22500, 25000, 27500, 30000, 32500, 35000, 37500, 40000, 42500, 45000, 47500, 50000}
+
+// xpForLevel is js/progression.js XP_FOR_LEVEL: the lifetime xp each level from 2 to 60 starts at.
+var xpForLevel = [...]float64{
+	400, 1091, 2180, 3795, 6085, 9219, 13393, 18826, 25766, 34490,
+	45305, 58551, 74604, 93876, 116819, 143924, 175726, 212806, 255793,
+	305366, 362256, 427250, 501193, 584989, 679606, 786079, 905510,
+	1039074, 1188021, 1353678, 1537454, 1740841, 1965421, 2212865,
+	2484939, 2783508, 3110539, 3468103, 3858382, 4283670, 4746380,
+	5249045, 5794324, 6385006, 7024015, 7714412, 8459403, 9262341,
+	10126733, 11056241, 12054692, 13126080, 14274570, 15504507,
+	16820419, 18227022, 19729227, 21332145, 23041093,
+}
+
+// quoinMultCeiling is the most quoin multiplier a character of this level
+// counts for: what all the imagination its level (one up) can hold, with
+// the margins above, buys from 1, plus one card, at most 100. Level 0 (a
+// ticket that names none) is the source's cap alone.
+func quoinMultCeiling(level int) float64 {
+	if level <= 0 {
+		return maxQuoinMult
+	}
+	// The xp a character one level up can hold: the next level's start, or level 60's for the top.
+	next := min(level+1, len(xpForLevel))
+	budget := xpForLevel[next-1]*quoinMultMargin + quoinMultSpare
+	mult := 1.0
+	for mult < maxQuoinMult {
+		tier := int(mult)
+		cost := quoinMultTiers[min(tier, len(quoinMultTiers))-1]
+		step := float64(tier+1) - mult // to the next tier's edge
+		if budget < step*cost {
+			mult += budget / cost
+			break
+		}
+		budget -= step * cost
+		mult = float64(tier + 1)
+	}
+	return math.Min(maxQuoinMult, mult+1)
+}
 
 // quoinShardTypes: quoin.js 84, only these share.
 var quoinShardTypes = map[string]bool{"xp": true, "mood": true, "energy": true, "currants": true}
@@ -169,6 +230,8 @@ type quoinsModule struct {
 	status map[int64]*quoinStatus
 	// grabs[id]: natural quoins a player grabbed this game day, for the credits' daily count.
 	grabs map[int64]quoinDay
+	// shardsGot[id]: currants shards credited to a player this game day (credit).
+	shardsGot map[int64]quoinDay
 	// randInt is the source's randInt (common.js 691: lo..hi, both included).
 	randInt func(lo, hi int) int
 	// pick is 0..n-1, each as likely: a mystery quoin's kind.
@@ -193,15 +256,16 @@ func newQuoins(h *Hub) Module {
 
 func newQuoinsWith(h *Hub, d *quoinData) *quoinsModule {
 	m := &quoinsModule{
-		h:       h,
-		data:    d,
-		gone:    map[string]map[int]func() bool{},
-		status:  map[int64]*quoinStatus{},
-		grabs:   map[int64]quoinDay{},
-		randInt: func(lo, hi int) int { return lo + rand.IntN(hi-lo+1) },
-		pick:    rand.IntN,
-		due:     map[string]map[int]time.Time{},
-		resumed: true,
+		h:         h,
+		data:      d,
+		gone:      map[string]map[int]func() bool{},
+		status:    map[int64]*quoinStatus{},
+		grabs:     map[int64]quoinDay{},
+		shardsGot: map[int64]quoinDay{},
+		randInt:   func(lo, hi int) int { return lo + rand.IntN(hi-lo+1) },
+		pick:      rand.IntN,
+		due:       map[string]map[int]time.Time{},
+		resumed:   true,
 	}
 	if m.path = statePath(quoinsFileForTest, quoinsFileFlag, "realtime-quoins.json"); m.path != "" {
 		if err := m.load(); err != nil {
@@ -304,7 +368,7 @@ func (m *quoinsModule) setStatus(cl *Client, frame json.RawMessage) {
 		return
 	}
 	st.afk, st.following = msg.AFK, msg.Following
-	st.mult = cleanMult(msg.Mult)
+	st.mult = math.Min(cleanMult(msg.Mult), quoinMultCeiling(cl.Level()))
 }
 
 // cleanMult keeps a reported quoin multiplier to 1..100 (js/quoins.js normalizeQuoinState).
@@ -390,25 +454,37 @@ type quoinDay struct {
 	n   int
 }
 
-// credit tells the site's ledger the currants a grab gave (credits.go): the
-// grabber's round(amount * multiplier) (quoin.js 171-174), while this game
-// day's grabs, every type counted as quoins_today counts them, are within
-// quoinCreditDaily; and every currants shard as sent.
+// credit tells the site's ledger the currants a grab gave (credits.go), while
+// this game day's grabs, every type counted as quoins_today counts them, are
+// within quoinCreditDaily: the grabber's round(amount * multiplier) (quoin.js
+// 171-174), and each currants shard as sent to a receiver who has had fewer
+// than quoinCreditDaily credited this game day. A grab past the count credits
+// no shards either: quoin.js 159 refuses that grab before any shard
+// (distributeQuoinShards, 169). The receivers' count is ours: the source has
+// no limit on shards; it is the grabs' own number, counted apart, so shards
+// never cut into a player's own grabs.
 func (m *quoinsModule) credit(cl *Client, typ string, amount int, mult float64, shards []QuoinShard) {
-	day := int64(math.Floor(float64(m.h.Now().UnixMilli()-gameEpochMs) / gameDayMs))
+	day := m.today()
 	g := m.grabs[cl.ID()]
 	if g.day != day {
 		g = quoinDay{day: day}
 	}
 	g.n++
 	m.grabs[cl.ID()] = g
-	if typ != "currants" {
+	if typ != "currants" || g.n > quoinCreditDaily {
 		return
 	}
-	if g.n <= quoinCreditDaily {
-		creditLocked(m.h, cl.ID(), "quoin", tradeGoods{Currants: int64(math.Round(float64(amount) * mult))})
-	}
+	creditLocked(m.h, cl.ID(), "quoin", tradeGoods{Currants: int64(math.Round(float64(amount) * mult))})
 	for _, s := range shards {
+		got := m.shardsGot[s.ID]
+		if got.day != day {
+			got = quoinDay{day: day}
+		}
+		if got.n >= quoinCreditDaily {
+			continue
+		}
+		got.n++
+		m.shardsGot[s.ID] = got
 		creditLocked(m.h, s.ID, "shard", tradeGoods{Currants: int64(s.Amount)})
 	}
 }

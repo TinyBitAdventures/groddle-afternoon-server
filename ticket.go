@@ -31,6 +31,10 @@ type Claims struct {
 	Cone bool `json:"cone,omitempty"`
 	// Mod: a moderator's restrictions that stand when the ticket was made (moderation.go).
 	Mod *modClaim `json:"mod,omitempty"`
+	// Lvl is the level the character's ledger has credited (RealtimeTicket.php ledgerLevel): a reported
+	// quoin multiplier counts for no more than that level could have bought (quoins.go quoinMultCeiling).
+	// 0 or absent (a ticket from a site before it) leaves the multiplier at the source's cap.
+	Lvl int `json:"lvl,omitempty"`
 }
 
 // login is the claims' login id: Acct, or the character's own id when the ticket names none.

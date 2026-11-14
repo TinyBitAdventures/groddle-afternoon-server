@@ -87,9 +87,10 @@ var coreKinds = map[string]struct{}{"auth": {}, "join": {}, "move": {}, "chat": 
 
 // Helpers for modules. All need the hub lock, which every handler and hook already holds.
 
-// ID, Name, Street and Pos read a client.
+// ID, Name, Level, Street and Pos read a client.
 func (cl *Client) ID() int64           { return cl.id }
 func (cl *Client) Name() string        { return cl.name }
+func (cl *Client) Level() int          { return cl.lvl }
 func (cl *Client) Street() string      { return cl.street }
 func (cl *Client) Pos() (x, y float64) { return cl.player.X, cl.player.Y }
 func (cl *Client) Online() bool        { return !cl.closed }

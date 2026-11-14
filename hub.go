@@ -107,6 +107,7 @@ type Client struct {
 	id     int64
 	acct   int64 // the login (Claims.Acct; the character's own id when it has none). Never sent to anyone.
 	name   string
+	lvl    int // Claims.Lvl: the ledger's level when the ticket was made (0: not given)
 	send   chan []byte
 	done   chan struct{}
 	closed bool
@@ -229,7 +230,7 @@ func (h *Hub) Stats() (players, streets int) {
 // Connect adds a character, closing any socket it already had, and the game socket of any other
 // character of the same login (closeOtherCharacter): that one goes offline as if it had left.
 func (h *Hub) Connect(c Claims) *Client {
-	cl := &Client{id: c.Sub, acct: c.login(), name: c.Name, send: make(chan []byte, sendBuffer), done: make(chan struct{}), chatTokens: chatBurst, chatAt: h.now(), at: h.now()}
+	cl := &Client{id: c.Sub, acct: c.login(), name: c.Name, lvl: c.Lvl, send: make(chan []byte, sendBuffer), done: make(chan struct{}), chatTokens: chatBurst, chatAt: h.now(), at: h.now()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.noteConnectLocked(cl)

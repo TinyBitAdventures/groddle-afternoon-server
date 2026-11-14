@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -250,13 +251,13 @@ func TestACurrantsQuoinCreditsTheGrabAndTheShards(t *testing.T) {
 	if len(*got) != 0 {
 		t.Fatalf("an xp quoin credits nothing: %+v", *got)
 	}
-	// Past quoinCreditDaily grabs in a game day the grab is not credited (its shards still are).
+	// Past quoinCreditDaily grabs in a game day neither the grab nor its shards are credited.
 	mod.grabs[1] = quoinDay{day: mod.grabs[1].day, n: quoinCreditDaily}
 	mod.gone = map[string]map[int]func() bool{}
 	send(hub, ada, map[string]any{"t": "move", "x": 4000, "y": touchY})
 	send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 3})
 	lastOf(t, ada, "quoin_got")
-	if len(*got) != 1 || (*got)[0].Why != "shard" {
+	if len(*got) != 0 {
 		t.Fatalf("the 151st grab of the day: %+v", *got)
 	}
 	// A new game day counts from zero.
@@ -267,6 +268,112 @@ func TestACurrantsQuoinCreditsTheGrabAndTheShards(t *testing.T) {
 	if len(*got) != 2 || (*got)[0].Why != "quoin" || mod.grabs[1].n != 1 {
 		t.Fatalf("a new day: %+v %+v", *got, mod.grabs[1])
 	}
+}
+
+// joinWithLevel is joinAt with the ledger's level on the ticket.
+func joinWithLevel(hub *Hub, id int64, name, street string, x, y float64, lvl int) *Client {
+	cl := hub.Connect(Claims{Sub: id, Name: name, Lvl: lvl})
+	send(hub, cl, map[string]any{"t": "join", "street": street, "x": x, "y": y})
+	return cl
+}
+
+func TestTheQuoinMultiplierCeilingGrowsWithLevelUpToTheSourceCap(t *testing.T) {
+	if quoinMultCeiling(0) != maxQuoinMult {
+		t.Fatal("a ticket that names no level keeps the source's cap")
+	}
+	prev := 0.0
+	for lvl := 1; lvl <= 60; lvl++ {
+		c := quoinMultCeiling(lvl)
+		if c < prev || c > maxQuoinMult {
+			t.Fatalf("level %d: %v after %v", lvl, c, prev)
+		}
+		prev = c
+	}
+	if prev != maxQuoinMult {
+		t.Fatalf("level 60 can reach the cap: %v", prev)
+	}
+	// Level 1 holds at most 1091 xp a level up: 3 x 1091 + 10000 imagination buys 1 to 6.75, one card more is 7.75.
+	if c := quoinMultCeiling(1); math.Abs(c-7.7455) > 0.001 {
+		t.Fatalf("level 1: %v", c)
+	}
+	// What honest play has bought stays under it: 25 levels of xp spent wholly on the multiplier (no margins) cannot pass level 25's ceiling.
+	budget, mult := xpForLevel[24], 1.0
+	for budget > 0 && mult < maxQuoinMult {
+		cost := quoinMultTiers[min(int(mult), len(quoinMultTiers))-1] * 0.25
+		if budget < cost {
+			break
+		}
+		budget, mult = budget-cost, mult+0.25
+	}
+	if mult > quoinMultCeiling(25) {
+		t.Fatalf("level 25 spent all its xp to %v, past its ceiling %v", mult, quoinMultCeiling(25))
+	}
+}
+
+func TestAReportedMultiplierCountsForNoMoreThanTheTicketsLevelCouldBuy(t *testing.T) {
+	hub, mod, _ := quoinHub(t, testQuoinData())
+	got := caughtCredits(hub)
+	ada := joinWithLevel(hub, 1, "Ada", "GQTEST", 4000, touchY, 1)
+	send(hub, ada, map[string]any{"t": "quoin_status", "mult": 100})
+	frames(ada)
+	if st := mod.status[1]; st.mult != quoinMultCeiling(1) {
+		t.Fatalf("level 1 reporting 100 counts for %v", st.mult)
+	}
+	// fast tiny currants: benefit 1 x 7.7455 rounds to 8, not 100.
+	send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 3})
+	lastOf(t, ada, "quoin_got")
+	if len(*got) != 1 || !sameCredit((*got)[0], creditEvent{User: 1, Why: "quoin", Got: tradeGoods{Currants: 8}}) {
+		t.Fatalf("credits %+v", *got)
+	}
+	// A multiplier under the ceiling counts as reported.
+	send(hub, ada, map[string]any{"t": "quoin_status", "mult": 3.5})
+	if st := mod.status[1]; st.mult != 3.5 {
+		t.Fatalf("an honest 3.5 counts for %v", st.mult)
+	}
+	// A shard's receiver is held to their own ticket's level too.
+	*got = nil
+	bo := joinWithLevel(hub, 2, "Bo", "GQTEST", 4010, touchY, 1)
+	send(hub, bo, map[string]any{"t": "quoin_status", "mult": 100})
+	mod.gone = map[string]map[int]func() bool{}
+	send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 3})
+	if len(*got) != 2 || !sameCredit((*got)[1], creditEvent{User: 2, Why: "shard", Got: tradeGoods{Currants: 4}}) {
+		t.Fatalf("Bo's shard, half of 1 x 7.7455: %+v", *got)
+	}
+}
+
+func TestCurrantsShardsStopAtTheDailyCountPerReceiver(t *testing.T) {
+	hub, mod, _ := quoinHub(t, testQuoinData())
+	got := caughtCredits(hub)
+	ada := joinAt(hub, 1, "Ada", "GQTEST", 4000, touchY)
+	bo := joinAt(hub, 2, "Bo", "GQTEST", 4010, touchY)
+	cy := joinAt(hub, 3, "Cy", "GQTEST", 3990, touchY)
+	frames(ada)
+	grab := func() {
+		mod.gone = map[string]map[int]func() bool{}
+		mod.grabs[1] = quoinDay{day: mod.today(), n: 0}
+		send(hub, ada, map[string]any{"t": "quoin_claim", "street": "GQTEST", "i": 3})
+		lastOf(t, ada, "quoin_got")
+	}
+	grab()
+	if len(*got) != 3 || mod.shardsGot[2].n != 1 || mod.shardsGot[3].n != 1 {
+		t.Fatalf("the grab and two shards: %+v %+v", *got, mod.shardsGot)
+	}
+	// Bo has had a day's count of shards: Cy's still come, Bo's stop.
+	*got = nil
+	mod.shardsGot[2] = quoinDay{day: mod.today(), n: quoinCreditDaily}
+	grab()
+	if len(*got) != 2 || (*got)[0].User != 1 || (*got)[1].User != 3 || mod.shardsGot[2].n != quoinCreditDaily {
+		t.Fatalf("past Bo's count: %+v", *got)
+	}
+	// A new game day counts from zero.
+	*got = nil
+	mod.shardsGot[2] = quoinDay{day: mod.today() - 1, n: quoinCreditDaily}
+	grab()
+	if len(*got) != 3 || mod.shardsGot[2].n != 1 {
+		t.Fatalf("a new day: %+v %+v", *got, mod.shardsGot[2])
+	}
+	frames(bo)
+	frames(cy)
 }
 
 func TestARaceWinCreditsTheWinnerOnly(t *testing.T) {
