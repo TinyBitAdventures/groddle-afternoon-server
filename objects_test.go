@@ -720,3 +720,17 @@ func TestTheFarLineSaysAnOldPageNeedsAReload(t *testing.T) {
 		t.Fatalf("a far wait at a Chicken answered %v", no)
 	}
 }
+
+// Player report #303 (G704): Ora Soon's Sparkly Rock matched 58 px over its floor (plat_1306883827302,
+// y 497.8 there) and the game refused it until you jumped. The game's tools/snap-placements/nodes.py
+// seats a measured rock hanging more than 25 px onto the floor beneath, and data/objects.json is built
+// from the same spots (tools/build-realtime-objects.mjs), so the server holds it where the game draws it.
+func TestOraSoonsSparklyRockSitsOnItsFloor(t *testing.T) {
+	spot := sharedWorld.streets["GHVMHDIBNA32QPF"]["rock:0"]
+	if spot == nil || spot.class != "rock_sparkly_1" || spot.x != 2857.5 {
+		t.Fatalf("Ora Soon's rock:0 reads %+v", spot)
+	}
+	if d := spot.y - 497.8; d > 0.5 || d < -0.5 {
+		t.Fatalf("Ora Soon's Sparkly Rock stands at y %.1f, its floor is at 497.8", spot.y)
+	}
+}
