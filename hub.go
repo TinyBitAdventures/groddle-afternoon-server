@@ -140,6 +140,7 @@ type Client struct {
 	chatTokens float64
 	chatAt     time.Time
 	typingAt   time.Time
+	moveW      moveWatch // movewatch.go
 
 	// web.go: a socket from the website's /chat/ (Claims.Via "web"), never in clients or on a street.
 	web     bool
@@ -190,6 +191,9 @@ type Hub struct {
 
 	// prizes.go: the day's paid wins per pair of players.
 	prizes *prizeBook
+
+	// movewatch.go: entry points, last places seen and the log's notes (made on first use).
+	moveBook *moveBook
 
 	// The close lines' reconnect-loop watch (closeNoteLocked, noteConnectLocked): connects per character a minute.
 	rates      map[int64]*connRate
@@ -355,6 +359,7 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		if cl.street == "" || !h.allowMoveLocked(cl) {
 			return
 		}
+		h.watchMoveLocked(cl, coord(m.X), coord(m.Y)) // movewatch.go: a log, never a refusal
 		cl.player.X, cl.player.Y, cl.player.Dir, cl.player.Anim = coord(m.X), coord(m.Y), sign(m.Dir), word(m.Anim, cl.player.Anim)
 		h.broadcastLocked(cl, map[string]any{"t": "moved", "id": cl.id, "x": cl.player.X, "y": cl.player.Y, "dir": cl.player.Dir, "anim": cl.player.Anim})
 	case "chat":
@@ -436,6 +441,7 @@ func (h *Hub) joinLocked(cl *Client, m *joinAsk) {
 	h.leaveLocked(cl)
 	cl.street = m.Street
 	cl.player = Player{ID: cl.id, Name: cl.name, X: coord(m.X), Y: coord(m.Y), Dir: sign(m.Dir), Anim: word(m.Anim, "idle"), Look: m.Look}
+	h.watchJoinLocked(cl) // movewatch.go: a log, never a refusal
 	room := h.streets[m.Street]
 	if room == nil {
 		room = map[int64]*Client{}
@@ -528,6 +534,7 @@ func (h *Hub) broadcastLocked(cl *Client, msg any) {
 }
 
 func (h *Hub) queueLocked(cl *Client, msg any) {
+	h.movePlacedLocked(cl, msg) // movewatch.go
 	b, _ := json.Marshal(msg)
 	h.pushLocked(cl, b)
 }
