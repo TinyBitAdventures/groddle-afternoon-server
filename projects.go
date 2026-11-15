@@ -1190,8 +1190,8 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 	}
 	winners, top := map[int64]bool{}, map[int64]bool{}
 	for i, c := range sorted {
-		// quest.js 1671: a type 5 job (a restoration) has no winners and no top five.
-		if job.Kind == "restore" {
+		// quest.js 1671: a type 5 job (a restoration, a Tower floor) has no winners and no top five.
+		if isHomeKind(job.Kind) {
 			break
 		}
 		if i < nWin {
@@ -1278,7 +1278,7 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 		if final {
 			msg["shares"] = m.sharesOf(job, r, c.ID)
 		}
-		if job.Kind == "restore" {
+		if isHomeKind(job.Kind) {
 			m.homeReward(msg, job, c.ID, share)
 		}
 		credits = append(credits, credit{c: &projCredit{ID: id, Player: c.ID, Goods: goods}, msg: msg})
@@ -1289,7 +1289,7 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 	// phase's share, the Teleportation Script to the new street and the Participant count. Those who put
 	// nothing into the last phase get it here, as a project_reward that pays nothing (no ledger part).
 	var completes []map[string]any
-	if final && job.Kind != "restore" {
+	if final && !isHomeKind(job.Kind) {
 		inLast := map[int64]bool{}
 		for _, c := range rec.Mine {
 			inLast[c.ID] = true
@@ -1329,6 +1329,9 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 	} else if final && job.Kind == "restore" {
 		r.Done = now
 		m.homeRestored(jobID, job)
+	} else if final && job.Kind == "tower" {
+		r.Done = now
+		m.towerBuilt(jobID, job) // home_projects.go, G795
 	} else if final {
 		r.Done = now
 		r.Option = option

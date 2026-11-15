@@ -31,15 +31,35 @@ package main
 // Dead on the proto or remove it: everything put in is lost, as in the
 // source. A finished restoration is forgotten two hours later.
 //
+// Tower floors (G795, kind "tower"): once a Tower's owner starts a floor at the
+// Workbench (tower.js tower_start_expand, the owner's alone), the floor is a
+// project everyone on the floor under construction shares. In Glitch it was a
+// Workbench job (items/tower_expander.js configureJob, quests/job_tower_floor_3
+// ..9.js, quest type 5) and items/include/jobs.js let anyone put items and
+// work into a job with no owner check; the rest of the Tower's verbs were the
+// owner's (furniture_tower_chassis.js pols_is_owner). The site signs it from
+// the owner's stored save ({k: home_tower, sub, o, job, floor, got}); its id is
+// t<owner>-<floor>, base 36, its street TOWER_<owner>_<floor - 1> (the floor
+// under construction, homes.go towerOwner), its one phase job_tower_floor_<n>
+// at divisor 1 (data/projects.json, the game's js/home-tower.js TOWER_JOBS).
+// got is what the owner put in alone before the floor was shared: taken once,
+// when the project is made, each count cut to its requirement's need. The
+// rules otherwise are a restoration's (no winners, no rewards in the class,
+// the Philanthropic Member badge for a visitor over half: inc_jobs.js 420-470
+// covers every type 5 job). Finished, the owner is told home_tower_floor until
+// they ack it, and the game adds the floor (tower.js tower_end_expand). There
+// is no drop: a started floor in the source could not be given up.
+//
 // Client to server:
 //
-//	{"t":"project_home","token":"…"}       a restoration the site vouches for (then project_state for it)
+//	{"t":"project_home","token":"…"}       a restoration or a Tower floor the site vouches for (then project_state for it)
 //	{"t":"project_home_drop","job":"h7-c-1"}  the owner gives it up
 //
 // Server to client (beside projects.go's):
 //
 //	{"t":"project_reward",…,"owner":7,"yard":"street","philanthropic":true}
 //	{"t":"home_restored","id":"job-h-h7-c-1","job":"h7-c-1","proto":"proto_metal_rock","yard":"street"}   to the owner (ack it)
+//	{"t":"home_tower_floor","id":"job-h-t7-3","job":"t7-3","floor":3}   to the owner (ack it): the floor is built
 
 import (
 	"encoding/json"
@@ -51,14 +71,17 @@ import (
 )
 
 const (
-	homeJobsPerOwner = 120            // ours: more than a full yard and back yard of cultivations
-	homeJobForget    = 2 * time.Hour  // a finished restoration is dropped after this (longer than a token lives)
+	homeJobsPerOwner = 120           // ours: more than a full yard and back yard of cultivations
+	homeJobForget    = 2 * time.Hour // a finished restoration is dropped after this (longer than a token lives)
 	homeRestoredPre  = "job-h-"
 
 	projectTextNotYours = "Only the owner can give up this project." // ours
 )
 
 var homeJobRe = regexp.MustCompile(`^([hy])([0-9a-z]{1,8})-[0-9a-z]{1,4}-[0-9a-z]{1,2}$`)
+
+// towerJobRe is a Tower floor's id: t, the owner and the floor being built (3..9), base 36.
+var towerJobRe = regexp.MustCompile(`^t([0-9a-z]{1,8})-([3-9])$`)
 
 type projRestoration struct {
 	Phases []projPhaseDef `json:"phases"`
@@ -73,7 +96,13 @@ type homeRestoreClaims struct {
 	Yard  string  `json:"yard"`
 	Mult  float64 `json:"mult"`
 	Exp   int64   `json:"exp"`
+	// A Tower floor's (k home_tower): the floor being built and what the owner put in alone so far.
+	Floor int              `json:"floor"`
+	Got   map[string]int64 `json:"got"`
 }
+
+// isHomeKind: a project on someone's home, made from the site's word (a restoration or a Tower floor).
+func isHomeKind(kind string) bool { return kind == "restore" || kind == "tower" }
 
 // job is a project's definition: the table's, or a restoration made at a home.
 func (m *projects) job(id string) (projJob, bool) {
@@ -94,8 +123,31 @@ func homeStreetOf(owner int64, yard string) string {
 	return homeStreetPrefix + strconv.FormatInt(owner, 10)
 }
 
-// homeJobOK checks a restoration's definition against its id and the table.
+// towerFloorJob is a Tower floor's definition from its owner and the floor being built.
+func towerFloorJob(owner int64, floor int) projJob {
+	street := towerStreetPrefix + strconv.FormatInt(owner, 10) + "_" + strconv.Itoa(floor-1)
+	return projJob{Kind: "tower", Street: street, Offer: []string{street}, Phases: []projPhaseDef{{C: "job_tower_floor_" + strconv.Itoa(floor)}}, Divisor: 1, Owner: owner, Mult: 1}
+}
+
+// towerJobOK checks a Tower floor's definition against its id and the table.
+func (m *projects) towerJobOK(id string, j projJob) bool {
+	sub := towerJobRe.FindStringSubmatch(id)
+	if sub == nil || j.Kind != "tower" || j.Owner <= 0 || strconv.FormatInt(j.Owner, 36) != sub[1] {
+		return false
+	}
+	floor, _ := strconv.Atoi(sub[2])
+	want := towerFloorJob(j.Owner, floor)
+	if _, ok := m.t.Classes[want.Phases[0].C+"/1"]; !ok {
+		return false
+	}
+	return len(j.Phases) == 1 && j.Phases[0] == want.Phases[0] && j.Divisor == 1 && j.Street == want.Street && len(j.Offer) == 1 && j.Offer[0] == want.Street
+}
+
+// homeJobOK checks a restoration's (or a Tower floor's) definition against its id and the table.
 func (m *projects) homeJobOK(id string, j projJob) bool {
+	if j.Kind == "tower" {
+		return m.towerJobOK(id, j)
+	}
 	sub := homeJobRe.FindStringSubmatch(id)
 	if sub == nil || j.Kind != "restore" || j.Owner <= 0 || strconv.FormatInt(j.Owner, 36) != sub[2] {
 		return false
@@ -119,9 +171,13 @@ func (m *projects) homeJobOK(id string, j projJob) bool {
 	return j.Divisor == 1 && j.Street == street && len(j.Offer) == 1 && j.Offer[0] == street && j.Mult >= 1 && j.Mult <= 2
 }
 
-// homeOffer is the restorations on a home street or in a house, in id order (for project_sync).
+// homeOffer is the restorations on a home street or in a house, and a Tower's floor under
+// construction on that floor, in id order (for project_sync).
 func (m *projects) homeOffer(street string) []string {
 	owner, _ := homeOwner(street)
+	if owner == 0 {
+		owner = towerOwner(street)
+	}
 	if owner == 0 {
 		return nil
 	}
@@ -145,7 +201,7 @@ func (m *projects) homeJob(cl *Client, frame json.RawMessage) {
 	err := errBuddyOff
 	if len(m.secret) > 0 {
 		err = errBuddyToken
-		if raw, e := signedBody(m.secret, msg.Token); e == nil && json.Unmarshal(raw, &c) == nil && c.K == "home_restore" && c.O > 0 {
+		if raw, e := signedBody(m.secret, msg.Token); e == nil && json.Unmarshal(raw, &c) == nil && (c.K == "home_restore" || c.K == "home_tower") && c.O > 0 {
 			switch {
 			case c.Sub != cl.ID():
 				err = errBuddyOwner
@@ -164,6 +220,10 @@ func (m *projects) homeJob(cl *Client, frame json.RawMessage) {
 	id := c.Job
 	if have := m.st.Homes[id]; have != nil {
 		m.h.SendLocked(cl, map[string]any{"t": "project_state", "job": id, "now": m.ms(), "row": m.rowJSON(id, m.st.Jobs[id], cl.ID())})
+		return
+	}
+	if c.K == "home_tower" {
+		m.towerJob(cl, id, c)
 		return
 	}
 	yard := "street"
@@ -198,6 +258,56 @@ func (m *projects) homeJob(cl *Client, frame json.RawMessage) {
 	m.h.SendLocked(cl, map[string]any{"t": "project_state", "job": id, "now": m.ms(), "row": m.rowJSON(id, nil, cl.ID())})
 }
 
+// towerJob makes a Tower floor's project from the site's word: what the owner put in alone so far
+// is its start, each count cut to its requirement's need (an id the floor does not have is left out).
+func (m *projects) towerJob(cl *Client, id string, c homeRestoreClaims) {
+	j := towerFloorJob(c.O, c.Floor)
+	if !m.towerJobOK(id, j) {
+		m.refuse(cl, projectTextNoJob)
+		return
+	}
+	n := 0
+	for _, h := range m.st.Homes {
+		if h.Owner == c.O {
+			n++
+		}
+	}
+	if n >= homeJobsPerOwner {
+		m.refuse(cl, projectTextNotSaved)
+		return
+	}
+	cls, _ := m.t.class(j, 0)
+	got := map[string]int64{}
+	for _, q := range cls.Reqs {
+		if v := c.Got[q.ID]; v > 0 {
+			got[q.ID] = min(v, q.Need)
+		}
+	}
+	m.st.Homes[id] = &j
+	r := m.row(id)
+	r.Got = got
+	if !m.save() {
+		delete(m.st.Homes, id)
+		delete(m.st.Jobs, id)
+		m.refuse(cl, projectTextNotSaved)
+		return
+	}
+	log.Printf("project %s: floor %d of %d's Tower opened by %d (%d requirements started)", id, c.Floor, c.O, cl.ID(), len(got))
+	m.h.SendLocked(cl, map[string]any{"t": "project_state", "job": id, "now": m.ms(), "row": m.rowJSON(id, r, cl.ID())})
+	// Everything the owner had put in alone may already be the whole floor.
+	m.settleIfComplete(id)
+}
+
+// towerBuilt is tower_end_expand for the owner: the floor is built, told until acked.
+func (m *projects) towerBuilt(jobID string, job projJob) {
+	floor := 0
+	if sub := towerJobRe.FindStringSubmatch(jobID); sub != nil {
+		floor, _ = strconv.Atoi(sub[2])
+	}
+	log.Printf("project %s done: floor %d of %d's Tower built", jobID, floor, job.Owner)
+	m.owe(job.Owner, homeRestoredPre+jobID, map[string]any{"t": "home_tower_floor", "id": homeRestoredPre + jobID, "job": jobID, "floor": floor})
+}
+
 // homeDrop is the owner giving a restoration up (Wine of the Dead, or the proto removed): what was put in is lost.
 func (m *projects) homeDrop(cl *Client, frame json.RawMessage) {
 	var msg struct {
@@ -207,8 +317,8 @@ func (m *projects) homeDrop(cl *Client, frame json.RawMessage) {
 		return
 	}
 	j := m.st.Homes[msg.Job]
-	if j == nil {
-		return
+	if j == nil || j.Kind == "tower" {
+		return // a started Tower floor could not be given up in the source
 	}
 	if j.Owner != cl.ID() {
 		m.refuse(cl, projectTextNotYours)
