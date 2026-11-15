@@ -42,6 +42,7 @@ package main
 //
 //	{"t":"feat_add","feat":"animal_love","n":1}                       a contribution the client made
 //	{"t":"feat_add","feat":"streaking","n":1,"act":"streak","street":"GA5…"}   a Feat whose reports name the act
+//	{"t":"feat_add","feat":"donate_sparkly","n":189,"op":"fdon-…","c":"sparkly"}   a donation the ledger confirms (below)
 //	{"t":"feat_ack","id":"feat-r-…"}                                  you applied a feat_first / feat_reward and saved
 //	{"t":"feat_sync"}                                                  on connect: the Feat, and what you are owed
 //	{"t":"feat_dev","end_in":30,"feat":"tottlys_toys"}                QA only, GRODDLE_FEATS_DEV=1
@@ -77,6 +78,18 @@ package main
 // modules that see a contribution themselves count it through
 // Provide("feats.count") with no pace.
 //
+// Donations (G786, #361): Glitch counted every chunk given (groups/feat.js
+// increment adds the full amount, its clamp at line 29 commented out;
+// players/inc_feats.js feats_increment passes it through; the donate_sparkly
+// vog_text counts each chunk). A Feat whose table names a "donate" class
+// takes a report with a spend id ("op":"fdon-<16 hex>","c":"sparkly"): the
+// server spends that many of the class from the player's ledger (the site's
+// ledger/spend, why feat_donation, LedgerSpend.php), and a settled spend
+// counts all of it at once, at no pace. What the ledger cannot confirm (a
+// refusal, no answer, a report without a spend) counts at the pace, and the
+// rest is carried over at the pace (the run's carry, drained while the player
+// is online) rather than dropped. Each spend id counts once.
+//
 // Rewards (the Feat met its minimum goal): every contributor gets the
 // doBreakIt reward times the pool's scale, min(total, supermegabonus) over the
 // minimum goal, Math.round, and a Small Petrified Rock; places 1 to 13 also a
@@ -106,6 +119,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -124,7 +138,12 @@ const (
 	featKeepFirst   = 4_000   // the streets kept per player for first-street (the archive has 1,422)
 	featKeepDays    = 4       // UTC days of active players kept
 	featDayMax      = 100_000 // the most players one day keeps (a bound)
+
+	featDonationWhy = "feat_donation" // LedgerSpend.php's why for a donation Feat's spend
 )
+
+// featDonationRe is a donation's spend id (LedgerSpend.php opId; the game's feats-mp.js donationOp).
+var featDonationRe = regexp.MustCompile(`^fdon-[0-9a-f]{16}$`)
 
 var featsFileFlag = flag.String("feats-file", "", "file that keeps the shared Feat, who contributed and was rewarded, and the rewards not yet applied (default: realtime-feats.json beside -secret-file; off: memory only)")
 
@@ -156,6 +175,7 @@ type featDef struct {
 	Pace      featPace           `json:"pace"`
 	Acts      map[string]featAct `json:"acts"`
 	Elsewhere bool               `json:"elsewhere"` // the game counts its first feats:contributed itself
+	Donate    string             `json:"donate"`    // G786: the class a donation Feat counts, spent through the ledger
 }
 
 type featRewardDef struct {
@@ -206,8 +226,10 @@ type featRun struct {
 	Super   int64           `json:"super,omitempty"`
 	Basis   int64           `json:"basis,omitempty"` // yesterday's active players the goals came from, -1 unknown (0 with no goals: the table's)
 	Players []*featEntry    `json:"players"`
-	Seen    map[string]bool `json:"seen,omitempty"` // dedupe keys (streets streaked, qurazy streets)
-	idx     map[int64]*featEntry
+	Seen    map[string]bool `json:"seen,omitempty"` // dedupe keys (streets streaked, qurazy streets, donation spend ids)
+	// Carry (G786): per player, a donation Feat's amount reported but not yet counted, counted at the pace.
+	Carry map[int64]int64 `json:"carry,omitempty"`
+	idx   map[int64]*featEntry
 }
 
 type featTopRow struct {
@@ -270,6 +292,11 @@ type featLedger interface {
 	feat(id string, user int64, got tradeGoods) ledgerAnswer
 }
 
+// featSpender is the site's ledger/spend for a donation Feat (party_spaces.go httpLedger.spend).
+type featSpender interface {
+	spend(op string, id int64, gave tradeGoods, why string) ledgerAnswer
+}
+
 func (l *httpLedger) feat(id string, user int64, got tradeGoods) ledgerAnswer {
 	return l.call(ledgerRouteFeat, map[string]any{"id": id, "user": user, "got": goodsJSON(got)})
 }
@@ -285,13 +312,15 @@ type feats struct {
 	t       featTable
 	st      *featState
 	path    string
-	ledger  featLedger // nil: no ledger (see trusted)
-	trusted bool       // -trade-ledger off: rewards' currants are the client's (development only)
+	ledger  featLedger  // nil: no ledger (see trusted)
+	spender featSpender // nil: no ledger; a donation counts at the pace (or in full when trusted)
+	trusted bool        // -trade-ledger off: rewards' currants are the client's (development only)
 	spawn   func(func())
 	dev     bool
 
 	buckets    map[int64]map[string]*featBucket
 	endStop    func() bool
+	carryAt    bool   // a drain of the carry is due (G786)
 	progressAt bool   // a feat_progress is due
 	saveAt     bool   // a save is due
 	dayAt      string // the UTC day players were last counted for (noteDay)
@@ -320,6 +349,7 @@ func newFeats(h *Hub) Module {
 		site, missing := newLedgerFromFlags()
 		if hl, ok := site.(*httpLedger); ok && hl != nil {
 			m.ledger = hl
+			m.spender = hl
 		}
 		m.trusted = site == nil && !missing
 	}
@@ -699,8 +729,10 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 		N      int64  `json:"n"`
 		Act    string `json:"act"`
 		Street string `json:"street"`
+		Op     string `json:"op"`
+		C      string `json:"c"`
 	}
-	if json.Unmarshal(frame, &msg) != nil || len(msg.Feat) > 40 || len(msg.Act) > 16 {
+	if json.Unmarshal(frame, &msg) != nil || len(msg.Feat) > 40 || len(msg.Act) > 16 || len(msg.Op) > 40 || len(msg.C) > 40 {
 		m.reply(cl, nil, "", 0, "bad", "")
 		return
 	}
@@ -714,6 +746,10 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 		return
 	}
 	def := m.t.Feats[run.Feat]
+	if def.Donate != "" {
+		m.donation(cl, run, def, msg.N, msg.Op, msg.C)
+		return
+	}
 	n := msg.N
 	key := ""
 	paced := true
@@ -770,7 +806,158 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 	m.reply(cl, run, msg.Feat, n, "", street)
 }
 
+// donation is a report on a donation Feat (G786): a spend the ledger settles counts in full, at no
+// pace; anything the server cannot confirm counts at the pace and the rest is carried over.
+func (m *feats) donation(cl *Client, run *featRun, def featDef, n int64, op, class string) {
+	n = min(n, featMaxN)
+	if n <= 0 {
+		m.reply(cl, run, run.Feat, 0, "amount", "")
+		return
+	}
+	if !featDonationRe.MatchString(op) || class != def.Donate {
+		m.paced(cl, run, def, n)
+		return
+	}
+	key := "don|" + op
+	if run.Seen[key] {
+		m.reply(cl, run, run.Feat, 0, "already", "")
+		return
+	}
+	if len(run.Seen) < featKeepSeen {
+		run.Seen[key] = true
+	}
+	if m.spender == nil {
+		if m.trusted {
+			m.count(run, cl.ID(), cl.Name(), n) // -trade-ledger off: the client's word (development only)
+			m.reply(cl, run, run.Feat, n, "", "")
+		} else {
+			m.paced(cl, run, def, n)
+		}
+		return
+	}
+	id, name, runN, feat := cl.ID(), cl.Name(), run.Run, run.Feat
+	gave := tradeGoods{Items: []tradeItem{{C: class, N: int(n)}}}
+	site := m.spender
+	m.spawn(func() {
+		a := site.spend(op, id, gave, featDonationWhy)
+		m.h.After(0, func() { m.donated(id, name, runN, feat, n, a) })
+	})
+}
+
+// donated is the ledger's answer to a donation's spend: settled counts all of it.
+func (m *feats) donated(id int64, name string, runN int64, feat string, n int64, a ledgerAnswer) {
+	run := m.current()
+	cl := m.h.ClientLocked(id)
+	if run == nil || run.Run != runN || run.Feat != feat {
+		if cl != nil {
+			m.reply(cl, run, feat, 0, "not_today", "")
+		}
+		return
+	}
+	if a.Status == "settled" {
+		m.count(run, id, name, n)
+		if cl != nil {
+			m.reply(cl, run, feat, n, "", "")
+		}
+		return
+	}
+	if a.Status != "refused" {
+		log.Printf("feat run %d: donation for %d: no answer from the ledger, counted at the pace", runN, id)
+	}
+	if cl == nil {
+		m.carry(run, id, n)
+		return
+	}
+	m.paced(cl, run, m.t.Feats[feat], n)
+}
+
+// paced counts what the bucket allows now and carries the rest over (G786: never dropped).
+func (m *feats) paced(cl *Client, run *featRun, def featDef, n int64) {
+	got := m.take(cl.ID(), run.Feat, def, n)
+	if got > 0 {
+		m.count(run, cl.ID(), cl.Name(), got)
+	}
+	m.carry(run, cl.ID(), n-got)
+	reason := ""
+	if got <= 0 {
+		reason = "carried"
+	}
+	m.reply(cl, run, run.Feat, got, reason, "")
+}
+
+// carry keeps n of a donation Feat for a player to count at the pace (drainCarry).
+func (m *feats) carry(run *featRun, id int64, n int64) {
+	if n <= 0 {
+		return
+	}
+	if run.Carry == nil {
+		run.Carry = map[int64]int64{}
+	}
+	run.Carry[id] = min(run.Carry[id]+n, featMaxN)
+	m.saveSoon()
+	m.carrySoon(run)
+}
+
+// carrySoon drains the carry once the pace has let one more through.
+func (m *feats) carrySoon(run *featRun) {
+	if m.carryAt || len(run.Carry) == 0 {
+		return
+	}
+	every := m.t.Feats[run.Feat].Pace.EveryMs
+	if every <= 0 {
+		every = 1000
+	}
+	m.carryAt = true
+	m.h.After(time.Duration(every)*time.Millisecond, func() {
+		m.carryAt = false
+		m.drainCarry()
+	})
+}
+
+// drainCarry counts what each online player's pace lets through of their carry; an offline one's waits.
+func (m *feats) drainCarry() {
+	run := m.current()
+	if run == nil || len(run.Carry) == 0 {
+		return
+	}
+	def := m.t.Feats[run.Feat]
+	ids := make([]int64, 0, len(run.Carry))
+	for id := range run.Carry {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		cl := m.h.ClientLocked(id)
+		if cl == nil {
+			continue
+		}
+		got := m.take(id, run.Feat, def, run.Carry[id])
+		if got <= 0 {
+			continue
+		}
+		m.count(run, id, cl.Name(), got)
+		if run.Carry[id] -= got; run.Carry[id] <= 0 {
+			delete(run.Carry, id)
+		}
+		m.reply(cl, run, run.Feat, got, "", "")
+	}
+	m.saveSoon()
+	if m.anyOnlineCarry(run) {
+		m.carrySoon(run)
+	}
+}
+
+func (m *feats) anyOnlineCarry(run *featRun) bool {
+	for id := range run.Carry {
+		if m.h.ClientLocked(id) != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // firstStreet: dedupe "first-street" (G754), true when this player has never been credited for this street,
+
 // in any run. location.js 213-217: the first visit to a street always spawns a Qurazy (the five-a-day
 // cap, location.js:255, only limits repeat visits), so that credit takes nothing from the pace; a street
 // pays it once ever, which keeps a forged client's total bounded by the streets there are.
@@ -1059,6 +1246,10 @@ func (m *feats) sync(cl *Client, _ json.RawMessage) {
 // connected also counts the player as active today (G656).
 func (m *feats) connected(cl *Client) {
 	m.noteActive(cl.ID())
+	// G786: a donation carried over while away counts on at the pace now.
+	if r := m.st.Run; r != nil && r.Carry[cl.ID()] > 0 {
+		m.carrySoon(r)
+	}
 	if m.ledger == nil {
 		return
 	}
