@@ -344,6 +344,14 @@ func (m *parties) announce(p *party, text string) {
 	}
 }
 
+// announceToActivity is announce with "activity": the client also writes the line to each
+// member's Activity, not only the Party chat (#414: the party extension went unseen).
+func (m *parties) announceToActivity(p *party, text string) {
+	for _, mem := range p.members {
+		m.to(mem.id, map[string]any{"t": "party_activity", "text": text, "activity": true})
+	}
+}
+
 func (m *parties) refuseSpace(id int64, why, text string) {
 	m.to(id, map[string]any{"t": "party_space_refused", "why": why, "text": text})
 }
@@ -743,7 +751,7 @@ func (m *parties) extendSpace(cl *Client, frame json.RawMessage) {
 		m.schedule(p, s)
 		log.Printf("party space %s: %s (%d) extended it %d min for %dc", s.street, name, id, minutes, cost)
 		m.to(id, map[string]any{"t": "party_space_extended", "minutes": minutes, "cost": cost, "spend": op, "text": partyTextAtmOK})
-		m.announce(p, name+" extended the party time!") // party.js:770
+		m.announceToActivity(p, name+" extended the party time!") // party.js:770
 		m.pushSpace(p)
 	})
 }

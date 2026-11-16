@@ -291,6 +291,12 @@ func TestTheAtmExtendsTheSharedClockFromThePayersCurrants(t *testing.T) {
 	if got := texts(am); got != "Bo extended the party time!" {
 		t.Fatalf("Ada heard %q", got)
 	}
+	// #414: the extension also goes to every member's Activity.
+	for _, msgs := range [][]map[string]any{am, bm} {
+		if acts := kinds(msgs, "party_activity"); len(acts) != 1 || acts[0]["activity"] != true {
+			t.Fatalf("the extension is not marked for Activity: %v", acts)
+		}
+	}
 	r.do(b, map[string]any{"t": "party_space_extend", "minutes": 15})
 	r.settle()
 	if one2(t, drain(b), "party_space_refused")["text"] != partyTextAtmBroke {
