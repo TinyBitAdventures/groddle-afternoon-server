@@ -471,9 +471,12 @@ func TestStreetAnimalsOutliveARestart(t *testing.T) {
 	r.mod.roll = func() float64 { return 0.1 }
 	r.act(a, 1, "chicken:0", "squeeze", nil)
 	r.only(a, "obj_ok")
-	r.act(a, 2, "chicken:2", "incubate", map[string]any{"c": "butterfly_egg"})
+	// The egg goes in from beside chicken:2 (the street's layout puts its Chickens wherever its floors allow).
+	ch2 := sharedWorld.streets[defaultStreet]["chicken:2"]
+	b := r.player(2, "Bea", defaultStreet, ch2.x, ch2.y)
+	r.act(b, 2, "chicken:2", "incubate", map[string]any{"c": "butterfly_egg"})
 	r.advance(0)
-	r.only(a, "obj_ok")
+	r.only(b, "obj_ok")
 	r.mod.save()
 	r2 := r.restart(path, r.now.Add(10*time.Second))
 	a2 := r2.player(1, "Ada", defaultStreet, ch.x, ch.y)
