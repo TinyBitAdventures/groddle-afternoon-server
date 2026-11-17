@@ -43,6 +43,7 @@ package main
 //	{"t":"feat_add","feat":"animal_love","n":1}                       a contribution the client made
 //	{"t":"feat_add","feat":"streaking","n":1,"act":"streak","street":"GA5…"}   a Feat whose reports name the act
 //	{"t":"feat_add","feat":"donate_sparkly","n":189,"op":"fdon-…","c":"sparkly"}   a donation the ledger confirms (below)
+//	{"t":"feat_add","id":"fo-…","feat":"animal_love","n":4}           any of the above with a report id (G968, below)
 //	{"t":"feat_ack","id":"feat-r-…"}                                  you applied a feat_first / feat_reward and saved
 //	{"t":"feat_sync"}                                                  on connect: the Feat, and what you are owed
 //	{"t":"feat_dev","end_in":30,"feat":"tottlys_toys"}                QA only, GRODDLE_FEATS_DEV=1
@@ -54,6 +55,7 @@ package main
 //	     (goal, bonus, super: the run's goals; basis: yesterday's players they came from, -1 the table's)
 //	{"t":"feat_progress","run":n,"feat":"…","total":n,"tier":n,"count":n,"top":[…]}               to everyone, at most once a second
 //	{"t":"feat_counted","feat":"…","run":n,"n":n,"total":n,"mine":n,"place":n,"reason":"…"}      to the contributor (n 0 and a reason when nothing counted)
+//	     (a report with an id: "id", "done" what that id has counted in all, "want" its whole amount; reason "dup": done already)
 //	{"t":"feat_goal","run":n,"feat":"…","tier":1-3,"total":n}                                     to everyone: a goal was met
 //	{"t":"feat_ended","run":n,"feat":"…","total":n,"goal":n,"tier":0-3,"count":n,"top":[…]}       to everyone: the day is over (tier 0: failed)
 //	{"t":"feat_first","id":"feat-f-<feat>-<player>","feat":"…","run":n,"counters":[{"counter","n"}],"grants":[…],"remaining":n|-1}
@@ -100,6 +102,17 @@ package main
 // energy, favor, the rocks, which are not tradeable, and the badges) is the
 // client's to apply from the feat_reward.
 //
+// Report ids (G968, root R10): the game keeps every counted report owed in its
+// save until the server answers it, and asks again after a failed send, a
+// dropped socket or a pace refusal. A report may carry an id ("fo-" and 8 to
+// 32 of [a-z0-9]); the run remembers, per player, the last featKeepIds ids
+// with what each has counted (done) of its whole amount (want), in the state
+// file with the count it went with, so a report asked again after its answer
+// was lost (or after a restart) never counts twice: done already answers
+// "dup", and a report the pace took part of counts only the rest. The burst
+// still caps what one ask counts; the id carries the remainder across asks. A
+// report without an id counts as before (one ask, the rest dropped).
+//
 // Persistence: the Feat outlives sessions, so the state (the run, who has
 // contributed to which Feat and been rewarded, credits not yet made,
 // messages not yet acked) is written to -feats-file (a temp file, fsync,
@@ -136,6 +149,7 @@ const (
 	featMaxN        = 100_000
 	featKeepSeen    = 20_000
 	featKeepFirst   = 4_000   // the streets kept per player for first-street (the archive has 1,422)
+	featKeepIds     = 256     // G968: the report ids a run keeps per player (the game sends one at a time)
 	featKeepDays    = 4       // UTC days of active players kept
 	featDayMax      = 100_000 // the most players one day keeps (a bound)
 
@@ -144,6 +158,9 @@ const (
 
 // featDonationRe is a donation's spend id (LedgerSpend.php opId; the game's feats-mp.js donationOp).
 var featDonationRe = regexp.MustCompile(`^fdon-[0-9a-f]{16}$`)
+
+// featReportRe is a report id (G968; the game's js/feat-owed.js owedId).
+var featReportRe = regexp.MustCompile(`^fo-[a-z0-9]{8,32}$`)
 
 var featsFileFlag = flag.String("feats-file", "", "file that keeps the shared Feat, who contributed and was rewarded, and the rewards not yet applied (default: realtime-feats.json beside -secret-file; off: memory only)")
 
@@ -229,7 +246,61 @@ type featRun struct {
 	Seen    map[string]bool `json:"seen,omitempty"` // dedupe keys (streets streaked, qurazy streets, donation spend ids)
 	// Carry (G786): per player, a donation Feat's amount reported but not yet counted, counted at the pace.
 	Carry map[int64]int64 `json:"carry,omitempty"`
-	idx   map[int64]*featEntry
+	// Ids (G968): per player, the last featKeepIds report ids and what each has counted.
+	Ids map[int64][]*featReport `json:"ids,omitempty"`
+	idx map[int64]*featEntry
+}
+
+// featReport is one report id: done of want counted so far (done >= want: settled).
+type featReport struct {
+	ID   string `json:"id"`
+	Done int64  `json:"done"`
+	Want int64  `json:"want"`
+}
+
+// featAsk is what a feat_counted answers: the report's street and id, and the id's done and want.
+type featAsk struct {
+	Street string
+	ID     string
+	Done   int64
+	Want   int64
+}
+
+// report is the player's report id, nil when this run has not counted it.
+func (r *featRun) report(player int64, id string) *featReport {
+	for _, rep := range r.Ids[player] {
+		if rep.ID == id {
+			return rep
+		}
+	}
+	return nil
+}
+
+// remember keeps a report id for the player (the oldest goes past featKeepIds).
+func (r *featRun) remember(player int64, id string, want int64) *featReport {
+	if r.Ids == nil {
+		r.Ids = map[int64][]*featReport{}
+	}
+	rep := &featReport{ID: id, Want: want}
+	list := append(r.Ids[player], rep)
+	if len(list) > featKeepIds {
+		list = slices.Clone(list[len(list)-featKeepIds:])
+	}
+	r.Ids[player] = list
+	return rep
+}
+
+// settle marks a report id counted in full (a donation the server has taken on), on the ask too.
+func (r *featRun) settle(player int64, a *featAsk, n int64) {
+	if a.ID == "" {
+		return
+	}
+	rep := r.report(player, a.ID)
+	if rep == nil {
+		rep = r.remember(player, a.ID, n)
+	}
+	rep.Done = max(rep.Done, rep.Want)
+	a.Done, a.Want = rep.Done, rep.Want
 }
 
 type featTopRow struct {
@@ -443,6 +514,9 @@ func (m *feats) load() error {
 			r.Players = kept
 			if r.Seen == nil {
 				r.Seen = map[string]bool{}
+			}
+			for id, list := range r.Ids {
+				r.Ids[id] = slices.DeleteFunc(list, func(rep *featReport) bool { return rep == nil })
 			}
 		}
 	}
@@ -667,11 +741,14 @@ func topRows(sorted []*featEntry) []featTopRow {
 
 // —— Contributions ——
 
-// reply is the feat_counted answer; street (a report that named one) goes back, so the game knows which report it answers.
-func (m *feats) reply(cl *Client, run *featRun, feat string, n int64, reason, street string) {
+// reply is the feat_counted answer; the report's street and id go back, so the game knows which report it answers.
+func (m *feats) reply(cl *Client, run *featRun, feat string, n int64, reason string, a featAsk) {
 	msg := map[string]any{"t": "feat_counted", "feat": feat, "n": n, "run": int64(0), "total": int64(0), "mine": int64(0), "place": 0}
-	if street != "" {
-		msg["street"] = street
+	if a.Street != "" {
+		msg["street"] = a.Street
+	}
+	if a.ID != "" {
+		msg["id"], msg["done"], msg["want"] = a.ID, a.Done, a.Want
 	}
 	if run != nil {
 		msg["run"], msg["total"] = run.Run, run.Total
@@ -731,23 +808,39 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 		Street string `json:"street"`
 		Op     string `json:"op"`
 		C      string `json:"c"`
+		ID     string `json:"id"`
 	}
 	if json.Unmarshal(frame, &msg) != nil || len(msg.Feat) > 40 || len(msg.Act) > 16 || len(msg.Op) > 40 || len(msg.C) > 40 {
-		m.reply(cl, nil, "", 0, "bad", "")
+		m.reply(cl, nil, "", 0, "bad", featAsk{})
 		return
 	}
-	street := ""
+	ask := featAsk{}
 	if streetRe.MatchString(msg.Street) {
-		street = msg.Street
+		ask.Street = msg.Street
 	}
+	if featReportRe.MatchString(msg.ID) {
+		ask.ID = msg.ID
+	}
+	street := ask.Street
 	run := m.current()
 	if msg.Feat != run.Feat {
-		m.reply(cl, run, msg.Feat, 0, "not_today", street)
+		m.reply(cl, run, msg.Feat, 0, "not_today", ask)
 		return
+	}
+	// G968: a report asked again. Counted in full: say so and count nothing; counted in part: only the rest.
+	var rep *featReport
+	if ask.ID != "" {
+		if rep = run.report(cl.ID(), ask.ID); rep != nil {
+			ask.Done, ask.Want = rep.Done, rep.Want
+			if rep.Done >= rep.Want {
+				m.reply(cl, run, msg.Feat, 0, "dup", ask)
+				return
+			}
+		}
 	}
 	def := m.t.Feats[run.Feat]
 	if def.Donate != "" {
-		m.donation(cl, run, def, msg.N, msg.Op, msg.C)
+		m.donation(cl, run, def, msg.N, msg.Op, msg.C, ask)
 		return
 	}
 	n := msg.N
@@ -757,13 +850,13 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 	if len(def.Acts) > 0 {
 		a, ok := def.Acts[msg.Act]
 		if !ok {
-			m.reply(cl, run, msg.Feat, 0, "act", street)
+			m.reply(cl, run, msg.Feat, 0, "act", ask)
 			return
 		}
 		n = a.N
 		if a.Dedupe != "" {
 			if street == "" {
-				m.reply(cl, run, msg.Feat, 0, "street", "")
+				m.reply(cl, run, msg.Feat, 0, "street", ask)
 				return
 			}
 			switch a.Dedupe {
@@ -772,8 +865,9 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 			default:
 				key = fmt.Sprintf("%d|%s", cl.ID(), gStreet(street))
 			}
-			if run.Seen[key] {
-				m.reply(cl, run, msg.Feat, 0, "already", street)
+			// A report counted in part holds its street already: the rest is its own.
+			if run.Seen[key] && rep == nil {
+				m.reply(cl, run, msg.Feat, 0, "already", ask)
 				return
 			}
 			if a.Dedupe == "first-street" && m.firstStreet(run, cl.ID(), gStreet(street)) {
@@ -781,19 +875,28 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 			}
 		}
 	}
+	// What the report asks in all; one ask counts at most the burst (an id carries the rest to the next ask).
+	want := min(n, featMaxN)
+	if rep != nil {
+		want = rep.Want
+		n = want - rep.Done
+	}
 	if def.Pace.Burst > 0 {
 		n = min(n, def.Pace.Burst)
 	}
 	n = min(n, featMaxN)
 	if n <= 0 {
-		m.reply(cl, run, msg.Feat, 0, "amount", street)
+		m.reply(cl, run, msg.Feat, 0, "amount", ask)
 		return
 	}
 	if paced {
 		n = m.take(cl.ID(), run.Feat, def, n)
 	}
 	if n <= 0 {
-		m.reply(cl, run, msg.Feat, 0, "pace", street)
+		if ask.ID != "" && rep == nil {
+			ask.Want = want
+		}
+		m.reply(cl, run, msg.Feat, 0, "pace", ask)
 		return
 	}
 	if key != "" && len(run.Seen) < featKeepSeen {
@@ -802,25 +905,35 @@ func (m *feats) add(cl *Client, frame json.RawMessage) {
 	if first != "" {
 		m.st.FirstStreets[cl.ID()] = append(m.st.FirstStreets[cl.ID()], first)
 	}
+	// The id is kept before the count, so the save the count makes holds both (a restart keeps them together).
+	if ask.ID != "" {
+		if rep == nil {
+			rep = run.remember(cl.ID(), ask.ID, want)
+		}
+		rep.Done += n
+		ask.Done, ask.Want = rep.Done, rep.Want
+	}
 	m.count(run, cl.ID(), cl.Name(), n)
-	m.reply(cl, run, msg.Feat, n, "", street)
+	m.reply(cl, run, msg.Feat, n, "", ask)
 }
 
 // donation is a report on a donation Feat (G786): a spend the ledger settles counts in full, at no
-// pace; anything the server cannot confirm counts at the pace and the rest is carried over.
-func (m *feats) donation(cl *Client, run *featRun, def featDef, n int64, op, class string) {
+// pace; anything the server cannot confirm counts at the pace and the rest is carried over. Either
+// way the server has taken the whole report on, so its id (G968) is settled at once.
+func (m *feats) donation(cl *Client, run *featRun, def featDef, n int64, op, class string, ask featAsk) {
 	n = min(n, featMaxN)
 	if n <= 0 {
-		m.reply(cl, run, run.Feat, 0, "amount", "")
+		m.reply(cl, run, run.Feat, 0, "amount", ask)
 		return
 	}
+	run.settle(cl.ID(), &ask, n)
 	if !featDonationRe.MatchString(op) || class != def.Donate {
-		m.paced(cl, run, def, n)
+		m.paced(cl, run, def, n, ask)
 		return
 	}
 	key := "don|" + op
 	if run.Seen[key] {
-		m.reply(cl, run, run.Feat, 0, "already", "")
+		m.reply(cl, run, run.Feat, 0, "already", ask)
 		return
 	}
 	if len(run.Seen) < featKeepSeen {
@@ -829,9 +942,9 @@ func (m *feats) donation(cl *Client, run *featRun, def featDef, n int64, op, cla
 	if m.spender == nil {
 		if m.trusted {
 			m.count(run, cl.ID(), cl.Name(), n) // -trade-ledger off: the client's word (development only)
-			m.reply(cl, run, run.Feat, n, "", "")
+			m.reply(cl, run, run.Feat, n, "", ask)
 		} else {
-			m.paced(cl, run, def, n)
+			m.paced(cl, run, def, n, ask)
 		}
 		return
 	}
@@ -840,24 +953,24 @@ func (m *feats) donation(cl *Client, run *featRun, def featDef, n int64, op, cla
 	site := m.spender
 	m.spawn(func() {
 		a := site.spend(op, id, gave, featDonationWhy)
-		m.h.After(0, func() { m.donated(id, name, runN, feat, n, a) })
+		m.h.After(0, func() { m.donated(id, name, runN, feat, n, a, ask) })
 	})
 }
 
 // donated is the ledger's answer to a donation's spend: settled counts all of it.
-func (m *feats) donated(id int64, name string, runN int64, feat string, n int64, a ledgerAnswer) {
+func (m *feats) donated(id int64, name string, runN int64, feat string, n int64, a ledgerAnswer, ask featAsk) {
 	run := m.current()
 	cl := m.h.ClientLocked(id)
 	if run == nil || run.Run != runN || run.Feat != feat {
 		if cl != nil {
-			m.reply(cl, run, feat, 0, "not_today", "")
+			m.reply(cl, run, feat, 0, "not_today", ask)
 		}
 		return
 	}
 	if a.Status == "settled" {
 		m.count(run, id, name, n)
 		if cl != nil {
-			m.reply(cl, run, feat, n, "", "")
+			m.reply(cl, run, feat, n, "", ask)
 		}
 		return
 	}
@@ -868,11 +981,11 @@ func (m *feats) donated(id int64, name string, runN int64, feat string, n int64,
 		m.carry(run, id, n)
 		return
 	}
-	m.paced(cl, run, m.t.Feats[feat], n)
+	m.paced(cl, run, m.t.Feats[feat], n, ask)
 }
 
 // paced counts what the bucket allows now and carries the rest over (G786: never dropped).
-func (m *feats) paced(cl *Client, run *featRun, def featDef, n int64) {
+func (m *feats) paced(cl *Client, run *featRun, def featDef, n int64, ask featAsk) {
 	got := m.take(cl.ID(), run.Feat, def, n)
 	if got > 0 {
 		m.count(run, cl.ID(), cl.Name(), got)
@@ -882,7 +995,7 @@ func (m *feats) paced(cl *Client, run *featRun, def featDef, n int64) {
 	if got <= 0 {
 		reason = "carried"
 	}
-	m.reply(cl, run, run.Feat, got, reason, "")
+	m.reply(cl, run, run.Feat, got, reason, ask)
 }
 
 // carry keeps n of a donation Feat for a player to count at the pace (drainCarry).
@@ -939,7 +1052,7 @@ func (m *feats) drainCarry() {
 		if run.Carry[id] -= got; run.Carry[id] <= 0 {
 			delete(run.Carry, id)
 		}
-		m.reply(cl, run, run.Feat, got, "", "")
+		m.reply(cl, run, run.Feat, got, "", featAsk{})
 	}
 	m.saveSoon()
 	if m.anyOnlineCarry(run) {
