@@ -132,10 +132,11 @@ var (
 	gardensOffForTest  bool
 
 	// A bed's key: default, herb, or herb2..herb9 for a street with more herb beds (the Herb Gardens
-	// streets: one bed in each planter box, js/street-ecology.js streetGardenBoxBeds); its kind is the
-	// key without the digit.
-	gardenPlotRe = regexp.MustCompile(`^(default|herb[2-9]?):(\d{1,2})-(\d{1,2})$`)
-	gardenBedRe  = regexp.MustCompile(`^(default|herb[2-9]?)$`)
+	// streets: one bed in each planter box, js/street-ecology.js streetGardenBoxBeds), or
+	// default2..default12 for a street's other crop beds (G940: every Garden its location file names,
+	// js/garden.js streetGardenBeds); its kind is the key without the number.
+	gardenPlotRe = regexp.MustCompile(`^(default(?:[2-9]|1[0-2])?|herb[2-9]?):(\d{1,2})-(\d{1,2})$`)
+	gardenBedRe  = regexp.MustCompile(`^(default(?:[2-9]|1[0-2])?|herb[2-9]?)$`)
 	gardenVerbs  = map[string]bool{"plant": true, "water": true, "water_all": true, "harvest": true, "clear": true, "fertilize": true}
 )
 
@@ -229,7 +230,7 @@ func loadGardenWorld(raw []byte) (*gardenWorld, error) {
 			if !(ok1 && ok2 && ok3 && ok4 && ok5) || !gardenBedRe.MatchString(key) || cols < 1 || rows < 1 || cols > 12 || rows > 12 || row[key] != nil {
 				return nil, fmt.Errorf("%s: bad bed %v", tsid, b)
 			}
-			kind := key
+			kind := "default"
 			if strings.HasPrefix(key, "herb") {
 				kind = "herb"
 			}
@@ -453,6 +454,7 @@ type gardens struct {
 	limits  map[int64]*objBucket
 	uses    *useAsker
 	grants  []gardenGrant
+	payouts []gardenPayout // G940: crops from plots the layout no longer has, owed by mail (gardens_payout.go)
 	boot    string
 	seq     uint64
 
@@ -505,6 +507,7 @@ func (g *gardens) Register(r *Registry) {
 	r.OnConnect(func(cl *Client) {
 		g.resume()
 		g.resendGrants(cl)
+		g.payOut()
 	})
 	r.OnDisconnect(func(cl *Client) {
 		delete(g.limits, cl.ID())

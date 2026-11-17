@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-// Community Gardens, the plan's pilot street, and its crop bed (data/gardens.json).
-const gardenStreet = "GCR101NQ4BU1SKS"
+// Hechey Track and its crop bed (data/gardens.json): the remake's own two beds, crop 4 by 2 and herb
+// 3 by 2. Community Gardens, the plan's pilot street, has its ten 2012 beds since G940.
+const gardenStreet = "GLI2V0UN7RD1T2J"
 
 type gardenRig struct {
 	*objRig
@@ -486,7 +487,7 @@ func TestGardenRestartKeepsPlotsGrantsAndGivesTheLockAgain(t *testing.T) {
 		t.Fatalf("the torn file was not moved aside: %v", m)
 	}
 	// An old file naming a plot the layout no longer has drops it.
-	old := `{"v":1,"saved":1,"streets":{"GCR101NQ4BU1SKS":{"default:9-9":{"s":"crop","seed":"seed_spinach"},"herb:1-1":{"s":"dirty"}},"NOWHERE":{"default:1-1":{"s":"dirty"}}},"grants":[]}`
+	old := `{"v":1,"saved":1,"streets":{"GLI2V0UN7RD1T2J":{"default:9-9":{"s":"crop","seed":"seed_spinach"},"herb:1-1":{"s":"dirty"}},"NOWHERE":{"default:1-1":{"s":"dirty"}}},"grants":[]}`
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +665,7 @@ func TestGardenFileFromBeforeThePaceFinishesOnItsOldClock(t *testing.T) {
 	t0 := int64(1_800_000_000_000)
 	// Saved 5 s before the restart: potato seeds planted 10 s before the save in a plot watered 3 hours
 	// before (old: 48 s + 44 s to a crop), dry spinach shoots with 1 s kept, a ripe crop, a wet clean plot.
-	old := fmt.Sprintf(`{"v":1,"saved":%d,"streets":{"GCR101NQ4BU1SKS":{`+
+	old := fmt.Sprintf(`{"v":1,"saved":%d,"streets":{"GLI2V0UN7RD1T2J":{`+
 		`"default:1-1":{"s":"seeds","seed":"seed_potato","wet":true,"wetAt":%d,"stageAt":%d,"mod":1,"planter":1},`+
 		`"default:2-1":{"s":"shoots","seed":"seed_spinach","stageAt":%d,"banked":1000,"mod":1,"planter":1},`+
 		`"default:3-1":{"s":"crop","seed":"seed_spinach","wet":true,"wetAt":%d,"stageAt":%d,"mod":1,"ripeAt":%d},`+

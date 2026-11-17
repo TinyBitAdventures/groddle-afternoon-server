@@ -81,7 +81,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -113,7 +115,8 @@ var creditsFileForTest string
 
 // The why of each credit, and the letter its id carries (charades: verbs.go, a Charades guess's 250 currants;
 // online: connected time, which carries no goods, sent by the module itself, never through add).
-var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t", "charades": "c", "online": "o"}
+// garden: crops owed by mail from plots the gardens' layout no longer has (gardens_payout.go, G940).
+var creditWhy = map[string]string{"quoin": "q", "shard": "s", "race": "r", "take": "t", "charades": "c", "online": "o", "garden": "g"}
 
 const (
 	// onlineEvery: how often a connected character's time goes to the site.
@@ -467,6 +470,7 @@ func newCredits(h *Hub) Module {
 
 func (m *credits) Register(r *Registry) {
 	r.Provide("credits.add", m.add)
+	r.Provide("credits.put", m.put)
 	r.OnConnect(m.connected)
 	r.OnDisconnect(m.disconnected)
 	r.OnShutdown(m.flushOnline)
@@ -551,6 +555,25 @@ func (m *credits) add(user int64, why string, got tradeGoods) string {
 	m.out.add(ev)
 	return ev.ID
 }
+
+// put records one outcome under an id its caller made (cr-<why letter>-…, the same for the same
+// outcome across restarts: gardens_payout.go), so a resend after a restart is the same id and the
+// site takes it once. False when nothing is queued (no ledger, a bad id, nothing of value): the
+// caller keeps it.
+func (m *credits) put(id string, user int64, why string, got tradeGoods) bool {
+	letter, ok := creditWhy[why]
+	if m.out == nil || !ok || why == "online" || user <= 0 || got.Currants < 0 || got.empty() || !creditIDRe.MatchString(id) || !strings.HasPrefix(id, "cr-"+letter+"-") {
+		return false
+	}
+	if got.Items == nil {
+		got.Items = []tradeItem{}
+	}
+	m.out.add(creditEvent{ID: id, User: user, Why: why, Got: got, At: m.h.Now().Unix()})
+	return true
+}
+
+// creditIDRe is the site's credit id (src/LedgerCredits.php id): cr- and at most 37 of a-z, 0-9, -.
+var creditIDRe = regexp.MustCompile(`^cr-[a-z0-9-]{1,37}$`)
 
 // creditLocked hands the site one server outcome for a player, when the
 // credits module runs (a hub built without it credits nothing). Under the hub lock.

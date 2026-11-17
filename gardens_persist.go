@@ -7,7 +7,8 @@ package main
 //
 // Times are Unix ms. "saved" is when the file was written, for a restart's fresh 60 seconds
 // (gardens.go resume). A plot whose street or bed the layout (data/gardens.json) no longer has is
-// dropped when the file is read; a file that does not parse is moved aside (persist.go).
+// dropped when the file is read, what grows in it owed to its planter by mail first ("payouts",
+// gardens_payout.go, G940); a file that does not parse is moved aside (persist.go).
 
 import (
 	"encoding/json"
@@ -38,6 +39,7 @@ type gardenFile struct {
 	Seq     uint64                           `json:"seq,omitempty"`
 	Streets map[string]map[string]*gardenRec `json:"streets"`
 	Grants  []gardenGrant                    `json:"grants"`
+	Payouts []gardenPayout                   `json:"payouts,omitempty"`
 }
 
 var gardenStates = map[string]bool{"clean": true, "seeds": true, "shoots": true, "crop": true, "dirty": true}
@@ -48,12 +50,19 @@ func (g *gardens) load() error {
 	if err != nil || !ok {
 		return err
 	}
-	n, dropped := 0, 0
+	n, dropped, ownerless := 0, 0, 0
+	var owed []gardenOwed
 	for street, recs := range f.Streets {
 		for id, r := range recs {
 			bed, _ := g.w.bedOf(street, id)
 			if bed == nil || r == nil || !gardenStates[r.State] {
 				dropped++
+				// G940: what grows on a bed the layout no longer has goes to its planter by mail.
+				if o, ok := g.w.owedOf(street, id, r); bed == nil && ok {
+					owed = append(owed, o)
+				} else if bed == nil && r != nil && r.State == "crop" {
+					ownerless++
+				}
 				continue
 			}
 			p := &gPlot{state: r.State, seed: r.Seed, wet: r.Wet, wetAt: r.WetAt, stageAt: r.StageAt, banked: r.Banked, mod: r.Mod, fert: r.Fert, planter: r.Planter, ripeAt: r.RipeAt, pace: r.Pace, wetPace: r.WetPace}
@@ -76,8 +85,13 @@ func (g *gardens) load() error {
 			g.grants = append(g.grants, gr)
 		}
 	}
+	g.addPayouts(f.Payouts)
+	if paid := gardenPayouts(owed); len(paid) > 0 || ownerless > 0 {
+		g.addPayouts(paid)
+		log.Printf("gardens %s: plots on beds the layout no longer has: %s", g.path, payoutSummary(paid, ownerless))
+	}
 	g.seq, g.savedAt, g.resumed = f.Seq, f.Saved, false
-	log.Printf("gardens %s: %d plots on %d streets, %d picks not yet saved, %d dropped (not in the layout)", g.path, n, len(g.plots), len(g.grants), dropped)
+	log.Printf("gardens %s: %d plots on %d streets, %d picks not yet saved, %d dropped (not in the layout), %d payouts waiting", g.path, n, len(g.plots), len(g.grants), dropped, len(g.payouts))
 	return nil
 }
 
@@ -86,7 +100,7 @@ func (g *gardens) save() {
 		return
 	}
 	g.trimGrants()
-	f := gardenFile{V: 1, Saved: g.nowMs(), Seq: g.seq, Streets: map[string]map[string]*gardenRec{}, Grants: g.grants}
+	f := gardenFile{V: 1, Saved: g.nowMs(), Seq: g.seq, Streets: map[string]map[string]*gardenRec{}, Grants: g.grants, Payouts: g.payouts}
 	if f.Grants == nil {
 		f.Grants = []gardenGrant{}
 	}
