@@ -23,18 +23,29 @@ package main
 //     owner's home street or in their house reads them again from the site
 //     (groddle/v1/homes/<id>/street). Nothing of the owner's words passes
 //     through here.
+//   - G944 (M1, M4): the same relay carries the owner's own changes at home.
+//     In Glitch a home street and house were ordinary shared locations
+//     (GameServerJS locations/home.js, players/inc_houses.js), so what the
+//     owner mined, picked, planted, cultivated or decorated was seen by
+//     everyone there at once (inc_homes.js apiGeometryUpdated to the whole
+//     location). The owner's game writes its save, then sends "yard" (the
+//     street's rocks, nodes, Patches, trees, animals and fixtures: the site's
+//     homes/<id>/yard) or "home" (the house, furniture, cultivations, styles
+//     and the Tower: homes/<id>); everyone at that home reads the site again.
+//     "home" also reaches the owner's Tower floors (TOWER_<id>_<n>). The
+//     state stays the site's, read from the stored save: this only says when.
 //
 // Client to server:
 //
 //	{"t":"furn_buy","owner":7,"op":"furn-<16 hex>","price":1200}
-//	{"t":"home_refresh","what":"poles|tags|signpost|boxes"}      the sender's own home (boxes: home_boxes.go)
+//	{"t":"home_refresh","what":"poles|tags|signpost|boxes|yard|home"}      the sender's own home (boxes: home_boxes.go)
 //
 // Server to client:
 //
 //	{"t":"furn_bought","owner":7,"op":"furn-…","status":"settled|refused","why":"gone|price|short|blocked|own|busy|away|off","text":"…","class":"furniture_bed","uid":4,"price":1200}
 //	{"t":"furn_sold","op":"furn-…","buyer":{"id":9,"name":"Bo"},"class":"furniture_bed","uid":4,"price":1200,"x":610}   to the owner
 //	{"t":"furn_gone","owner":7,"op":"furn-…","uid":4}                                                                    to everyone else in the house
-//	{"t":"home_refresh","owner":7,"what":"poles"}                                                                       to everyone on the owner's street and in their house
+//	{"t":"home_refresh","owner":7,"what":"poles"}                                                                       to everyone on the owner's street and in their house (and "home" on their Tower floors)
 //
 // Ours: one buyer at a time for a piece ("Someone is buying that right
 // now."); a purchase the site has not answered is refused here (the site's
@@ -256,7 +267,7 @@ func (m *homeStreet) answered(op string, buyer int64, name string, owner int64, 
 	}
 }
 
-// refresh: the owner's signpost, poles or tags changed; everyone at their home reads them again.
+// refresh: something of the owner's home changed in their stored save; everyone at their home reads it again.
 func (m *homeStreet) refresh(cl *Client, frame json.RawMessage) {
 	if !m.allow("refresh", cl, homeRefreshBurst, homeRefreshEvery) {
 		return
@@ -266,13 +277,20 @@ func (m *homeStreet) refresh(cl *Client, frame json.RawMessage) {
 	}
 	_ = json.Unmarshal(frame, &msg)
 	switch msg.What {
-	case "poles", "tags", "signpost", "boxes":
+	case "poles", "tags", "signpost", "boxes", "yard", "home":
 	default:
 		return
 	}
 	id := strconv.FormatInt(cl.ID(), 10)
 	out := map[string]any{"t": "home_refresh", "owner": cl.ID(), "what": msg.What}
-	for _, street := range []string{homeStreetPrefix + id, houseStreetPrefix + id} {
+	streets := []string{homeStreetPrefix + id, houseStreetPrefix + id}
+	if msg.What == "home" {
+		// The Tower's furniture is part of the home's look (Neighbours.php homesSlice towerDecor).
+		for f := 0; f <= towerFloorsMax; f++ {
+			streets = append(streets, towerStreetPrefix+id+"_"+strconv.Itoa(f))
+		}
+	}
+	for _, street := range streets {
 		for _, c := range m.h.StreetLocked(street) {
 			if c.ID() != cl.ID() {
 				m.h.SendLocked(c, out)

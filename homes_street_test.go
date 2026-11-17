@@ -213,3 +213,43 @@ func TestHomeRefreshReachesEveryoneAtTheOwnersHome(t *testing.T) {
 		t.Fatalf("a visitor refreshed the owner's home: %v", got)
 	}
 }
+
+// G944 (M1, M4): the owner's own changes at home reach everyone there: "yard" the street and the
+// house, "home" also the Tower's floors; another owner's home and the sender hear nothing.
+func TestHomeRefreshCarriesTheOwnersYardAndHome(t *testing.T) {
+	r := newHomeStreetRig(t)
+	owner := r.at(7, "Ada", "HOME_7")
+	street := r.at(9, "Bo", "HOME_7")
+	house := r.at(10, "Cy", "HOUSE_7")
+	tower := r.at(11, "Di", "TOWER_7_2")
+	elsewhere := r.at(12, "Ed", "TOWER_9_2")
+	r.do(owner, map[string]any{"t": "home_refresh", "what": "yard"})
+	for _, cl := range []*Client{street, house} {
+		got := kinds(drain(cl), "home_refresh")
+		if len(got) != 1 || got[0]["what"] != "yard" || got[0]["owner"].(float64) != 7 {
+			t.Fatalf("yard %d: %v", cl.ID(), got)
+		}
+	}
+	if got := kinds(drain(tower), "home_refresh"); len(got) != 0 {
+		t.Fatalf("yard reached the Tower: %v", got)
+	}
+	r.now = r.now.Add(5 * time.Second)
+	r.do(owner, map[string]any{"t": "home_refresh", "what": "home"})
+	for _, cl := range []*Client{street, house, tower} {
+		got := kinds(drain(cl), "home_refresh")
+		if len(got) != 1 || got[0]["what"] != "home" {
+			t.Fatalf("home %d: %v", cl.ID(), got)
+		}
+	}
+	for _, cl := range []*Client{owner, elsewhere} {
+		if got := kinds(drain(cl), "home_refresh"); len(got) != 0 {
+			t.Fatalf("%d heard it: %v", cl.ID(), got)
+		}
+	}
+	// A visitor's "home" refreshes their own home only.
+	r.now = r.now.Add(5 * time.Second)
+	r.do(tower, map[string]any{"t": "home_refresh", "what": "home"})
+	if got := kinds(drain(street), "home_refresh"); len(got) != 0 {
+		t.Fatalf("a visitor refreshed the owner's home: %v", got)
+	}
+}
