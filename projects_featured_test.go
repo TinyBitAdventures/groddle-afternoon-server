@@ -207,6 +207,54 @@ func TestFeaturedStaysUntilBuiltThenTheNextIsAnnounced(t *testing.T) {
 	}
 }
 
+// G1023: a street in its post-build rest shows no board (inc_jobs.js 463-467), so a resting project
+// comes after every open one whatever its progress, and a featured one that rests says when it opens.
+func TestFeaturedRestingComesAfterOpenAndSendsTheRestEnd(t *testing.T) {
+	r := newFpRig(t, "")
+	cool := r.m.t.CooldownMs
+	// 2 (on Yonder) is nearly built, but Yonder rests: 3 on Zed is open, so 3 is picked.
+	r.m.row("2").Got["r1"] = 9
+	r.m.row("2").Started = 1
+	r.m.st.Rest["GY"] = r.m.ms() - 10*60*1000
+	if got := r.m.pickFeatured(); got != "3" {
+		t.Fatalf("pick %q, want 3 (2 and 7 wait on Yonder's rest)", got)
+	}
+	// Every open one resting: the most progress, as before.
+	r.m.st.Rest["GZ"] = r.m.ms() - 5*60*1000
+	if got := r.m.pickFeatured(); got != "2" {
+		t.Fatalf("pick %q, want 2 (all resting: the most progress)", got)
+	}
+	// Featured while resting: ready is Yonder's rest end, marked as the rest.
+	r.m.setFeatured("2")
+	msg := r.m.featuredMsg()
+	if msg["job"] != "2" || msg["ready"] != r.m.st.Rest["GY"]+cool || msg["rest"] != true {
+		t.Fatalf("resting featured: ready %v rest %v, want %d true", msg["ready"], msg["rest"], r.m.st.Rest["GY"]+cool)
+	}
+	// After the rest no ready is sent.
+	r.now = r.now.Add(21 * time.Minute)
+	if msg := r.m.featuredMsg(); msg["ready"] != nil || msg["rest"] != nil {
+		t.Fatalf("after the rest: ready %v rest %v", msg["ready"], msg["rest"])
+	}
+	// A between-phase wait keeps its own ready, with no rest mark.
+	r.m.setFeatured("3")
+	r.m.st.Rest = map[string]int64{}
+	r.m.row("3").Ready = r.m.ms() + 60_000
+	if msg := r.m.featuredMsg(); msg["ready"] != r.m.ms()+60_000 || msg["rest"] != nil {
+		t.Fatalf("phase wait: ready %v rest %v", msg["ready"], msg["rest"])
+	}
+	// Another project built beside the featured one's board sends the featured project again, now resting.
+	r.m.row("3").Ready = 0
+	r.m.setFeatured("2")
+	ada := r.player(7, "Ada", "GY")
+	drain(ada)
+	r.m.row("7").Got["r1"] = 10
+	r.m.settleIfComplete("7")
+	got := kinds(drain(ada), "project_featured")
+	if len(got) == 0 || got[len(got)-1]["job"] != "2" || got[len(got)-1]["rest"] != true || got[len(got)-1]["ready"].(float64) != float64(r.m.ms()+cool) {
+		t.Fatalf("after Yonder's upgrade was built: %v", got)
+	}
+}
+
 func TestFeaturedIsKeptAcrossARestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "projects.json")
 	r := newFpRig(t, path)

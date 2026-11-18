@@ -15,9 +15,16 @@ package main
 //  1. on the frontier: a closed street with a signpost neighbour that is open (one of the streets
 //     it opens from or is offered on is not itself an unbuilt street), or an upgrade of an open
 //     street;
-//  2. the most progress (phases done plus the current phase's share by base cost, quest.js 1012);
-//  3. not resting (a street just built offers no new build for 30 minutes, locations/inc_jobs.js);
+//  2. not resting: a street whose last street or upgrade job finished under 30 minutes ago offers
+//     none, started or not (locations/inc_jobs.js jobs_get_available 463-467; projects.go
+//     availability), so its board does not show. A resting project comes after every open one,
+//     whatever its progress (G1023: the line pointed players at a street with no board);
+//  3. the most progress (phases done plus the current phase's share by base cost, quest.js 1012);
 //  4. the lowest job id (numbers before words), so every server picks the same.
+//
+// A featured project still resting (the only ones left rest, or a street project finished beside
+// it after it was picked) sends the rest's end as "ready" with "rest":true, so the game says when
+// its board opens; the street stays quiet meanwhile, as in Glitch.
 //
 // It stays featured until its last phase is done (featuredBuilt), then the next is picked the same
 // way. An administrator may choose one or clear the choice through the console's signed call
@@ -27,7 +34,9 @@ package main
 //
 //	{"t":"project_featured","now":ms,"job":"62","kind":"street","street":"GLI…","board":"GLI…",
 //	     "label":"Lowland Slough","hub":"Shimla Mirch","boardLabel":"…","phase":0,"phases":1,
-//	     "perc":0.25,"percent":25,"since":ms,"by":"auto","row":Row}          answering every project_sync (a client syncs once connected), to everyone
+//	     "perc":0.25,"percent":25,"since":ms,"by":"auto","row":Row,
+//	     "ready":ms,"rest":true}                                    ready: the next phase opens (rest absent), or the
+//	                                                                board street's post-build rest ends (rest true)          answering every project_sync (a client syncs once connected), to everyone
 //	                                                                when it changes, and as it moves (at most every featuredEvery)
 //	{"t":"project_featured","now":ms,"job":""}                     none (every project is built)
 //
@@ -188,15 +197,8 @@ func (m *projects) pickFeatured() string {
 			continue // its board stands on a street nobody can reach yet
 		}
 		_, _, whole := m.featuredProgress(id)
-		resting := false
-		if r := m.st.Jobs[id]; (r == nil || r.Started == 0) && job.Kind == "street" {
-			for _, s := range job.Offer {
-				if last := m.st.Rest[gStreet(s)]; last > 0 && now-last < m.t.CooldownMs {
-					resting = true
-				}
-			}
-		}
-		list = append(list, cand{id: id, frontier: featuredFrontier(job, closed), progress: whole, resting: resting})
+		_, restEnd := m.featuredBoardRest(job, closed, now)
+		list = append(list, cand{id: id, frontier: featuredFrontier(job, closed), progress: whole, resting: restEnd > 0})
 	}
 	if len(list) == 0 {
 		return ""
@@ -206,11 +208,11 @@ func (m *projects) pickFeatured() string {
 		if a.frontier != b.frontier {
 			return a.frontier
 		}
-		if a.progress != b.progress {
-			return a.progress > b.progress
-		}
 		if a.resting != b.resting {
 			return !a.resting
+		}
+		if a.progress != b.progress {
+			return a.progress > b.progress
 		}
 		return jobIDLess(a.id, b.id)
 	})
@@ -242,9 +244,13 @@ func (m *projects) ensureFeatured() bool {
 	return true
 }
 
-// featuredBuilt: a project's last phase is done. The featured one is thanked in Global and the next is picked.
+// featuredBuilt: a project's last phase is done. The featured one is thanked in Global and the next is picked;
+// another one sends the featured project again, as its board street may rest now (G1023).
 func (m *projects) featuredBuilt(jobID string) {
 	if f := m.st.Featured; f == nil || f.Job != jobID {
+		if f != nil {
+			m.toAll(m.featuredMsg())
+		}
 		return
 	}
 	m.queueNotice(m.builtText(jobID))
@@ -278,18 +284,48 @@ func (m *projects) streetName(tsid string) string {
 	return m.t.Names["G"+strings.TrimPrefix(tsid, "L")]
 }
 
-// featuredBoard is the street to build it from: the first offering street that is open.
-func (m *projects) featuredBoard(job projJob) string {
-	closed := m.closedStreets()
+// restEndAt is when a street's post-build rest ends (ms), 0 when it is not resting: no street or
+// upgrade job is offered there for CooldownMs after its last one finished (inc_jobs.js 463-467).
+func (m *projects) restEndAt(street string, now int64) int64 {
+	if last := m.st.Rest[gStreet(street)]; last > 0 && now-last < m.t.CooldownMs {
+		return last + m.t.CooldownMs
+	}
+	return 0
+}
+
+// featuredBoardRest is the street to build it from, and when that street's rest ends (0: its board
+// shows now). The first open offering street not resting; when every open one rests, the one that
+// opens first; with none open, the first offering street (or the job's own).
+func (m *projects) featuredBoardRest(job projJob, closed map[string]bool, now int64) (string, int64) {
+	board, end := "", int64(0)
 	for _, s := range job.Offer {
-		if !closed[gStreet(s)] {
-			return s
+		if closed[gStreet(s)] {
+			continue
+		}
+		e := int64(0)
+		if job.Kind == "street" || job.Kind == "upgrade" {
+			e = m.restEndAt(s, now)
+		}
+		if e == 0 {
+			return s, 0
+		}
+		if board == "" || e < end {
+			board, end = s, e
 		}
 	}
-	if len(job.Offer) > 0 {
-		return job.Offer[0]
+	if board != "" {
+		return board, end
 	}
-	return job.Street
+	if len(job.Offer) > 0 {
+		return job.Offer[0], 0
+	}
+	return job.Street, 0
+}
+
+// featuredBoard is the street to build it from (featuredBoardRest).
+func (m *projects) featuredBoard(job projJob) string {
+	board, _ := m.featuredBoardRest(job, m.closedStreets(), m.ms())
+	return board
 }
 
 func (m *projects) jobLabel(job projJob) string {
@@ -359,14 +395,19 @@ func (m *projects) featuredMsg() map[string]any {
 	}
 	job := m.t.Jobs[f.Job]
 	phase, perc, whole := m.featuredProgress(f.Job)
-	board := m.featuredBoard(job)
+	now := m.ms()
+	board, restEnd := m.featuredBoardRest(job, m.closedStreets(), now)
 	msg["job"], msg["kind"], msg["street"], msg["board"] = f.Job, job.Kind, job.Street, board
 	msg["label"], msg["hub"], msg["boardLabel"] = m.jobLabel(job), job.Hub, m.streetName(board)
 	msg["phase"], msg["phases"], msg["perc"], msg["percent"] = phase, len(job.Phases), perc, int(math.Floor(whole*100))
 	msg["since"], msg["by"] = f.Since, f.By
 	r := m.st.Jobs[f.Job]
-	if r != nil && r.Ready > m.ms() {
+	if r != nil && r.Ready > now {
 		msg["ready"] = r.Ready
+	}
+	// G1023: the board street's post-build rest, when it ends later than any phase wait.
+	if restEnd > now && (r == nil || restEnd > r.Ready) {
+		msg["ready"], msg["rest"] = restEnd, true
 	}
 	// The board's row (rowJSON, nobody's share): the Projects panel shows what it still needs anywhere.
 	msg["row"] = m.rowJSON(f.Job, r, 0)
