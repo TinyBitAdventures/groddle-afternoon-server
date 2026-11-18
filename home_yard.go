@@ -131,7 +131,7 @@ func (l *httpLedger) homeYard(a yardAct) yardAnswer {
 	body, _ := json.Marshal(a)
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		out, err := l.homeYardOnce(body)
 		if err == nil {

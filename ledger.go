@@ -52,7 +52,29 @@ const (
 	ledgerPrefix     = "groddle-service/1"
 	ledgerTimeout    = 5 * time.Second
 	ledgerTries      = 3
+	ledgerPauseStep  = 400 * time.Millisecond // call: the pause before try n is n times this
+	// The longest chain of ledger calls one shared act waits on in a row (gardens_potions.go: a
+	// Master Gardener pour asks for the bottle's charge, then for the seeds).
+	actLedgerChain = 2
+	// What the hub adds on top of the ledger: queues, the answer's write.
+	actAnswerMargin = 2 * time.Second
 )
+
+// ledgerCallWorst is the longest one call can take: every try runs out its timeout, with the pauses between.
+func ledgerCallWorst() time.Duration {
+	d := ledgerTries * ledgerTimeout
+	for try := 1; try < ledgerTries; try++ {
+		d += time.Duration(try) * ledgerPauseStep
+	}
+	return d
+}
+
+// actAnswerWait is how long a client waits for the answer to a shared act (a garden, a Patch, a
+// street object) before it says the street did not answer (R26): the server's own worst case.
+// hello carries it as "wait" in milliseconds, so the client's wait follows the server's.
+func actAnswerWait() time.Duration {
+	return actLedgerChain*ledgerCallWorst() + actAnswerMargin
+}
 
 var (
 	ledgerURLFlag   = flag.String("ledger-url", "", "the Groddle site's origin (https://groddle.localhost): trades settle in its ledger")
@@ -164,7 +186,7 @@ func (l *httpLedger) call(route string, payload any) ledgerAnswer {
 	body, _ := json.Marshal(payload)
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		a, err := l.once(route, body)
 		if err == nil {

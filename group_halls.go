@@ -138,7 +138,7 @@ func (l *httpLedger) hall(a hallAsk) hallAnswer {
 	body, _ := json.Marshal(map[string]any{"op": a.Op, "id": a.ID, "job": a.Job, "user": a.Player, "group": a.Group, "currants": a.Currants})
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		ans, err := l.hallOnce(body)
 		if err == nil {

@@ -129,7 +129,7 @@ func (l *httpLedger) gift(c giftCall) giftAnswer {
 	body, _ := json.Marshal(map[string]any{"op": c.Op, "from": c.From, "to": c.To, "gave": goodsJSON(c.Gave), "box": c.Box, "ref": c.Ref, "note": c.Note})
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		a, err := l.giftOnce(body)
 		if err == nil {

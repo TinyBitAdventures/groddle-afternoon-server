@@ -119,7 +119,7 @@ type boxSite interface {
 func (l *httpLedger) boxAsk(route string, body []byte) boxAnswer {
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		var a boxAnswer
 		err := l.dropPost(route, body, &a)

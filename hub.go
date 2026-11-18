@@ -28,7 +28,8 @@ import (
 //
 // Server to client:
 //
-//	{"t":"hello","you":{"id":7,"name":"Ada"},"cone":true}  cone only for a player under the cone of silence
+//	{"t":"hello","you":{"id":7,"name":"Ada"},"cone":true,"wait":34400}  cone only for a player under the cone of silence;
+//	                                                    wait: ms a shared act's answer can take at worst (ledger.go actAnswerWait)
 //	{"t":"cone","on":false}                             the site lifted or laid the cone since hello
 //	{"t":"street","street":"GA5…","players":[Player…]}  everyone else there, after a join
 //	{"t":"joined","player":Player}
@@ -283,7 +284,7 @@ func (h *Hub) Connect(c Claims) *Client {
 	h.inputAt[c.Sub] = h.now()
 	h.setConeLocked(c.Sub, c.Cone, c.Iat)
 	h.applyModClaimLocked(c.Sub, c.Mod, c.Iat) // moderation.go
-	hello := map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "off": c.Off}
+	hello := map[string]any{"t": "hello", "you": map[string]any{"id": cl.id, "name": cl.name}, "off": c.Off, "wait": actAnswerWait().Milliseconds()}
 	if h.modConeLocked(c.Sub) {
 		hello["cone"] = true
 	}

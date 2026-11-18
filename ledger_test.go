@@ -263,3 +263,20 @@ func TestHTTPLedgerSignsRetriesAndReadsAnswers(t *testing.T) {
 		t.Fatalf("a refused signature is no answer: %+v", v)
 	}
 }
+
+// R26: a shared act's answer can take two ledger calls in a row, each three tries of 5 s with
+// pauses of 0.4 and 0.8 s, plus the hub's margin; hello tells the client so its wait is the server's.
+func TestActAnswerWaitIsTheLedgerWorstCaseAndHelloSaysIt(t *testing.T) {
+	if got := ledgerCallWorst(); got != 16200*time.Millisecond {
+		t.Fatalf("ledgerCallWorst = %v, want 16.2s", got)
+	}
+	if got := actAnswerWait(); got != 34400*time.Millisecond {
+		t.Fatalf("actAnswerWait = %v, want 34.4s (the game's ANSWER_WAIT_FALLBACK_MS follows it)", got)
+	}
+	url := startServer(t)
+	p := dial(t, url)
+	p.send(map[string]any{"t": "auth", "ticket": altTicket(t, 1, 0, "Ada", "")})
+	if w, _ := p.next("hello")["wait"].(float64); w != 34400 {
+		t.Fatalf("hello wait = %v, want 34400", w)
+	}
+}

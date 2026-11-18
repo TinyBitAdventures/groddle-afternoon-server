@@ -105,7 +105,7 @@ func (l *httpLedger) furniture(op string, buyer, owner, price int64) furnAnswer 
 	body, _ := json.Marshal(map[string]any{"op": op, "buyer": buyer, "owner": owner, "price": price})
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		a, err := l.furnitureOnce(body)
 		if err == nil {

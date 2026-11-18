@@ -147,7 +147,7 @@ func (l *httpLedger) butlerVisit(op string, owner, visitor int64) butlerVisitAns
 	body, _ := json.Marshal(map[string]any{"op": op, "owner": owner, "visitor": visitor})
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		a, err := l.butlerVisitOnce(body)
 		if err == nil {
@@ -188,7 +188,7 @@ func (l *httpLedger) butler(op string, from, to int64, gave tradeGoods, box []tr
 	body, _ := json.Marshal(call)
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		a, err := l.butlerOnce(body)
 		if err == nil {

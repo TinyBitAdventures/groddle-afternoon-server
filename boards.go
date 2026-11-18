@@ -188,7 +188,7 @@ type boardSite interface {
 func (l *httpLedger) boardAsk(route string, body []byte) boardAnswer {
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		var a boardAnswer
 		err := l.dropPost(route, body, &a)

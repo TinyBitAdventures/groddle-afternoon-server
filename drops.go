@@ -302,7 +302,7 @@ func (l *httpLedger) dropPost(route string, body []byte, out any) error {
 func (l *httpLedger) dropAsk(route string, body []byte) dropAnswer {
 	for try := 0; try < ledgerTries; try++ {
 		if try > 0 {
-			l.pause(time.Duration(try) * 400 * time.Millisecond)
+			l.pause(time.Duration(try) * ledgerPauseStep)
 		}
 		var a dropAnswer
 		err := l.dropPost(route, body, &a)
