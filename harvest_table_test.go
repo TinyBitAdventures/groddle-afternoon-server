@@ -98,6 +98,37 @@ func TestHarvestTableIsSharedByEveryoneOnTheStreet(t *testing.T) {
 	}
 }
 
+// G1015b: the table takes what the game's takes (data/harvest-table.json from the game's
+// layableKind), not any food: a Cherry is food but neither a dish nor a crop.
+func TestHarvestTableTakesOnlyDishesAndCrops(t *testing.T) {
+	r := newFeastRig(t, feastNoon, "")
+	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
+	if _, food := pigFoods["cherry"]; !food {
+		t.Fatal("a cherry is food in data/trade.json")
+	}
+	r.lay(ada, "cherry")
+	if no := lastOf(t, ada, "feast_no"); no["code"] != "not_dish" || no["message"] != feastTextNotDish {
+		t.Fatalf("a cherry %v", no)
+	}
+	for _, c := range []string{"pumpkin", "pumpkin_pie", "simple_slaw", "rookswort"} {
+		r.lay(ada, c)
+		if laid := lastOf(t, ada, "feast_laid"); laid == nil {
+			t.Fatalf("%s refused", c)
+		}
+	}
+	if r.mod.total != 4 {
+		t.Fatalf("laid %d", r.mod.total)
+	}
+	for _, c := range []string{"cherry", "apple", "meat", "pick"} {
+		if feastTakes(c) {
+			t.Fatalf("%s taken", c)
+		}
+	}
+	if !feastTakes("harvest_stuffing") || !feastTakes("potcorn") || !feastTakes("corn") {
+		t.Fatal("the game's dish, Pot's dish and a crop are taken")
+	}
+}
+
 func TestHarvestTableRefusals(t *testing.T) {
 	r := newFeastRig(t, feastNoon, "")
 	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)

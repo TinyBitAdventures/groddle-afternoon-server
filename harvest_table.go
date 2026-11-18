@@ -38,6 +38,7 @@ package main
 // (G1009); the 40 rows alone cannot say what the whole week brought.
 
 import (
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -58,8 +59,27 @@ const (
 	feastTextNotHere  = "The Harvest Table is in Groddle Forest Junction."
 )
 
-// feastExtra: food the game designed (no GSJS file, so not in data/trade.json until it is rebuilt).
-var feastExtra = map[string]bool{"harvest_stuffing": true}
+// data/harvest-table.json (the game's tools/build-realtime-harvest-table.mjs): the classes the game's
+// table takes (js/pot-luck-feast.js layableKind): its dishes (Harvest Stuffing, Pot's harvest dishes,
+// what a cooking tool makes) and its crops (what a garden seed grows). G1015b: not any food.
+//
+//go:embed data/harvest-table.json
+var harvestTableJSON []byte
+
+var feastLayable = func() map[string]bool {
+	var d struct {
+		Dishes []string `json:"dishes"`
+		Crops  []string `json:"crops"`
+	}
+	if err := json.Unmarshal(harvestTableJSON, &d); err != nil || len(d.Dishes) == 0 || len(d.Crops) == 0 {
+		panic(fmt.Sprintf("realtime: data/harvest-table.json: %v", err))
+	}
+	out := make(map[string]bool, len(d.Dishes)+len(d.Crops))
+	for _, c := range append(d.Dishes, d.Crops...) {
+		out[c] = true
+	}
+	return out
+}()
 
 var feastFileFlag = flag.String("feast-file", "", "file that keeps Pot Luck Day's Harvest Table, its offerings and each player's last offering day (default: realtime-feast.json beside -secret-file; off: memory only)")
 
@@ -135,11 +155,8 @@ func (m *harvestTable) Register(r *Registry) {
 	r.Provide("feast.counts", func() map[string]int { return m.layCounts() })
 }
 
-// feastTakes: is this class food the table takes (a dish or a crop, or the game's own dish)?
-func feastTakes(c string) bool {
-	_, food := pigFoods[c]
-	return food || feastExtra[c]
-}
+// feastTakes: is this class one the table takes (a dish or a crop, as the game's table)?
+func feastTakes(c string) bool { return feastLayable[c] }
 
 // layCounts is a copy of the season's per-class lay counts.
 func (m *harvestTable) layCounts() map[string]int {
