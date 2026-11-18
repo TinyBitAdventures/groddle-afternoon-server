@@ -367,7 +367,7 @@ func (o *objects) rookedCreatures(street string, spots map[string]*objSpot) []st
 }
 
 func (o *objects) creatureFresh(ob *liveObj) bool {
-	return ob.lag == 0 && !ob.holdEnd.After(o.h.Now()) && ob.incEgg == "" && ob.food == 0 && ob.guano == 0 && ob.userName == "" &&
+	return ob.lag == 0 && !ob.holdEnd.After(o.h.Now()) && ob.incEgg == "" && ob.costume == "" && ob.food == 0 && ob.guano == 0 && ob.userName == "" &&
 		(ob.usesDay != o.today() || (len(ob.uses) == 0 && len(ob.tally) == 0))
 }
 
@@ -388,6 +388,9 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 		tally("sq", "squeeze")
 		if ob.incEgg != "" {
 			m["inc"] = map[string]any{"egg": ob.incEgg, "by": ob.incBy, "in": max(1, ob.incEnd.Sub(now).Milliseconds())}
+		}
+		if ob.costume != "" {
+			m["cos"] = ob.costume // G982: its Pot Luck Day costume (objects_costumes.go)
 		}
 	case "butterfly":
 		tally("ms", "massage")

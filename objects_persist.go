@@ -82,7 +82,9 @@ type objRec struct {
 	IncEgg  string                   `json:"incEgg,omitempty"`
 	IncBy   int64                    `json:"incBy,omitempty"`
 	IncEnd  int64                    `json:"incEnd,omitempty"`
-	Food    int                      `json:"food,omitempty"`
+	// G982: a Chicken's Pot Luck Day costume (objects_costumes.go).
+	Costume string `json:"cos,omitempty"`
+	Food    int    `json:"food,omitempty"`
 	// The hourly Guano under a Batterfly (objects_guano.go).
 	Guano int `json:"guano,omitempty"`
 	// A street Piggy on its way to food (objects_pigs.go pigTrip), on its path's clock.
@@ -130,7 +132,7 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Maturity: ob.maturity, Day: ob.day, WoodCount: ob.woodCount, PoisonEnd: msOf(ob.poisonEnd), PoisonBy: ob.poisonBy,
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
 		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
-		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Food: ob.food, Guano: ob.guano,
+		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Costume: ob.costume, Food: ob.food, Guano: ob.guano,
 		Name: ob.userName, Namer: ob.namer, NamedAt: msOf(ob.namedAt), GoneDay: ob.goneDay, GoneWhy: ob.goneWhy,
 		Crops: ob.crops, Plops: ob.plops}
 	if ob.trip != nil {
@@ -248,6 +250,9 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 		}
 		if _, egg := o.w.rules.Incubate.Hatches[r.IncEgg]; egg && spot.kind == "chicken" && r.IncBy > 0 && r.IncEnd > 0 {
 			ob.incEgg, ob.incBy, ob.incEnd = r.IncEgg, r.IncBy, timeOf(r.IncEnd)
+		}
+		if spot.kind == "chicken" && chickenCostumes[r.Costume] {
+			ob.costume = r.Costume
 		}
 		ob.due = time.Time{}
 	default:
@@ -426,6 +431,9 @@ func (o *objects) resume() {
 					trees = true
 				}
 			case "chicken":
+				if ob.costume != "" {
+					o.armCostumes() // G982: its costume falls off when Pot Luck Day ends
+				}
 				// A Chicken on an egg: it hatches when it was due (its owner is not here after a
 				// restart until they connect again, so an egg due while the server was down is lost).
 				if ob.incEgg != "" {

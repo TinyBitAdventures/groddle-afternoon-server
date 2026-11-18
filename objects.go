@@ -214,7 +214,7 @@ var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab|dragon):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true, "pickup": true}
+		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true, "pickup": true, "dress": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true, "herd": true, "rube": true}
 )
 
@@ -587,6 +587,7 @@ type liveObj struct {
 	incBy   int64
 	incEnd  time.Time
 	incStop func() bool
+	costume string // chicken: its Pot Luck Day costume, everyone's (objects_costumes.go)
 	food    int
 	guano   int // batterfly: the hourly Guano lying under it (objects_guano.go)
 
@@ -617,11 +618,12 @@ type objects struct {
 	roll    func() float64
 	streets map[string]map[string]*liveObj
 	// captures: each player's last Piggy capture per street (objects_pigs_gone.go, G605).
-	captures map[string]map[int64]time.Time
-	limits   map[int64]*objBucket
-	dayStop  func() bool
-	pigStop  func() bool // the one timer for the next Piggy tick (objects_pigs.go)
-	pigDue   time.Time
+	captures    map[string]map[int64]time.Time
+	limits      map[int64]*objBucket
+	dayStop     func() bool
+	pigStop     func() bool // the one timer for the next Piggy tick (objects_pigs.go)
+	costumeStop func() bool // Pot Luck Day's end, when every costume falls off (objects_costumes.go)
+	pigDue      time.Time
 	// dev (GRODDLE_TREES_DEV=1): a poison pour may name its own die time ("ms"), for QA.
 	dev bool
 	// Fertilidust, Tree Poison and Antidote through the site's ledger (objects_uses.go).
@@ -857,6 +859,9 @@ func (o *objects) get(street string, spot *objSpot) *liveObj {
 		if !ob.dead && ob.rookStop == nil && !ob.rookSteady && o.rooked(street, spot.id) {
 			o.armRookFruit(street, ob, rookFruitEvery)
 		}
+	}
+	if spot.kind == "chicken" && o.costumeSettle(ob) {
+		o.saveSoon() // G982: a costume read after Pot Luck Day ended falls off (objects_costumes.go)
 	}
 	if spot.kind == "chicken" || spot.kind == "butterfly" || spot.kind == "pig" || spot.kind == "kitty" {
 		// Rooked: it lies where the Rook struck it until it is revived (objects_creatures.go rookHoldCreature).
@@ -1183,6 +1188,11 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	if spot.kind == "pig" && m.Verb == "feed" && o.uses.ledger != nil {
 		// G335 slice 5: food that sates a hungry Piggy is the ledger's to confirm and take (objects_pigs.go).
 		o.askFeed(cl, m, street, spot, perks)
+		return
+	}
+	if spot.kind == "chicken" && m.Verb == "dress" {
+		// G982: a Pot Luck Day costume, the ledger's to take first (objects_costumes.go).
+		o.askDress(cl, m, street, spot)
 		return
 	}
 	if spot.kind == "chicken" && m.Verb == "incubate" {
