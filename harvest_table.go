@@ -296,6 +296,10 @@ func (m *harvestTable) lay(cl *Client, frame json.RawMessage) {
 			mine["use"] = use
 		}
 		m.h.SendLocked(cl, mine)
+		// Thanksgiving Day's feast (feast_day.go) draws from the counts: tell it a dish joined.
+		if fn, ok := m.h.ProvidedLocked("feastday.laid").(func()); ok {
+			fn()
+		}
 	})
 }
 

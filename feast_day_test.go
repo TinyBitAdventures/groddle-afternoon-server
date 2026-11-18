@@ -264,3 +264,26 @@ func TestFeastDaySurvivesARestart(t *testing.T) {
 		t.Fatalf("the next day %v", st)
 	}
 }
+
+func TestFeastDayALayOnTheDayRefillsSpotsThePoolLeftEmpty(t *testing.T) {
+	r := newFeastDayRig(t, feastDayMorning, "")
+	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
+	bo := joinAt(r.hub, 2, "Bo", feastStreet, 0, -120)
+	// Nothing laid: Pot's 20, all out. Bo empties spot 0; nothing is left to lay there.
+	for i := 0; i < feastDayBites; i++ {
+		r.bite(bo, 0)
+	}
+	r.advance(feastDayRefill)
+	if r.day.piles[0].B != 0 || r.day.refill[0] != nil {
+		t.Fatalf("an empty pool lays nothing %v", r.day.piles[0])
+	}
+	frames(bo)
+	r.lay(ada, "corn")
+	if left := lastOf(t, bo, "feastday_left"); left["left"].(float64) != float64(19*feastDayBites+feastDayBites) {
+		t.Fatalf("the street hears the pool grow %v", left)
+	}
+	r.advance(feastDayRefill)
+	if r.day.piles[0].B != feastDayBites || r.day.piles[0].C != "corn" {
+		t.Fatalf("the new dish is laid %v", r.day.piles[0])
+	}
+}

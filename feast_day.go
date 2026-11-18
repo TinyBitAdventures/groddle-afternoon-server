@@ -34,6 +34,7 @@ package main
 //	{"t":"feastday_state","street":"G…","on":true,"piles":[{"s","n","c","b","x"}],"left":57,"ate":2,"cap":11}
 //	{"t":"feastday_pile","street":"G…","pile":{…},"left":56}                 a pile changed (b 0: emptied)
 //	{"t":"feastday_ate","street":"G…","pile":{…},"left":56,"ate":3,"c":"corn"} to the eater
+//	{"t":"feastday_left","street":"G…","left":59}                            a lay on the table joined the pool
 //
 // The feast survives a restart (-feast-day-file, default realtime-feast-day.json beside
 // -secret-file; off: memory only).
@@ -166,6 +167,22 @@ func (m *feastDay) Register(r *Registry) {
 	r.OnJoin(m.joined)
 	r.OnDisconnect(func(cl *Client) { delete(m.eatAt, cl.ID()) })
 	r.OnShutdown(func() { m.saveSoon() })
+	// harvest_table.go calls it after each lay: on the day a new dish joins the pool at once.
+	r.Provide("feastday.laid", m.laid)
+}
+
+// laid is a lay on the Harvest Table during the day: spots the pool had left empty are laid again
+// feastDayRefill later, and the street hears the servings left.
+func (m *feastDay) laid() {
+	if m.key == "" {
+		return
+	}
+	for s, p := range m.piles {
+		if p.B == 0 {
+			m.armRefill(s)
+		}
+	}
+	m.broadcast(map[string]any{"t": "feastday_left", "left": m.left()}, 0)
 }
 
 // thanksgiving is the day of November that Thanksgiving falls on in year y (potLuckWindow's middle).
