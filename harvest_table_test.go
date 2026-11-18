@@ -266,3 +266,44 @@ func TestHarvestTableSyncResendsTheState(t *testing.T) {
 	send(r.hub, away, map[string]any{"t": "feast_sync"})
 	noneOf(t, away, "feast_state")
 }
+
+func TestHarvestTableCountsEachKindLaidThisSeason(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feast.json")
+	r := newFeastRig(t, feastNoon, path)
+	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
+	// More lays than the table keeps rows for: the counts see them all.
+	for i := 0; i < feastKeep+3; i++ {
+		r.lay(ada, "corn")
+	}
+	r.lay(ada, "pumpkin_pie")
+	r.lay(ada, "pick") // refused: not counted
+	counts := r.mod.layCounts()
+	if len(counts) != 2 || counts["corn"] != feastKeep+3 || counts["pumpkin_pie"] != 1 {
+		t.Fatalf("counts %v", counts)
+	}
+	got := r.hub.ProvidedLocked("feast.counts").(func() map[string]int)()
+	got["corn"] = 0 // a copy: the table's own map is untouched
+	if r.mod.counts["corn"] != feastKeep+3 {
+		t.Fatal("the provider hands out a copy")
+	}
+	// Saved and read back; a class the table would not take is dropped as it is read.
+	r.mod.save()
+	flushStateWrites("")
+	again := newFeastRig(t, feastNoon.Add(time.Hour), path)
+	if c := again.mod.counts; len(c) != 2 || c["corn"] != feastKeep+3 || c["pumpkin_pie"] != 1 {
+		t.Fatalf("after a restart %v", c)
+	}
+	b := []byte(`{"key":"pot_luck_day:2026","rows":[],"total":3,"counts":{"corn":2,"pick":5,"onion":0,"potcorn":1},"daily":{}}`)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bounded := newFeastRig(t, feastNoon, path)
+	if c := bounded.mod.counts; len(c) != 2 || c["corn"] != 2 || c["potcorn"] != 1 {
+		t.Fatalf("only food is kept %v", c)
+	}
+	// Packed away with the season.
+	later := newFeastRig(t, time.Date(2026, time.December, 1, 12, 0, 0, 0, urZone), path)
+	if len(later.mod.counts) != 0 {
+		t.Fatalf("after the season %v", later.mod.counts)
+	}
+}

@@ -33,7 +33,9 @@ package main
 //	{"t":"feast_state","street":"G…","on":false,"rows":[],"total":0}                    the season over: packed away
 //
 // The table survives a restart (-feast-file, default realtime-feast.json beside -secret-file; off:
-// memory only).
+// memory only). It also counts each kind of food laid this season ("counts": class -> lays, only
+// classes the table takes, so at most the food classes), which Thanksgiving Day's feast draws from
+// (G1009); the 40 rows alone cannot say what the whole week brought.
 
 import (
 	"encoding/json"
@@ -72,10 +74,11 @@ type feastRow struct {
 
 // feastSaved is the state file.
 type feastSaved struct {
-	Key   string          `json:"key"`
-	Rows  []feastRow      `json:"rows"`
-	Total int             `json:"total"`
-	Daily map[int64]int64 `json:"daily"`
+	Key    string          `json:"key"`
+	Rows   []feastRow      `json:"rows"`
+	Total  int             `json:"total"`
+	Counts map[string]int  `json:"counts,omitempty"`
+	Daily  map[int64]int64 `json:"daily"`
 }
 
 type harvestTable struct {
@@ -83,6 +86,7 @@ type harvestTable struct {
 	key    string // the season's year ("pot_luck_day:2026"), "" when packed away
 	rows   []feastRow
 	total  int
+	counts map[string]int  // class -> lays this season (G1009)
 	daily  map[int64]int64 // player -> game day of their last offering
 	layAt  map[int64]time.Time
 	uses   *useAsker
@@ -93,7 +97,7 @@ type harvestTable struct {
 func init() { modules = append(modules, newHarvestTable) }
 
 func newHarvestTable(h *Hub) Module {
-	m := &harvestTable{h: h, daily: map[int64]int64{}, layAt: map[int64]time.Time{}, uses: newUseAsker(h, "feast: the Harvest Table")}
+	m := &harvestTable{h: h, counts: map[string]int{}, daily: map[int64]int64{}, layAt: map[int64]time.Time{}, uses: newUseAsker(h, "feast: the Harvest Table")}
 	if m.path = statePath(feastFileForTest, feastFileFlag, "realtime-feast.json"); m.path != "" {
 		var s feastSaved
 		if ok, err := readStateFile("feast", m.path, &s); err != nil {
@@ -103,6 +107,11 @@ func newHarvestTable(h *Hub) Module {
 			m.key, m.rows, m.total = s.Key, s.Rows, s.Total
 			if s.Daily != nil {
 				m.daily = s.Daily
+			}
+			for c, n := range s.Counts {
+				if n > 0 && feastTakes(c) {
+					m.counts[c] = n
+				}
 			}
 			if len(m.rows) > feastKeep {
 				m.rows = m.rows[len(m.rows)-feastKeep:]
@@ -122,6 +131,23 @@ func (m *harvestTable) Register(r *Registry) {
 	r.OnShutdown(func() { m.save() })
 	// For tests and other modules: the table's count and its newest offering.
 	r.Provide("feast.table", func() (int, []feastRow) { return m.total, append([]feastRow(nil), m.rows...) })
+	// Each kind of food laid this season and how many (a copy), for Thanksgiving Day's feast (G1009).
+	r.Provide("feast.counts", func() map[string]int { return m.layCounts() })
+}
+
+// feastTakes: is this class food the table takes (a dish or a crop, or the game's own dish)?
+func feastTakes(c string) bool {
+	_, food := pigFoods[c]
+	return food || feastExtra[c]
+}
+
+// layCounts is a copy of the season's per-class lay counts.
+func (m *harvestTable) layCounts() map[string]int {
+	out := make(map[string]int, len(m.counts))
+	for c, n := range m.counts {
+		out[c] = n
+	}
+	return out
 }
 
 func isFeastStreet(street string) bool { return len(street) > 1 && street[1:] == feastStreetKey }
@@ -141,8 +167,8 @@ func (m *harvestTable) pack(now time.Time) bool {
 	if key == m.key {
 		return false
 	}
-	had := m.total > 0 || len(m.rows) > 0 || len(m.daily) > 0
-	m.key, m.rows, m.total, m.daily = key, nil, 0, map[int64]int64{}
+	had := m.total > 0 || len(m.rows) > 0 || len(m.daily) > 0 || len(m.counts) > 0
+	m.key, m.rows, m.total, m.counts, m.daily = key, nil, 0, map[string]int{}, map[int64]int64{}
 	if had {
 		log.Printf("feast: the Harvest Table is packed away (season %q)", key)
 	}
@@ -219,7 +245,7 @@ func (m *harvestTable) lay(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, f.C, "no_season", feastTextNoSeason)
 		return
 	}
-	if _, food := pigFoods[f.C]; !food && !feastExtra[f.C] {
+	if !feastTakes(f.C) {
 		m.refuse(cl, f.C, "not_dish", feastTextNotDish)
 		return
 	}
@@ -252,6 +278,7 @@ func (m *harvestTable) lay(cl *Client, frame json.RawMessage) {
 			m.rows = m.rows[len(m.rows)-feastKeep:]
 		}
 		m.total++
+		m.counts[f.C]++
 		day := floorDiv(m.h.Now().UnixMilli()-gameEpochMs, gameDayMs)
 		last, had := m.daily[id]
 		first := !had || last != day
@@ -273,7 +300,7 @@ func (m *harvestTable) lay(cl *Client, frame json.RawMessage) {
 }
 
 func (m *harvestTable) saved() feastSaved {
-	return feastSaved{Key: m.key, Rows: m.rows, Total: m.total, Daily: m.daily}
+	return feastSaved{Key: m.key, Rows: m.rows, Total: m.total, Counts: m.counts, Daily: m.daily}
 }
 
 // saveSoon writes the table off the hub lock (statewrite.go).
