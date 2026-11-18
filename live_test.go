@@ -638,3 +638,71 @@ func TestReactionsFromTheWebsiteSocket(t *testing.T) {
 		t.Fatalf("%v", e)
 	}
 }
+
+// fakeLineSite is the site's chat history for threads (R5): the lines it keeps, by room.
+type fakeLineSite struct {
+	kept  map[string]map[int64]bool
+	down  bool
+	asked []int64
+}
+
+func (f *fakeLineSite) keptLine(room string, lid int64) (bool, bool) {
+	f.asked = append(f.asked, lid)
+	if f.down {
+		return false, false
+	}
+	return f.kept[room][lid], true
+}
+
+// R5 (G1025): a reply to a line this server no longer holds (older than its history, or from before a
+// restart) goes when the site keeps that line for the room; never one in a room the player does not
+// have open, and a line the site does not keep is refused naming it, so the game can give the words back.
+func TestThreadsReplyToAnOlderLineTheSiteKeeps(t *testing.T) {
+	site := &fakeLineSite{kept: map[string]map[int64]bool{"global": {4242: true}, "trade": {5151: true}}}
+	saved := threadSiteForTest
+	threadSiteForTest = site
+	r := newLiveRig(t)
+	threadSiteForTest = saved
+	ada := r.game(7, "Ada", lists{})
+	bo := r.game(9, "Bo", lists{})
+	r.do(ada, map[string]any{"t": "thread_say", "channel": "global", "parent": 4242, "text": "still here?"})
+	r.settle(0)
+	if m := one(t, drain(bo), "thread_said"); m["parent"].(float64) != 4242 || m["line"].(map[string]any)["text"] != "still here?" {
+		t.Fatalf("%v", m)
+	}
+	drain(ada)
+	// Now the server holds that thread: the next reply needs no ask.
+	r.now = r.now.Add(time.Second)
+	r.do(bo, map[string]any{"t": "thread_say", "channel": "global", "parent": 4242, "text": "yes"})
+	if len(kinds(drain(ada), "thread_said")) != 1 || len(site.asked) != 1 {
+		t.Fatalf("asked %v", site.asked)
+	}
+	drain(bo)
+	// A line the site keeps for another room (Trade, not open here) is not this room's.
+	r.do(ada, map[string]any{"t": "thread_say", "channel": "global", "parent": 5151, "text": "wrong room"})
+	r.settle(0)
+	errs := kinds(drain(ada), "error")
+	if len(errs) != 1 || errs[0]["message"] != threadTextOld || errs[0]["old"] != true || errs[0]["parent"].(float64) != 5151 || errs[0]["channel"] != "global" {
+		t.Fatalf("errors %v", errs)
+	}
+	if len(kinds(drain(bo), "thread_said")) != 0 {
+		t.Fatal("a reply under another room's line went")
+	}
+	// The site not answering: refused, named, old (the words can go to Global instead).
+	site.down = true
+	r.do(ada, map[string]any{"t": "thread_say", "channel": "global", "parent": 4343, "text": "anyone?"})
+	r.settle(0)
+	if errs := kinds(drain(ada), "error"); len(errs) != 1 || errs[0]["message"] != threadTextNoSite || errs[0]["old"] != true {
+		t.Fatalf("errors %v", errs)
+	}
+}
+
+// Without a site (development, tests), an unknown line is refused as before, now naming it.
+func TestThreadsUnknownLineWithoutASite(t *testing.T) {
+	r := newLiveRig(t)
+	ada := r.game(7, "Ada", lists{})
+	r.do(ada, map[string]any{"t": "thread_say", "channel": "global", "parent": 99, "text": "hi"})
+	if errs := kinds(drain(ada), "error"); len(errs) != 1 || errs[0]["old"] != true || errs[0]["parent"].(float64) != 99 {
+		t.Fatalf("errors %v", errs)
+	}
+}

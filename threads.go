@@ -23,7 +23,9 @@ package main
 //	{"t":"thread","channel":"global","parent":…,"lines":[line…],"known":true}  thread_get's answer, oldest
 //	        first, with their reactions ("r") as you may see them; known false when the server no longer
 //	        holds that thread (the site keeps every reply: groddle/v1/chat/channels/<key>/threads/<lid>)
-//	{"t":"error","code":"thread","message":"…"}
+//	{"t":"error","code":"thread","message":"…","channel":"global","parent":…,"old":true}
+//	        a reply refused; channel and parent name the line when the refusal is about one reply, and old
+//	        when that line is not there to reply to (the game offers to say the words in Global instead)
 //
 // A channel line's history (channel_joined) carries "th":{"n":3,"last":{…}}
 // for each line with replies (left out without), counted as the reader may
@@ -40,15 +42,21 @@ package main
 // them (web.go), the site leaves them out of what it serves.
 //
 // Only a line of the channel takes replies: a parent is a line the server has
-// for that channel (its history, a reactable line, a thread it holds), never
-// a reply. Kept here: the last threadKeep replies of each thread (n counts
+// for that channel (its history, a reactable line, a thread it holds), or,
+// for an older line (R5, register G1025), one the site keeps for that room,
+// asked off the hub lock (POST groddle/v1/chat/line, signed like the ledger's
+// calls: groddle-afternoon-site src/ChatHistory.php line), never a reply. The
+// room is the one this socket has the channel open in, so the line is one the
+// player may read. Kept here: the last threadKeep replies of each thread (n counts
 // them all) and at most threadsMax threads, the least recently replied to
 // going first; in memory only (a restart forgets them with the channel's
 // history; the site keeps them all).
 
 import (
 	"encoding/json"
+	"log"
 	"sort"
+	"testing"
 	"time"
 )
 
@@ -75,10 +83,52 @@ type threads struct {
 	h       *Hub
 	threads map[int64]*chanThread // by the parent's lid
 	replyOf map[int64]int64       // a reply's lid -> its parent
+	site    lineSite              // nil: only the lines this server holds take replies
+	spawn   func(func())          // runs a site call off the hub lock (tests run it in place)
+	asking  map[int64]bool        // a player's reply waiting on the site
 }
 
+// lineSite is the site's chat history as threads asks it (R5): whether it keeps lid as a line of
+// room (not a reply, not deleted). ok false: no answer.
+type lineSite interface {
+	keptLine(room string, lid int64) (kept, ok bool)
+}
+
+const chatRouteLine = "/groddle/v1/chat/line"
+
+func (l *httpLedger) keptLine(room string, lid int64) (bool, bool) {
+	a := l.call(chatRouteLine, map[string]any{"room": room, "lid": lid})
+	switch a.Status {
+	case "settled":
+		return true, true
+	case "refused":
+		return false, true
+	}
+	return false, false
+}
+
+// threadSiteForTest is the site a test's threads module asks (nil: none).
+var threadSiteForTest lineSite
+
+const (
+	threadTextOld     = "That line is not there to reply to any more."
+	threadTextNoSite  = "The chat's history did not answer, so that older line can't take a reply right now."
+	threadTextWaiting = "Hold on, still sending your last reply."
+)
+
 func newThreads(h *Hub) Module {
-	return &threads{h: h, threads: map[int64]*chanThread{}, replyOf: map[int64]int64{}}
+	m := &threads{h: h, threads: map[int64]*chanThread{}, replyOf: map[int64]int64{}, spawn: func(fn func()) { go fn() }, asking: map[int64]bool{}}
+	if testing.Testing() {
+		m.site = threadSiteForTest
+		if m.site != nil {
+			m.spawn = func(fn func()) { fn() }
+		}
+	} else if site, _ := newLedgerFromFlags(); site != nil {
+		if l, ok := site.(*httpLedger); ok {
+			m.site = l
+		}
+	}
+	return m
 }
 
 func (m *threads) Register(r *Registry) {
@@ -91,6 +141,16 @@ func (m *threads) Register(r *Registry) {
 
 func (m *threads) refuse(cl *Client, message string) {
 	m.h.ErrorLocked(cl, "thread", message)
+}
+
+// refuseReply refuses one reply, naming its line, so the game can give the words back (old: the line is
+// not there to reply to, and the game offers to say them in Global instead).
+func (m *threads) refuseReply(cl *Client, ch string, parent int64, message string, old bool) {
+	out := map[string]any{"t": "error", "code": "thread", "message": message, "channel": ch, "parent": parent}
+	if old {
+		out["old"] = true
+	}
+	m.h.queueLocked(cl, out)
 }
 
 func (m *threads) channels() *channels {
@@ -163,37 +223,95 @@ func threadFrame(frame json.RawMessage) (ch, text string, parent int64, ok bool)
 
 func (m *threads) say(cl *Client, frame json.RawMessage) {
 	ch, raw, parent, ok := threadFrame(frame)
-	c := m.channels()
-	if !ok || c == nil {
+	if !ok || m.channels() == nil {
 		return
 	}
 	text := cleanChat(raw)
 	if text == "" {
 		return
 	}
+	room, ok := m.mayReply(cl, ch, text)
+	if !ok {
+		return
+	}
+	if m.known(room, parent) {
+		m.reply(cl, ch, room, parent, text)
+		return
+	}
+	m.askSite(cl, ch, room, parent, text)
+}
+
+// mayReply is the room cl has ch open in when they may say a line there now (refused otherwise).
+func (m *threads) mayReply(cl *Client, ch, text string) (string, bool) {
+	c := m.channels()
+	if c == nil {
+		return "", false
+	}
 	id := cl.ID()
 	room := c.open[id][ch]
 	w := c.watchFor(cl)
 	if room == "" || w == nil {
 		m.refuse(cl, chanNotIn)
-		return
+		return "", false
 	}
 	if ((room == "global" || room == "trade") && w.silence["chat"]) || ((room == "help" || room == "newbie") && w.silence["help"]) || m.h.modSilencedRoomLocked(id, room) { // moderation.go
 		m.h.logChatLocked("channel", room, cl, text, "silenced", nil)
 		m.refuse(cl, chanSuspended)
-		return
+		return "", false
 	}
-	if !m.known(room, parent) {
-		m.refuse(cl, "That line is too old to reply to here. Reply to a newer one, or on the website's /chat/.")
-		return
-	}
+	return room, true
+}
+
+// reply says a reply under a line known to be room's.
+func (m *threads) reply(cl *Client, ch, room string, parent int64, text string) {
+	c := m.channels()
 	if !c.allow("say", cl, chanSayBurst, chanSayEvery) {
-		m.h.logChatLocked("channel", room, cl, text, "slow_down", nil)
+		m.h.logChatLocked("channel", room, cl, text, "slow_down", nil) // allow said slow_down
 		return
 	}
+	id := cl.ID()
 	line := chanLine{ID: id, Name: cl.Name(), Text: filterWords(text), At: m.h.Now().UnixMilli()}
 	line = m.add(ch, room, parent, line)
 	m.h.logChatLineLocked("channel", room, id, cl.Name(), text, "", nil, line.Lid)
+}
+
+// askSite: a line this server does not hold (older than its history, or from before a restart) takes
+// the reply when the site keeps it for that room (R5). The ask runs off the hub lock; its answer is
+// checked again under it (the socket still there, the channel still open in that room, not silenced).
+func (m *threads) askSite(cl *Client, ch, room string, parent int64, text string) {
+	id := cl.ID()
+	if m.site == nil || parent <= 0 || m.replyOf[parent] != 0 {
+		m.refuseReply(cl, ch, parent, threadTextOld, true)
+		return
+	}
+	if m.asking[id] {
+		m.refuseReply(cl, ch, parent, threadTextWaiting, false)
+		return
+	}
+	m.asking[id] = true
+	site := m.site
+	m.spawn(func() {
+		kept, ok := site.keptLine(room, parent)
+		m.h.After(0, func() {
+			delete(m.asking, id)
+			if m.h.clients[id] != cl || cl.closed {
+				return
+			}
+			if !ok {
+				log.Printf("threads: the site did not answer for %s line %d", room, parent)
+				m.refuseReply(cl, ch, parent, threadTextNoSite, true)
+				return
+			}
+			if !kept || m.replyOf[parent] != 0 {
+				m.refuseReply(cl, ch, parent, threadTextOld, true)
+				return
+			}
+			if now, ok := m.mayReply(cl, ch, text); !ok || now != room {
+				return
+			}
+			m.reply(cl, ch, room, parent, text)
+		})
+	})
 }
 
 // webReply is webchat.go's: a reply written on the website, under a line the server has for that
