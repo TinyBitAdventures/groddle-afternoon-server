@@ -31,7 +31,9 @@ package main
 // Server to client:
 //
 //	{"t":"home_yard_done","req":3,"owner":7,"status":"settled|refused","why":"…","text":"…","act":{…},"added":4}
-//	   (a rock's or node's act carries "took": the chunks the site rolled, or the uses it took)
+//	   (a rock's or node's act carries "took": the chunks the site rolled, or the uses it took;
+//	   a swing or dig a home crew helped (home_crew.go) also "help": {"bonus","by"} or
+//	   {"n","items","class","loam","by"}, which the site took and credited with it)
 //	{"t":"home_yard_acted","owner":7,"from":{"id":9,"name":"Bo"},"act":{"id":"yd-…","kind":"tree","target":"patch:1","verb":"water","took":0,"at":…}}
 //
 // Rocks and resource nodes the owner cultivated on the street (MPVISIT): a
@@ -104,6 +106,17 @@ type yardAct struct {
 	ID      string `json:"id"`
 	Verb    string `json:"verb"`
 	What    string `json:"what,omitempty"`
+	// Help is the crew's help a visitor's landed swing or dig had (home_crew.go): the site takes a
+	// rock's bonus chunks from the rock with the swing's own and credits them, and a dig's bonus items.
+	Help *yardHelp `json:"help,omitempty"`
+}
+
+// yardHelp is home_crew.go land's answer, as the site reads it.
+type yardHelp struct {
+	Bonus int    `json:"bonus,omitempty"`
+	Items int    `json:"items,omitempty"`
+	Class string `json:"class,omitempty"`
+	Loam  bool   `json:"loam,omitempty"`
 }
 
 // yardSite is the site's yard (httpLedger). Calls block; the module makes them off the hub lock.
@@ -232,6 +245,20 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 		return
 	}
 	a := yardAct{Op: "yd-" + m.newID(), Owner: owner, Visitor: visitor, Kind: msg.Kind, ID: msg.ID, Verb: msg.Verb, What: msg.What}
+	// G947 (M3): a swing or dig landing at a home crew's rock or Dirt Pile takes the crew's help with it
+	// (mining.js 327-342, dirt_pile.js 345-358), and the visitor is off the crew.
+	var help map[string]any
+	if land, _ := m.h.ProvidedLocked("homecrew.land").(func(int64, string, int64) map[string]any); land != nil &&
+		((msg.Kind == "rock" && msg.Verb == "mine") || (msg.Kind == "node" && msg.Verb == "dig")) {
+		help = land(owner, msg.ID, visitor)
+		if help != nil {
+			a.Help = &yardHelp{}
+			a.Help.Bonus, _ = help["bonus"].(int)
+			a.Help.Items, _ = help["items"].(int)
+			a.Help.Class, _ = help["class"].(string)
+			a.Help.Loam, _ = help["loam"].(bool)
+		}
+	}
 	site := m.site
 	name := cl.Name()
 	m.spawn(func() {
@@ -248,6 +275,9 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 				done := map[string]any{"t": "home_yard_done", "req": req, "owner": owner, "status": ans.Status, "why": ans.Why, "text": ans.Text, "act": act, "added": ans.Added}
 				if len(ans.Receipt) > 0 && string(ans.Receipt) != "null" {
 					done["receipt"] = ans.Receipt
+				}
+				if help != nil && ans.Status == "settled" {
+					done["help"] = help
 				}
 				m.h.SendLocked(c, done)
 			}

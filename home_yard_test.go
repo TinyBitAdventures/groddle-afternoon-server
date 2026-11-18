@@ -22,6 +22,7 @@ func (f *fakeYard) homeYard(a yardAct) yardAnswer {
 type yardRig struct {
 	*homesRig
 	yard    *homeYard
+	crew    *homeCrew
 	site    *fakeYard
 	pending []func()
 }
@@ -35,6 +36,7 @@ func newYardRig(t *testing.T) *yardRig {
 	modules = []moduleFactory{
 		func(h *Hub) Module { r.m = newHomes(h).(*homes); return r.m },
 		func(h *Hub) Module { r.yard = newHomeYard(h).(*homeYard); return r.yard },
+		func(h *Hub) Module { r.crew = newHomeCrew(h).(*homeCrew); return r.crew },
 		func(h *Hub) Module { return r.ign },
 	}
 	r.hub = NewHub(func() time.Time { return r.now })
