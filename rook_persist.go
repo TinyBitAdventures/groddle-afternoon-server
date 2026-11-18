@@ -59,7 +59,7 @@ func (m *rook) load() error {
 	}
 	n := 0
 	for tsid, rec := range f.Streets {
-		if _, known := m.w.streets[tsid]; !known || rec == nil {
+		if !m.w.known(tsid) || rec == nil {
 			continue
 		}
 		rest := timeOf(rec.Rest)

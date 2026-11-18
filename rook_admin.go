@@ -86,8 +86,9 @@ func adminRooks(h *Hub, body []byte) (int, any) {
 			}
 		}
 		sort.Slice(players, func(i, j int) bool { return players[i].ID < players[j].ID })
+		spot, _ := m.spot(tsid)
 		attacks = append(attacks, map[string]any{
-			"street": tsid, "hub": m.w.streets[tsid].hub, "phase": a.phase, "angry": a.angry,
+			"street": tsid, "hub": spot.hub, "phase": a.phase, "angry": a.angry,
 			"health": a.health, "maxHealth": a.maxHealth, "stun": min(a.stun, a.maxStun), "maxStun": a.maxStun,
 			"crowd": a.crowd, "wingBeats": a.wingBeats, "clock": rookMsLeft(now, a.clockAt),
 			"orbs": len(a.orbs), "primed": a.primed != nil, "scheduled": a.rests, "players": players,

@@ -293,41 +293,72 @@ type rookSpot struct {
 
 type rookWorld struct {
 	streets map[string]rookSpot
-	order   []string // every street, sorted (the world's schedule walks them in this order)
-	hubs    map[string][]string
-	values  map[string]int
-	refused map[string]bool
+	// upgrades: a street's shrine once a street upgrade is built, by option id (only where the shrine
+	// differs from the street's own, or the upgrade gives the street one: rook.spot).
+	upgrades map[string]map[string]rookSpot
+	order    []string // every street, sorted (the world's schedule walks them in this order)
+	hubs     map[string][]string
+	values   map[string]int
+	refused  map[string]bool
 }
 
 func loadRookWorld(raw []byte) (*rookWorld, error) {
 	var file struct {
-		Streets map[string][]any `json:"streets"`
-		Values  map[string]int   `json:"values"`
-		Refused []string         `json:"refused"`
+		Streets  map[string][]any            `json:"streets"`
+		Upgrades map[string]map[string][]any `json:"upgrades"`
+		Values   map[string]int              `json:"values"`
+		Refused  []string                    `json:"refused"`
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
 	}
-	w := &rookWorld{streets: map[string]rookSpot{}, hubs: map[string][]string{}, values: file.Values, refused: map[string]bool{}}
-	for tsid, row := range file.Streets {
+	w := &rookWorld{streets: map[string]rookSpot{}, upgrades: map[string]map[string]rookSpot{}, hubs: map[string][]string{}, values: file.Values, refused: map[string]bool{}}
+	parse := func(what string, row []any) (rookSpot, error) {
 		if len(row) < 4 {
-			return nil, fmt.Errorf("%s: bad street %v", tsid, row)
+			return rookSpot{}, fmt.Errorf("%s: bad street %v", what, row)
 		}
 		hub, ok1 := row[0].(string)
 		x, ok2 := row[1].(float64)
 		y, ok3 := row[2].(float64)
 		giant, ok4 := row[3].(string)
 		if !(ok1 && ok2 && ok3 && ok4) || giant == "" {
-			return nil, fmt.Errorf("%s: bad street %v", tsid, row)
+			return rookSpot{}, fmt.Errorf("%s: bad street %v", what, row)
 		}
-		w.streets[tsid] = rookSpot{hub: hub, x: x, y: y, giant: giant}
-		w.hubs[hub] = append(w.hubs[hub], tsid)
+		return rookSpot{hub: hub, x: x, y: y, giant: giant}, nil
+	}
+	for tsid, row := range file.Streets {
+		spot, err := parse(tsid, row)
+		if err != nil {
+			return nil, err
+		}
+		w.streets[tsid] = spot
+	}
+	for tsid, opts := range file.Upgrades {
+		w.upgrades[tsid] = map[string]rookSpot{}
+		for option, row := range opts {
+			spot, err := parse(tsid+" upgrade "+option, row)
+			if err != nil {
+				return nil, err
+			}
+			w.upgrades[tsid][option] = spot
+		}
+	}
+	// Every street that has a shrine or may get one (an upgrade's, not built yet: rook.spot says).
+	for tsid := range w.upgrades {
+		if _, own := w.streets[tsid]; !own {
+			for _, spot := range w.upgrades[tsid] {
+				w.hubs[spot.hub] = append(w.hubs[spot.hub], tsid)
+				break
+			}
+			w.order = append(w.order, tsid)
+		}
+	}
+	for tsid, spot := range w.streets {
+		w.hubs[spot.hub] = append(w.hubs[spot.hub], tsid)
+		w.order = append(w.order, tsid)
 	}
 	for _, list := range w.hubs {
 		sort.Strings(list)
-	}
-	for tsid := range w.streets {
-		w.order = append(w.order, tsid)
 	}
 	sort.Strings(w.order)
 	for _, id := range file.Refused {
@@ -337,6 +368,30 @@ func loadRookWorld(raw []byte) (*rookWorld, error) {
 }
 
 var rookData *rookWorld
+
+// known is whether a street has a shrine or a street upgrade may give it one (the state file's streets).
+func (w *rookWorld) known(tsid string) bool {
+	_, own := w.streets[tsid]
+	return own || w.upgrades[tsid] != nil
+}
+
+// spot is the street's shrine now, false when it has none (G960 left: rook.go did not know built
+// upgrades). A built street upgrade (the projects module's "projects.upgrade", the game's
+// js/street-jobs.js appliedUpgrade) plans the street from upgradeEcologyEntry, which can give it a
+// shrine or another Giant's (Sylvan Grove's Piggy & Patch Place: a Shrine to Tii), as game.js
+// streetShrineGiant reads it; so the Rook may come, the shrine stands there and its Giant's emblem
+// does the 250 damage. Otherwise the street's own, as objects_upgrades.go lays out its objects.
+func (m *rook) spot(tsid string) (rookSpot, bool) {
+	if ups := m.w.upgrades[tsid]; ups != nil {
+		if fn, _ := m.h.ProvidedLocked("projects.upgrade").(func(string) string); fn != nil {
+			if s, ok := ups[fn(tsid)]; ok {
+				return s, true
+			}
+		}
+	}
+	s, ok := m.w.streets[tsid]
+	return s, ok
+}
 
 func init() {
 	w, err := loadRookWorld(rookJSON)
@@ -634,7 +689,7 @@ func (m *rook) attackState(a *rookAttack) map[string]any {
 	if p := a.primed; p != nil {
 		primed = map[string]any{"by": p.by, "name": p.name, "in": rookMsLeft(now, p.until)}
 	}
-	spot := m.w.streets[a.street]
+	spot, _ := m.spot(a.street)
 	return map[string]any{
 		"phase": a.phase, "angry": a.angry, "health": a.health, "maxHealth": a.maxHealth,
 		"stun": min(a.stun, a.maxStun), "maxStun": a.maxStun, "crowd": a.crowd, "wingBeats": a.wingBeats,
@@ -751,7 +806,7 @@ func (m *rook) arm() {
 // anyoneOut is whether anyone is on a rookable street.
 func (m *rook) anyoneOut() bool {
 	for _, tsid := range m.w.order {
-		if len(m.h.StreetLocked(tsid)) > 0 {
+		if _, ok := m.spot(tsid); ok && len(m.h.StreetLocked(tsid)) > 0 {
 			return true
 		}
 	}
@@ -771,11 +826,15 @@ func (m *rook) fire() {
 		if len(m.h.StreetLocked(tsid)) == 0 {
 			continue
 		}
+		spot, ok := m.spot(tsid)
+		if !ok {
+			continue
+		}
 		s := m.streets[tsid]
 		if s != nil && (s.attack != nil || s.restUntil.After(now)) {
 			continue
 		}
-		if tsid == m.last[m.w.streets[tsid].hub] || !m.anyFresh(tsid, now) {
+		if tsid == m.last[spot.hub] || !m.anyFresh(tsid, now) {
 			continue
 		}
 		candidates = append(candidates, tsid)
@@ -834,7 +893,8 @@ func (m *rook) start(tsid string, herald bool) *rookAttack {
 	if m.dev {
 		log.Printf("rook: attack on %s (herald %v, %d there)", tsid, herald, len(m.h.StreetLocked(tsid)))
 	}
-	m.last[m.w.streets[tsid].hub] = tsid
+	spot, _ := m.spot(tsid)
+	m.last[spot.hub] = tsid
 	if !herald {
 		m.arrive(a, nil)
 		return a
@@ -1159,7 +1219,7 @@ func (m *rook) rookStreetJoiners(a *rookAttack) int {
 			n++
 		}
 	}
-	if _, ok := m.w.streets[a.street]; ok {
+	if _, ok := m.spot(a.street); ok {
 		n++ // the street's shrine
 	}
 	return min(n, rookOrbJoinMax)
@@ -1265,7 +1325,7 @@ func (m *rook) completeStun(a *rookAttack, o *rookOrb, assists, damage int, firs
 func rookCanStrike(a *rookAttack) bool { return a != nil && a.phase == "stunned" && a.health > 0 }
 
 func (m *rook) atShrine(cl *Client) bool {
-	spot, ok := m.w.streets[cl.Street()]
+	spot, ok := m.spot(cl.Street())
 	if !ok {
 		return false
 	}
@@ -1388,7 +1448,7 @@ func (m *rook) handleStrike(cl *Client, frame json.RawMessage) {
 		m.no(cl, "strike", "recharging", "The shrine is still recharging.")
 		return
 	}
-	spot := m.w.streets[a.street]
+	spot, _ := m.spot(a.street)
 	damage, emblem, why := m.strikeDamage(msg.Item, msg.Count, spot.giant, a.primed.bonus)
 	if why != "" {
 		m.no(cl, "strike", "refused", why)
@@ -1634,7 +1694,7 @@ func (m *rook) handleSync(cl *Client, frame json.RawMessage) {
 	if tsid == "" || !m.allow(cl) {
 		return
 	}
-	_, rookable := m.w.streets[tsid]
+	_, rookable := m.spot(tsid)
 	if rookable || m.streets[tsid] != nil {
 		s := m.street(tsid)
 		for _, key := range msg.Keys {
@@ -1664,7 +1724,7 @@ func (m *rook) handleSync(cl *Client, frame json.RawMessage) {
 
 func (m *rook) joined(cl *Client) {
 	tsid := cl.Street()
-	if _, rookable := m.w.streets[tsid]; !rookable {
+	if _, rookable := m.spot(tsid); !rookable {
 		return
 	}
 	m.arrived[cl.ID()] = m.h.Now() // rookSettle
@@ -1719,7 +1779,7 @@ func (m *rook) handleDev(cl *Client, frame json.RawMessage) {
 	}
 	_ = json.Unmarshal(frame, &msg)
 	tsid := cl.Street()
-	if _, ok := m.w.streets[tsid]; !ok {
+	if _, ok := m.spot(tsid); !ok {
 		m.no(cl, "dev", "not_rookable", "Failed to Rook this location: Location cannot be rooked.")
 		return
 	}
