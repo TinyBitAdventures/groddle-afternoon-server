@@ -251,3 +251,18 @@ func TestHarvestTableSeasonQAHold(t *testing.T) {
 		t.Fatal("a held date is in season")
 	}
 }
+
+func TestHarvestTableSyncResendsTheState(t *testing.T) {
+	r := newFeastRig(t, feastNoon, "")
+	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
+	r.lay(ada, "pumpkin_pie")
+	frames(ada)
+	send(r.hub, ada, map[string]any{"t": "feast_sync"})
+	if st := lastOf(t, ada, "feast_state"); st["total"].(float64) != 1 {
+		t.Fatalf("sync %v", st)
+	}
+	away := joinAt(r.hub, 2, "Bo", "GLI2V0UN7RD1T2J", 0, -120)
+	frames(away)
+	send(r.hub, away, map[string]any{"t": "feast_sync"})
+	noneOf(t, away, "feast_state")
+}

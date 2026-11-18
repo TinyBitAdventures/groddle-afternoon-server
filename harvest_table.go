@@ -15,6 +15,7 @@ package main
 // Client to server:
 //
 //	{"t":"feast_lay","c":"pumpkin_pie"}
+//	{"t":"feast_sync"}   asks for feast_state again (a page that started listening after its join)
 //
 // Refused, in this order, as feast_no {"c","code","message"} with the game's lines
 // (js/pot-luck-feast.js TABLE_LINES): another street ("not_here"), out of season ("no_season"), a
@@ -115,6 +116,7 @@ func newHarvestTable(h *Hub) Module {
 
 func (m *harvestTable) Register(r *Registry) {
 	r.Handle("feast_lay", m.lay)
+	r.Handle("feast_sync", func(cl *Client, _ json.RawMessage) { m.joined(cl) })
 	r.OnJoin(m.joined)
 	r.OnDisconnect(func(cl *Client) { delete(m.layAt, cl.ID()) })
 	r.OnShutdown(func() { m.save() })
