@@ -36,6 +36,7 @@ package main
 // Client to server:
 //
 //	{"t":"butler_leave","owner":7,"item":{"c":"apple","n":3},"text":"…"}   item or text or both
+//	        a copy of its own (G974): "item":{"c":"npc_cubimal_butler","n":1,"t":"Rufus"} or {"c":"pick","n":1,"r":40}
 //	        a wrapped Gift Box: "item":{"c":"bag_gift_box_wrapped","n":1,"box":[{"c":"apple","n":3}],"ref":"w2"}
 //	{"t":"home_tend_tell","token":"…"}                                    the site's proof of tending done
 //
@@ -43,7 +44,7 @@ package main
 //
 //	{"t":"butler_left","owner":7,"op":"butler-…","status":"settled|refused","why":"busy|full|type|blocked|no_butler|short|off","text":"…","item":{…}|null,"message":true}
 //	{"t":"butler_parcel","from":{"id":9,"name":"Bo"},"item":true,"message":true}   to the owner, online
-//	{"t":"butler_gift","owner":7,"op":"bvisit-…","item":{"c":"apple","n":1}}       to a visitor the Butler gave the owner's gift
+//	{"t":"butler_gift","owner":7,"op":"bvisit-…","item":{"c":"apple","n":1}}       to a visitor the Butler gave the owner's gift (r, t: its copy's own)
 //	{"t":"butler_visit","from":{"id":9,"name":"Bo"},"gift":true}                   to the owner, online: a visit noted
 //	{"t":"home_tended","owner":7,"from":{"id":9,"name":"Bo"},"acts":[{"y":"street","g":"…","p":"1-2","a":"water","s":"","at":…}]}
 //	{"t":"home_hosted","guests":3}                                        to the owner in the house
@@ -56,6 +57,12 @@ package main
 // though it is no_trade (bag_butler.js:1013, 1059); it goes as a give's box
 // does (gifts.go): the box and the one to three stacks inside it leave the
 // visitor's ledger, and the owner's Butler hands over the box with them in it.
+//
+// A copy's own wear and words (G974, R18): a package, each stack in a wrapped box and
+// the owner's gift for visitors carry them as a trade's stack does ("r", "t": trade.go
+// checkGoods, copytags.go), so a named Cubimal left with a Butler arrives named and a
+// worn pick arrives worn (bag_butler.js leave_package and giveGift moved the itemstack
+// itself, its instance props with it). Checked here and again at the site.
 //
 // Ours: a visitor may leave a parcel only from the owner's home street (the
 // source's Butler stood there and took drops in reach, proximity_override
@@ -219,6 +226,7 @@ var homeHelpSecretForTest []byte
 
 type homeHelp struct {
 	h      *Hub
+	table  tradeTable // data/trade.json: a copy's wear and words are checked as a trade's (G974)
 	secret []byte
 	site   butlerSite             // nil: the Butler takes nothing (no -ledger-url, or -trade-ledger off)
 	visits butlerVisitSite        // nil: no visits noted, no gifts handed out (as site)
@@ -232,7 +240,11 @@ type homeHelp struct {
 }
 
 func newHomeHelp(h *Hub) Module {
-	m := &homeHelp{h: h, secret: homeHelpSecretForTest, spawn: func(fn func()) { go fn() }, busy: map[int64]int64{}, seen: map[[2]int64]time.Time{}, asking: map[[2]int64]bool{}, spent: sharedProofs(), rates: map[string]*bucket{},
+	var table tradeTable
+	if err := json.Unmarshal(tradeJSON, &table); err != nil || len(table.Items) == 0 {
+		panic(fmt.Sprintf("realtime: data/trade.json: %v", err))
+	}
+	m := &homeHelp{h: h, table: table, secret: homeHelpSecretForTest, spawn: func(fn func()) { go fn() }, busy: map[int64]int64{}, seen: map[[2]int64]time.Time{}, asking: map[[2]int64]bool{}, spent: sharedProofs(), rates: map[string]*bucket{},
 		newID: func() string {
 			b := make([]byte, 8)
 			rand.Read(b)
@@ -321,10 +333,12 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 	var msg struct {
 		Owner int64 `json:"owner"`
 		Item  *struct {
-			C   string      `json:"c"`
-			N   int         `json:"n"`
-			Box []tradeItem `json:"box"`
-			Ref string      `json:"ref"`
+			C   string          `json:"c"`
+			N   int             `json:"n"`
+			R   *int            `json:"r"`
+			T   json.RawMessage `json:"t"`
+			Box []tradeItem     `json:"box"`
+			Ref string          `json:"ref"`
 		} `json:"item"`
 		Text string `json:"text"`
 	}
@@ -345,6 +359,9 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 				m.refuse(cl, owner, "bad", butlerTextBad, nil, text != "")
 				return
 			}
+			for i := range box {
+				m.copyOf(&box[i])
+			}
 			gave.Items = append([]tradeItem{{C: giftBoxClass, N: 1}}, box...)
 			it := map[string]any{"c": msg.Item.C, "n": 1, "box": box}
 			if verbRefRe.MatchString(msg.Item.Ref) {
@@ -352,7 +369,9 @@ func (m *homeHelp) leave(cl *Client, frame json.RawMessage) {
 			}
 			item = it
 		} else {
-			gave.Items = []tradeItem{{C: msg.Item.C, N: msg.Item.N}}
+			it := tradeItem{C: msg.Item.C, N: msg.Item.N, R: msg.Item.R, T: msg.Item.T}
+			m.copyOf(&it)
+			gave.Items = []tradeItem{it}
 			item = map[string]any{"c": msg.Item.C, "n": msg.Item.N}
 		}
 	}
@@ -530,7 +549,16 @@ func (m *homeHelp) visited(cl *Client) {
 			if given {
 				log.Printf("butler: %d's Butler gave %d one %s (%s)", owner, visitor, a.Gift.C, a.Credit)
 				if c := m.h.ClientLocked(visitor); c != nil {
-					m.h.SendLocked(c, map[string]any{"t": "butler_gift", "owner": owner, "op": a.Credit, "item": map[string]any{"c": a.Gift.C, "n": a.Gift.N}})
+					gift := *a.Gift
+					m.copyOf(&gift)
+					out := map[string]any{"c": gift.C, "n": gift.N}
+					if gift.R != nil {
+						out["r"] = *gift.R
+					}
+					if gift.T != nil {
+						out["t"] = gift.T
+					}
+					m.h.SendLocked(c, map[string]any{"t": "butler_gift", "owner": owner, "op": a.Credit, "item": out})
 				}
 			}
 			if o := m.h.ClientLocked(owner); o != nil {
@@ -549,6 +577,21 @@ func (m *homeHelp) disconnected(cl *Client) {
 	}
 }
 
+// copyOf checks one copy's own wear and words in place as a trade's stack is checked
+// (trade.go checkGoods, copytags.go cleanTag): wear out of range is dropped, more than a
+// tool holds comes down to its capacity, and words a class does not keep (or on more than
+// one copy) go. A stack without them goes as before.
+func (m *homeHelp) copyOf(it *tradeItem) {
+	cls := m.table.Items[it.C]
+	if it.R != nil && (*it.R < 0 || *it.R > tradeMaxPoints) {
+		it.R = nil
+	} else if it.R != nil && cls.Pts > 0 && *it.R > cls.Pts {
+		r := cls.Pts
+		it.R = &r
+	}
+	m.table.cleanTag(it, m.h.Now())
+}
+
 // butlerBox checks the stacks inside a wrapped box left with a Butler (gifts.go's
 // rules: one to three stacks, one of each class, never a box): nil when they are not.
 func butlerBox(in []tradeItem) []tradeItem {
@@ -562,7 +605,7 @@ func butlerBox(in []tradeItem) []tradeItem {
 			return nil
 		}
 		seen[it.C] = true
-		row := tradeItem{C: it.C, N: it.N}
+		row := tradeItem{C: it.C, N: it.N, T: it.T} // T: checked by copyOf
 		if it.R != nil && *it.R >= 0 && *it.R <= 1_000_000 {
 			r := *it.R
 			row.R = &r

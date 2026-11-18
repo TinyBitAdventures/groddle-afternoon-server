@@ -456,3 +456,64 @@ func TestAVisitorLeavesAWrappedGiftBoxWithTheButler(t *testing.T) {
 		t.Fatalf("no call for a bad box: %d", len(r.site.calls))
 	}
 }
+
+// G974 (R18): a copy left with a Butler keeps its own wear and words, checked as a trade's
+// stack (bag_butler.js leave_package and giveGift moved the itemstack, instance props and all).
+func TestAButlerParcelAndGiftCarryTheCopy(t *testing.T) {
+	r := newHelpRig(t)
+	ada, bo := r.visiting()
+	r.do(bo, map[string]any{"t": "butler_leave", "owner": 7, "item": map[string]any{"c": "npc_cubimal_butler", "n": 1, "t": "Rufus"}})
+	r.settle()
+	if len(r.site.calls) != 1 {
+		t.Fatalf("one call: %v", r.site.calls)
+	}
+	g := r.site.calls[0]["gave"].(tradeGoods)
+	if len(g.Items) != 1 || g.Items[0].C != "npc_cubimal_butler" || string(g.Items[0].T) != `"Rufus"` {
+		t.Fatalf("the named Cubimal goes with its name: %+v", g)
+	}
+	only(t, drain(bo), "butler_left")
+	only(t, drain(ada), "butler_parcel")
+
+	// A worn pick keeps its wear (at most its capacity); words a class does not keep, or on more than one copy, go.
+	for _, c := range []struct {
+		item  map[string]any
+		r     int
+		noTag bool
+	}{
+		{map[string]any{"c": "pick", "n": 1, "r": 40}, 40, true},
+		{map[string]any{"c": "pick", "n": 1, "r": 4000}, 100, true},
+		{map[string]any{"c": "cherry", "n": 3, "t": "Rufus"}, -1, true},
+		{map[string]any{"c": "npc_cubimal_butler", "n": 2, "t": "Rufus"}, -1, true},
+	} {
+		r.now = r.now.Add(butlerEvery * 2)
+		r.do(bo, map[string]any{"t": "butler_leave", "owner": 7, "item": c.item})
+		r.settle()
+		it := r.site.calls[len(r.site.calls)-1]["gave"].(tradeGoods).Items[0]
+		if (c.r < 0) != (it.R == nil) || (it.R != nil && *it.R != c.r) || (c.noTag && it.T != nil) {
+			t.Fatalf("%v went as %+v", c.item, it)
+		}
+		drain(bo)
+		drain(ada)
+	}
+
+	// Inside a wrapped box too.
+	r.now = r.now.Add(butlerEvery * 2)
+	r.do(bo, map[string]any{"t": "butler_leave", "owner": 7, "item": map[string]any{"c": "bag_gift_box_wrapped", "n": 1, "box": []map[string]any{{"c": "npc_cubimal_butler", "n": 1, "t": "Rufus"}, {"c": "cherry", "n": 2, "t": "x"}}}})
+	r.settle()
+	box := r.site.calls[len(r.site.calls)-1]["box"].([]tradeItem)
+	if len(box) != 2 || string(box[0].T) != `"Rufus"` || box[1].T != nil {
+		t.Fatalf("the box keeps the name inside: %+v", box)
+	}
+
+	// The owner's gift for visitors: the copy the site hands over reaches the visitor as it is.
+	r2 := newHelpRig(t)
+	r2.help.visits = &fakeVisits{answer: func(op string, owner, visitor int64) butlerVisitAnswer {
+		return butlerVisitAnswer{Status: "visited", Gift: &tradeItem{C: "npc_cubimal_butler", N: 1, T: []byte(`"Rufus"`)}, Credit: op}
+	}}
+	_, cy := r2.visiting()
+	r2.settle()
+	gift := only(t, kinds(drain(cy), "butler_gift"), "butler_gift")["item"].(map[string]any)
+	if gift["c"] != "npc_cubimal_butler" || gift["t"] != "Rufus" {
+		t.Fatalf("the visitor gets the named Cubimal: %v", gift)
+	}
+}
