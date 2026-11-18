@@ -59,8 +59,15 @@ func TestFeastDayIsOnlyThanksgiving(t *testing.T) {
 			t.Fatalf("%v: on %v", c.at, !c.on)
 		}
 	}
-	if feastDaySpots[0] != 230 || feastDaySpots[feastDayPiles-1] != 750 {
+	// G1015a: from the table to 700 (clear of the shrine's base ~730), none on the spice tree's
+	// trunk and roots (~379-451, x 422).
+	if feastDaySpots[0] != 230 || feastDaySpots[feastDayPiles-1] != 700 || feastDaySpots[6] != 490 {
 		t.Fatalf("spots %v", feastDaySpots)
+	}
+	for i, x := range feastDaySpots {
+		if (x > 345 && x < 490) || (i > 0 && x <= feastDaySpots[i-1]+20) {
+			t.Fatalf("spot %d at %d: %v", i, x, feastDaySpots)
+		}
 	}
 	seasonDateForTest = "2026-11-26"
 	defer func() { seasonDateForTest = "" }()
@@ -86,15 +93,19 @@ func TestFeastDayLaysTheWeeksFoodAndPotTopsItUp(t *testing.T) {
 	if st["on"] != true || len(piles) != feastDayPiles || st["cap"].(float64) != feastDayCap || st["ate"].(float64) != 0 {
 		t.Fatalf("the day's state %v", st)
 	}
-	// 7 laid: Pot adds 13 of his own dishes, so 20 piles and nothing more to come.
+	// 7 laid: Pot adds 13 of his own dishes, so 20 dishes: 16 piles out, 4 to come.
 	pot := 0
 	for _, n := range r.day.pot {
 		pot += n
 	}
-	if pot != 13 || r.day.pot["pumpkin_pie"] != 3 || st["left"].(float64) != feastDayPiles*feastDayBites {
+	if pot != 13 || r.day.pot["pumpkin_pie"] != 3 || st["left"].(float64) != feastDayPotDishes*feastDayBites {
 		t.Fatalf("pot %v left %v", r.day.pot, st["left"])
 	}
-	if r.day.placed["corn"] != 6 || r.day.placed["carrot"] != 1 {
+	out := 0
+	for _, n := range r.day.placed {
+		out += n
+	}
+	if out != feastDayPiles || r.day.placed["corn"] > 6 || r.day.placed["carrot"] > 1 {
 		t.Fatalf("placed %v", r.day.placed)
 	}
 	p := piles[0].(map[string]any)
@@ -269,17 +280,24 @@ func TestFeastDayALayOnTheDayRefillsSpotsThePoolLeftEmpty(t *testing.T) {
 	r := newFeastDayRig(t, feastDayMorning, "")
 	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
 	bo := joinAt(r.hub, 2, "Bo", feastStreet, 0, -120)
-	// Nothing laid: Pot's 20, all out. Bo empties spot 0; nothing is left to lay there.
-	for i := 0; i < feastDayBites; i++ {
-		r.bite(bo, 0)
+	// Nothing laid: Pot's 20, 16 out and 4 to come. Spot 0 is emptied five times (Bo, then Ada, under
+	// the 11-bite cap): the last time nothing is left to lay there.
+	for round := 0; round <= feastDayPotDishes-feastDayPiles; round++ {
+		eater := bo
+		if round >= 3 {
+			eater = ada
+		}
+		for i := 0; i < feastDayBites; i++ {
+			r.bite(eater, 0)
+		}
+		r.advance(feastDayRefill)
 	}
-	r.advance(feastDayRefill)
 	if r.day.piles[0].B != 0 || r.day.refill[0] != nil {
 		t.Fatalf("an empty pool lays nothing %v", r.day.piles[0])
 	}
 	frames(bo)
 	r.lay(ada, "corn")
-	if left := lastOf(t, bo, "feastday_left"); left["left"].(float64) != float64(19*feastDayBites+feastDayBites) {
+	if left := lastOf(t, bo, "feastday_left"); left["left"].(float64) != float64((feastDayPiles-1)*feastDayBites+feastDayBites) {
 		t.Fatalf("the street hears the pool grow %v", left)
 	}
 	r.advance(feastDayRefill)

@@ -12,7 +12,7 @@ package main
 // feastDayRefill later with a class drawn from the week's per-class lay counts (harvest_table.go
 // feast.counts), weighted by what is left of each, as a Glitch spawner draws its next spawn
 // (items/spawner.js 23-31 spawn_class/max_count/spawn_interval, 163-174 the timer restarting).
-// A week laid with fewer than feastDayPiles dishes is topped up to that many by Pot, with his own
+// A week laid with fewer than feastDayPotDishes dishes is topped up to that many by Pot, with his own
 // harvest dishes (js/pot-luck-feast.js HARVEST_DISHES). Each player eats at most feastDayCap bites
 // that day. At midnight the leftovers are packed away for everyone (a timer at the day's end, as the
 // Harvest Table's own end timer); the table itself stays until Pot Luck Day ends.
@@ -50,8 +50,11 @@ import (
 )
 
 const (
-	// Piles on the street at once (G1009 "about 20").
-	feastDayPiles = 20
+	// Piles on the street at once, one per spot (G1009 "about 20"; G1015a: 16 fit clear of the
+	// street tree's trunk).
+	feastDayPiles = 16
+	// A thin week is topped up to this many dishes by Pot (G1009: 20 dishes' worth).
+	feastDayPotDishes = 20
 	// Bites in one pile: one laid dish or crop's worth.
 	feastDayBites = 3
 	// Bites one player may eat on the day.
@@ -67,12 +70,21 @@ const (
 	feastDayTextGone     = "Too slow! Somebody else ate that bite."
 )
 
-// Where the piles lie, in the street's source x: right of the Harvest Table (its right end ~202), clear
-// of the Hardware Vendor (~790) and the subway door (~1099); signpost 2 (-291) is left of the table.
+// Where the piles lie, in the street's source x, as runs {from, to, spots}: right of the Harvest
+// Table (its right end ~202), either side of the spice tree's trunk (x 422, trunk and roots ~379-451;
+// G1015a), ending at 700 clear of the shrine online and the Hardware Vendor solo (~790, base from
+// ~730) and the subway door (~1099); signpost 2 (-291) is left of the table.
+var feastDayRuns = [...][3]int{{230, 345, 6}, {490, 700, 10}}
+
 var feastDaySpots = func() [feastDayPiles]int {
 	var out [feastDayPiles]int
-	for i := range out {
-		out[i] = 230 + (i*520+(feastDayPiles-1)/2)/(feastDayPiles-1)
+	i := 0
+	for _, r := range feastDayRuns {
+		from, to, n := r[0], r[1], r[2]-1
+		for k := 0; k <= n; k++ {
+			out[i] = from + (k*(to-from)+n/2)/n
+			i++
+		}
 	}
 	return out
 }()
@@ -293,13 +305,13 @@ func (m *feastDay) start() {
 	for _, n := range m.counts() {
 		total += n
 	}
-	for i := 0; total+i < feastDayPiles; i++ {
+	for i := 0; total+i < feastDayPotDishes; i++ {
 		m.pot[potsHarvestDishes[i%len(potsHarvestDishes)]]++
 	}
 	for s := range m.piles {
 		m.lay(s)
 	}
-	log.Printf("feast day: laid out (%s, %d laid this week, Pot adds %d, %d servings)", m.key, total, max(0, feastDayPiles-total), m.left())
+	log.Printf("feast day: laid out (%s, %d laid this week, Pot adds %d, %d servings)", m.key, total, max(0, feastDayPotDishes-total), m.left())
 }
 
 // settle starts or packs away the feast as the calendar says, and arms the day's end and any refills
