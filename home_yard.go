@@ -109,6 +109,9 @@ type yardAct struct {
 	// Help is the crew's help a visitor's landed swing or dig had (home_crew.go): the site takes a
 	// rock's bonus chunks from the rock with the swing's own and credits them, and a dig's bonus items.
 	Help *yardHelp `json:"help,omitempty"`
+	// Started is when the visitor's swing at a crew's rock started (Unix ms; home_crew.go): the site
+	// pays a swing that started while the rock had chunks, though another has emptied it since.
+	Started int64 `json:"started,omitempty"`
 }
 
 // yardHelp is home_crew.go land's answer, as the site reads it.
@@ -250,6 +253,9 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 	var help map[string]any
 	if land, _ := m.h.ProvidedLocked("homecrew.land").(func(int64, string, int64) map[string]any); land != nil &&
 		((msg.Kind == "rock" && msg.Verb == "mine") || (msg.Kind == "node" && msg.Verb == "dig")) {
+		if started, _ := m.h.ProvidedLocked("homecrew.started").(func(int64, string, int64) int64); started != nil && msg.Kind == "rock" {
+			a.Started = started(owner, msg.ID, visitor)
+		}
 		help = land(owner, msg.ID, visitor)
 		if help != nil {
 			a.Help = &yardHelp{}

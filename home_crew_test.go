@@ -118,6 +118,9 @@ func TestAVisitorsHelpedSwingTakesTheBonusToTheSite(t *testing.T) {
 	r.do(bo, map[string]any{"t": "home_yard", "req": 8, "owner": 7, "kind": "rock", "id": "rock:0", "verb": "mine"})
 	r.settle()
 	c := r.site.calls[0]
+	if c.Started != r.now.UnixMilli() {
+		t.Fatalf("the site is told when Bo's swing started: %d", c.Started)
+	}
 	// Two helps: min(1,4) + min(2,4) = 3.
 	if c.Help == nil || c.Help.Bonus != 3 {
 		t.Fatalf("the site is told the bonus: %+v", c.Help)

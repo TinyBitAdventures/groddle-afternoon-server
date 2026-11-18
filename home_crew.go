@@ -61,12 +61,16 @@ type homeCrew struct {
 	h *Hub
 	// crews: home street -> id -> its crew (a liveObj's miners and helpers; mining.js keeps them on the rock).
 	crews map[string]map[string]*liveObj
-	rates map[int64]*bucket
-	roll  func() float64
+	// starts: when each miner's swing started ("<street>|<id>|<who>", Unix ms), so the site can pay a
+	// swing that started while the rock had chunks after another emptied it (mining.js 215-217 checks
+	// isUseable only as the swing starts; onMiningComplete 293-383 never again).
+	starts map[string]int64
+	rates  map[int64]*bucket
+	roll   func() float64
 }
 
 func newHomeCrew(h *Hub) Module {
-	return &homeCrew{h: h, crews: map[string]map[string]*liveObj{}, rates: map[int64]*bucket{}, roll: rand.Float64}
+	return &homeCrew{h: h, crews: map[string]map[string]*liveObj{}, starts: map[string]int64{}, rates: map[int64]*bucket{}, roll: rand.Float64}
 }
 
 func (m *homeCrew) Register(r *Registry) {
@@ -75,6 +79,20 @@ func (m *homeCrew) Register(r *Registry) {
 	r.OnLeave(m.left)
 	r.OnDisconnect(func(cl *Client) { delete(m.rates, cl.ID()) })
 	r.Provide("homecrew.land", m.land)
+	r.Provide("homecrew.started", m.started)
+}
+
+func startKey(street, id string, who int64) string {
+	return street + "|" + id + "|" + strconv.FormatInt(who, 10)
+}
+
+// started is when who's swing at owner's id started (Unix ms), or 0 when who is not at it.
+func (m *homeCrew) started(owner int64, id string, who int64) int64 {
+	street := homeStreetPrefix + strconv.FormatInt(owner, 10)
+	if ob := m.crew(street, id, false); ob == nil || !ob.mining(who) {
+		return 0
+	}
+	return m.starts[startKey(street, id, who)]
 }
 
 // homeCrewOwner is the owner of a home street (HOME_<id>), or 0.
@@ -127,11 +145,13 @@ func (m *homeCrew) handle(cl *Client, frame json.RawMessage) {
 		ob.removeMiner(cl.ID(), true)
 		helping := len(ob.miners) > 0
 		ob.addMiner(cl.ID())
+		m.starts[startKey(street, msg.ID, cl.ID())] = m.h.Now().UnixMilli()
 		m.h.SendLocked(cl, map[string]any{"t": "home_crew_ok", "owner": msg.Owner, "id": msg.ID, "helping": helping})
 		m.tell(street, nil)
 	case "stop":
 		if ob := m.crew(street, msg.ID, false); ob != nil && ob.mining(cl.ID()) {
 			ob.removeMiner(cl.ID(), true)
+			delete(m.starts, startKey(street, msg.ID, cl.ID()))
 			m.forget(street, msg.ID)
 			m.tell(street, nil)
 		}
@@ -219,6 +239,7 @@ func (m *homeCrew) left(cl *Client, street string) {
 	for id, ob := range m.crews[street] {
 		if ob.mining(cl.ID()) {
 			ob.removeMiner(cl.ID(), true)
+			delete(m.starts, startKey(street, id, cl.ID()))
 			m.forget(street, id)
 			changed = true
 		}
@@ -249,6 +270,7 @@ func (m *homeCrew) land(owner int64, id string, who int64) map[string]any {
 	}
 	sort.Strings(by)
 	ob.removeMiner(who, false)
+	delete(m.starts, startKey(street, id, who))
 	m.forget(street, id)
 	m.tell(street, nil)
 	if n == 0 {
