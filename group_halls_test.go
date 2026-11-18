@@ -300,6 +300,17 @@ func TestHallGroupWithAHallAlreadyLosesTheProject(t *testing.T) {
 	if got := kinds(msgs, "project_reward"); len(got) != 2 {
 		t.Fatalf("the rewards still went out: %v", got)
 	}
+	// #502: the claimer is told why, not left to find the board empty.
+	msgs = append(msgs, drain(a)...)
+	lost := kinds(msgs, "project_expired")
+	if len(lost) != 1 || lost[0]["text"] != projectTextLostHall || lost[0]["job"] != hallJob {
+		t.Fatalf("the claimer hears it: %v", lost)
+	}
+	r.do(a, map[string]any{"t": "project_ack", "id": lost[0]["id"]})
+	r.do(a, map[string]any{"t": "project_sync"})
+	if len(kinds(drain(a), "project_expired")) != 0 {
+		t.Fatal("acked")
+	}
 }
 
 func TestHallClaimOutlivesARestart(t *testing.T) {

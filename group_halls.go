@@ -78,7 +78,10 @@ const (
 	projectTextClaimCurrants = "You don't have enough currants to claim this project."              // ours (JobIntroUI.as greys the claim out)
 	projectTextCouldNot      = "Could not claim"                                                    // main.js:6327
 	projectTextExpired       = "Oops! The project <b>Build a Group-owned Location</b> has expired!" // quest.js:1363
-	hallPrivateGroup         = "A Private Group"                                                    // quest.js:1850
+	// ours: quest.js 1834-1838 reset the project without a word ("Suckers!"); the claimer is told why
+	// (the game's street-jobs-mp.js HALL_REFUSALS words "owns" the same way).
+	projectTextLostHall = "Your group already has a hall. A group can own only one, so this project starts over."
+	hallPrivateGroup    = "A Private Group" // quest.js:1850
 )
 
 type hallGroup struct {
@@ -400,6 +403,10 @@ func (m *projects) owned(a *hallAsk, ans hallAnswer) {
 	if ans.Status != "settled" {
 		// "Suckers!": the group owns a hall by now, so this one resets.
 		log.Printf("group hall %s: %s owns a hall already: the project resets", a.Job, r.Hall.Group.shown())
+		// Owed like an expiry (the game's applyExpired shows it), so the claimer hears it even if away.
+		// The group's other members are the site's to know (Groups); the server has only the claimer.
+		lost := "job-l-" + strings.TrimPrefix(a.ID, "job-g-")
+		m.owe(a.Player, lost, map[string]any{"t": "project_expired", "id": lost, "job": a.Job, "text": projectTextLostHall})
 		delete(m.st.Jobs, a.Job)
 		m.save()
 		m.broadcast(a.Job)
