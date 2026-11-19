@@ -191,11 +191,11 @@ func TestARockEmptiesForEveryoneAndComesBack(t *testing.T) {
 	// Bo cannot take more: the source's line.
 	r.act(b, 1, "rock:1", "mine", nil)
 	no := r.only(b, "obj_no")
-	if no["code"] != "empty" || no["message"] != "This is not the rock you are looking for." || num(objOf(no, "rock:1")["in"]) < 44000 {
+	if no["code"] != "empty" || no["message"] != "This is not the rock you are looking for." || num(objOf(no, "rock:1")["in"]) < 143000 {
 		t.Fatalf("Bo's swing answered %v", no)
 	}
-	// 45 s later it reforms for both, and the server forgets it (fresh again).
-	r.advance(rockRespawn)
+	// 144 s later (rules.rockRespawnMs) it reforms for both, and the server forgets it (fresh again).
+	r.advance(sharedWorld.rockRespawn())
 	for _, cl := range []*Client{a, b} {
 		if got := objOf(r.only(cl, "objs"), "rock:1"); num(got["chunks"]) != 50 || got["mega"] != false {
 			t.Fatalf("the respawn reads %v", got)
@@ -219,7 +219,7 @@ func TestAMegaRockAndTheExpertTake(t *testing.T) {
 	r.mod.get(defaultStreet, spot).chunks = 1
 	r.act(a, 2, "rock:3", "mine", map[string]any{"perks": []string{"whisperer"}})
 	r.drain(a)
-	r.advance(rockRespawn)
+	r.advance(sharedWorld.rockRespawn())
 	if got := objOf(r.only(a, "objs"), "rock:3"); num(got["chunks"]) != 150 || got["mega"] != true {
 		t.Fatalf("a whispered sparkly rock at 0.25 should come back huge: %v", got)
 	}
@@ -732,5 +732,17 @@ func TestOraSoonsSparklyRockSitsOnItsFloor(t *testing.T) {
 	}
 	if d := spot.y - 497.8; d > 0.5 || d < -0.5 {
 		t.Fatalf("Ora Soon's Sparkly Rock stands at y %.1f, its floor is at 497.8", spot.y)
+	}
+}
+
+// A mined-out rock waits the game's js/pace.js ROCK_RESPAWN_MS (Glitch's 8 min, include/mining.js 422,
+// at the remake's 0.3: 144 s, #521), carried in data/objects.json rules.rockRespawnMs; the game's
+// tests/pace-waits.test.js checks this file against pace.js. A layout without it does not load.
+func TestRockRespawnIsThePacedWait(t *testing.T) {
+	if got := sharedWorld.rockRespawn(); got != 144*time.Second {
+		t.Fatalf("a rock reforms after %v, want 144s", got)
+	}
+	if _, err := loadObjWorld([]byte(`{"rules":{},"streets":{}}`)); err == nil {
+		t.Fatal("a layout without rules.rockRespawnMs loaded")
 	}
 }

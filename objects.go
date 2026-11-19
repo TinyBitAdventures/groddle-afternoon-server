@@ -171,10 +171,6 @@ import (
 var objectsJSON []byte
 
 const (
-	// mining.js mineRock (the remake's 45 s; include/mining.js:421 waits 8 min,
-	// plus up to 16 more once 80 chunks were taken). Solo and multiplayer keep
-	// the same pace.
-	rockRespawn = 45 * time.Second
 	// How far from an object the server still takes an action on it: about a
 	// screen (game.js VIEW_W 960), since a verb starts from a click and the
 	// last move can trail the swing by a frame or two.
@@ -273,9 +269,13 @@ type objRules struct {
 		Chunks int                `json:"chunks"`
 		Chance map[string]float64 `json:"chance"`
 	} `json:"mega"`
-	Nodes   map[string]nodeRule           `json:"nodes"`
-	Harvest map[string]int                `json:"harvest"`
-	Care    map[string]map[string]float64 `json:"care"`
+	// RockRespawnMs is how long a mined-out rock waits to reform: the game's js/pace.js
+	// ROCK_RESPAWN_MS (include/mining.js 422's 8 min at the remake's pace, 144 s; #521), the
+	// same number solo mining and the site use. Glitch's extra 0-16 min after 80 chunks is not modelled.
+	RockRespawnMs int64                         `json:"rockRespawnMs"`
+	Nodes         map[string]nodeRule           `json:"nodes"`
+	Harvest       map[string]int                `json:"harvest"`
+	Care          map[string]map[string]float64 `json:"care"`
 	// WoodCare is a Wood Tree's pet and water success rates (percent) by Light Green Thumb rank
 	// (js/trant-care.js wood_pet / wood_water), WoodMap its maturityMap (wood_tree.js 889-896).
 	WoodCare map[string]map[string]float64 `json:"woodCare"`
@@ -368,6 +368,9 @@ func loadObjWorld(raw []byte) (*objWorld, error) {
 	}
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return nil, err
+	}
+	if file.Rules.RockRespawnMs <= 0 {
+		return nil, fmt.Errorf("rules.rockRespawnMs is missing (rebuild with the game's tools/build-realtime-objects.mjs)")
 	}
 	w := &objWorld{rules: file.Rules, streets: map[string]map[string]*objSpot{}, sad: map[string]bool{}, trunks: map[string][]float64{}, upgrades: map[string]map[string]*objVariant{}}
 	w.rules.PigTrip.fill()
@@ -516,6 +519,11 @@ func (w *objWorld) prodAt(class string, maturity, health int) int {
 }
 
 var sharedWorld *objWorld
+
+// rockRespawn is how long a mined-out rock waits to reform (rules.rockRespawnMs).
+func (w *objWorld) rockRespawn() time.Duration {
+	return time.Duration(w.rules.RockRespawnMs) * time.Millisecond
+}
 
 func init() {
 	w, err := loadObjWorld(objectsJSON)
@@ -1370,7 +1378,7 @@ func (o *objects) mine(street string, ob *liveObj, verb string, perks map[string
 			chance += 0.5 * chance
 		}
 		ob.nextMega = o.roll() < chance
-		o.schedule(street, ob, rockRespawn, o.respawnRock)
+		o.schedule(street, ob, o.w.rockRespawn(), o.respawnRock)
 	}
 	extra := map[string]any{"chunks": toGet}
 	if bonus > 0 {

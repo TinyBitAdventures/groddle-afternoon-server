@@ -204,12 +204,12 @@ func TestRocksAndNodesKeepWhatWasTakenAcrossARestart(t *testing.T) {
 			break
 		}
 	}
-	r = r.restart(path, r.now.Add(rockRespawn/2))
+	r = r.restart(path, r.now.Add(sharedWorld.rockRespawn()/2))
 	a = r.player(1, "Ada", defaultStreet, rock.x, rock.y)
 	if got := syncOf(r, a, "rock:1"); got == nil || num(got["chunks"]) != 0 || num(got["in"]) < 20000 {
 		t.Fatalf("an empty rock mid-respawn: %v", got)
 	}
-	r.advance(rockRespawn / 2)
+	r.advance(sharedWorld.rockRespawn() / 2)
 	if got := syncOf(r, a, "rock:1"); got != nil {
 		t.Fatalf("respawned on the new server, it is fresh: %v", got)
 	}
