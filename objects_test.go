@@ -746,3 +746,36 @@ func TestRockRespawnIsThePacedWait(t *testing.T) {
 		t.Fatal("a layout without rules.rockRespawnMs loaded")
 	}
 }
+
+// include/mining.js 408-422: once more than 80 chunks were taken since the rock reformed (a 150-chunk
+// mega rock), Glitch added a random 0-16 min to the 8 min wait; the remake takes 0.3 of both
+// (js/pace.js rock_respawn_extra, Austin 2026-11-19): 144 s plus roll x 288 s. A plain rock's wait
+// takes no roll for it.
+func TestAMegaRockTakesLongerToComeBack(t *testing.T) {
+	if got := sharedWorld.rockRespawnAfter(80, func() float64 { t.Fatal("rolled at 80 chunks"); return 0 }); got != 144*time.Second {
+		t.Fatalf("80 chunks taken: %v, want 144s", got)
+	}
+	if got := sharedWorld.rockRespawnAfter(81, func() float64 { return 1 }); got != 432*time.Second {
+		t.Fatalf("81 chunks taken at roll 1: %v, want 432s", got)
+	}
+	if _, err := loadObjWorld([]byte(`{"rules":{"rockRespawnMs":144000},"streets":{}}`)); err == nil {
+		t.Fatal("a layout without rules.rockRespawnExtra loaded")
+	}
+
+	r := newObjRig(t)
+	spot := sharedWorld.streets[defaultStreet]["rock:3"] // rock_sparkly_1
+	a := r.player(1, "Ada", defaultStreet, spot.x, spot.y)
+	ob := r.mod.get(defaultStreet, spot)
+	ob.mega, ob.chunks = true, 1 // the last of a mega rock's 150
+	// roll 0.5: randInt(3, 7) takes 5, no mega next time (20%), and half the extra: 144 s + 144 s.
+	r.act(a, 1, "rock:3", "mine", nil)
+	r.drain(a)
+	r.advance(288*time.Second - time.Millisecond)
+	if got := r.mod.get(defaultStreet, spot); got.chunks != 0 {
+		t.Fatalf("the mega rock is back after %v: %d chunks", 288*time.Second-time.Millisecond, got.chunks)
+	}
+	r.advance(time.Millisecond)
+	if got := objOf(r.only(a, "objs"), "rock:3"); num(got["chunks"]) != 50 || got["mega"] != false {
+		t.Fatalf("the mega rock's respawn reads %v", got)
+	}
+}
