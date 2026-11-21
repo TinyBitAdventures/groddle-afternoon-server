@@ -161,3 +161,65 @@ func TestOpenWorldOnTheRealTable(t *testing.T) {
 		}
 	}
 }
+
+// R11 (2026-11-21): the live world had only 5 walkable projects left for the featured pick. When
+// none is walkable, a project the subway reaches is featured, and its words say "by subway"; with
+// none even so, nothing is featured, as before.
+func TestFeaturedFallsBackToTheSubwayWhenNothingIsWalkable(t *testing.T) {
+	if len(subwayStops) < 2 {
+		t.Fatalf("data/subway.json: %d stops", len(subwayStops))
+	}
+	gfj, far := subwayStops[0], subwayStops[1]
+	// The starter street walks to one station; the board street GB is walkable only from another
+	// station, so job 1 (GX, built from GB) is reached by subway and nothing is walkable.
+	c := openRoadsCase{
+		Start: "GS",
+		Roads: map[string][]string{"GS": {gfj}, gfj: {"GS"}, far: {"GB"}, "GB": {far, "GX"}, "GX": {"GB"}},
+		Jobs: map[string]projJob{
+			"1": {Kind: "street", Street: "GX", Offer: []string{"GB"}, Connecting: []string{"GB"}, Label: "Ex Lane", Hub: "Testwood"},
+		},
+	}
+	m := openRoadsWorld(t, c, true)
+	m.t.Names["GB"] = "Bee Road"
+	_, reach := m.openWorldNow()
+	if projectReachable(m.t.Jobs["1"], reach) {
+		t.Fatal("job 1 should not be walkable in this world")
+	}
+	if id, bySubway := m.pickFeaturedWay(); id != "1" || !bySubway {
+		t.Fatalf("pick %q by subway %v, want 1 by subway", id, bySubway)
+	}
+	m.ensureFeatured() // the server picks at start; this is the same pick
+	if m.st.Featured == nil || m.st.Featured.Job != "1" || !m.st.Featured.Subway {
+		t.Fatalf("featured %+v, want job 1 by subway", m.st.Featured)
+	}
+	if got, want := m.featuredText("1"), "The featured street project is now Ex Lane, the road from Bee Road in Testwood (by subway). Help build it!"; got != want {
+		t.Fatalf("Global line %q, want %q", got, want)
+	}
+	if msg := m.featuredMsg(); msg["job"] != "1" || msg["subway"] != true || msg["board"] != "GB" {
+		t.Fatalf("project_featured %v", msg)
+	}
+	// It stays while the subway reaches it.
+	if m.ensureFeatured() || m.st.Featured.Job != "1" {
+		t.Fatalf("the subway pick was dropped: %+v", m.st.Featured)
+	}
+
+	// A walkable project comes first: job 2 is built from the starter street's own neighbour.
+	c.Roads["GS"] = []string{gfj, "GY"}
+	c.Roads["GY"] = []string{"GS"}
+	c.Jobs["2"] = projJob{Kind: "street", Street: "GW", Offer: []string{"GY"}, Connecting: []string{"GY"}, Label: "Way Walk"}
+	m2 := openRoadsWorld(t, c, true)
+	if id, bySubway := m2.pickFeaturedWay(); id != "2" || bySubway {
+		t.Fatalf("pick %q by subway %v, want 2 on foot", id, bySubway)
+	}
+	if msg := (func() map[string]any { m2.ensureFeatured(); return m2.featuredMsg() })(); msg["subway"] != nil {
+		t.Fatalf("a walkable pick says subway: %v", msg)
+	}
+
+	// Nothing reachable even by subway: nothing is featured, as before.
+	c.Roads = map[string][]string{"GS": {gfj}, gfj: {"GS"}, "GB": {"GX"}, "GX": {"GB"}}
+	delete(c.Jobs, "2")
+	m3 := openRoadsWorld(t, c, true)
+	if got := m3.pickFeatured(); got != "" {
+		t.Fatalf("featured %q with no project reachable even by subway", got)
+	}
+}

@@ -71,6 +71,42 @@ func (m *projects) openWorldNow() (closed, reach map[string]bool) {
 	return closed, openWorld(&m.t, closed)
 }
 
+// subwayStops is every street the Ur subway stops at (data/subway.json).
+var subwayStops = func() []string {
+	d, _ := parseSubway(subwayJSON)
+	out := make([]string, 0, len(d.Stations))
+	for _, st := range d.Stations {
+		if s := gStreet(st.Street); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}()
+
+// openWorldBySubway is the open world for a player who may ride the subway (the you_have_papers
+// badge, Glitch items/subway_gate.js 60-72): the free ways plus a ride between any two of its
+// stations, as the game's wayHomeTerms with papers. Nil when the table has no roads. Not the open
+// world: most new players hold no papers, so the featured pick asks it only when nothing is walkable.
+func openWorldBySubway(t *projTable, closed map[string]bool) map[string]bool {
+	if len(t.Roads) == 0 {
+		return nil
+	}
+	free := map[string][]string{}
+	for from, tos := range t.Free {
+		free[gStreet(from)] = append(free[gStreet(from)], tos...)
+	}
+	for _, a := range subwayStops {
+		for _, b := range subwayStops {
+			if a != b {
+				free[a] = append(free[a], b)
+			}
+		}
+	}
+	rides := *t
+	rides.Free = free
+	return openWorld(&rides, closed)
+}
+
 // projectReachable: can players work on it from the open world? A street project whose board (an
 // offering street) is in it, or an upgrade of a street in it. With no roads known (reach nil), every
 // project passes.

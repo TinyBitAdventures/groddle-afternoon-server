@@ -25,6 +25,11 @@ package main
 //  3. the most progress (phases done plus the current phase's share by base cost, quest.js 1012);
 //  4. the lowest job id (numbers before words), so every server picks the same.
 //
+// When no project is walkable (R11, 2026-11-21: the live pool was down to 5), the pick takes one
+// reachable by subway instead (openroads.go openWorldBySubway; a rider needs papers), by the same
+// order, and the Global line and the message say "by subway" ("subway":true). It stays until built,
+// as any pick does. With none reachable even so, nothing is featured, as before.
+//
 // A featured project still resting (the only ones left rest, or a street project finished beside
 // it after it was picked) sends the rest's end as "ready" with "rest":true, so the game says when
 // its board opens; the street stays quiet meanwhile, as in Glitch.
@@ -39,7 +44,8 @@ package main
 //	{"t":"project_featured","now":ms,"job":"62","kind":"street","street":"GLI…","board":"GLI…",
 //	     "label":"Lowland Slough","hub":"Shimla Mirch","boardLabel":"…","phase":0,"phases":1,
 //	     "perc":0.25,"percent":25,"since":ms,"by":"auto","row":Row,
-//	     "ready":ms,"rest":true}                                    ready: the next phase opens (rest absent), or the
+//	     "ready":ms,"rest":true,"subway":true}                      subway: its board is reached only by subway;
+//	                                                                ready: the next phase opens (rest absent), or the
 //	                                                                board street's post-build rest ends (rest true)          answering every project_sync (a client syncs once connected), to everyone
 //	                                                                when it changes, and as it moves (at most every featuredEvery)
 //	{"t":"project_featured","now":ms,"job":""}                     none (every project is built)
@@ -79,6 +85,8 @@ type projFeatured struct {
 	Job   string `json:"job"`
 	Since int64  `json:"since"`        // ms
 	By    string `json:"by,omitempty"` // "admin" when an administrator chose it
+	// Subway: picked by subway because nothing was walkable; it stays while the subway reaches it.
+	Subway bool `json:"subway,omitempty"`
 }
 
 // featuredLive is what is not kept: the Global notice waiting for the chat, the progress push.
@@ -169,7 +177,24 @@ func jobIDLess(a, b string) bool {
 
 // pickFeatured is the rule (the file's header): the job to feature next, or "" when none is open.
 func (m *projects) pickFeatured() string {
+	id, _ := m.pickFeaturedWay()
+	return id
+}
+
+// pickFeaturedWay is pickFeatured, and whether the pick is reached only by subway (nothing walkable).
+func (m *projects) pickFeaturedWay() (string, bool) {
 	closed, reach := m.openWorldNow()
+	if id := m.pickFeaturedIn(closed, reach); id != "" || reach == nil {
+		return id, false
+	}
+	if id := m.pickFeaturedIn(closed, openWorldBySubway(&m.t, closed)); id != "" {
+		return id, true
+	}
+	return "", false
+}
+
+// pickFeaturedIn is the pick among the projects whose board stands in `reach`.
+func (m *projects) pickFeaturedIn(closed, reach map[string]bool) string {
 	now := m.ms()
 	type cand struct {
 		id       string
@@ -214,18 +239,18 @@ func (m *projects) pickFeatured() string {
 // ensureFeatured picks a featured project when none stands (or the one kept can no longer be:
 // built some other way, gone from the table). True when it changed.
 func (m *projects) ensureFeatured() bool {
-	if f := m.st.Featured; f != nil && m.featuredOK(f.Job) && (f.By == "admin" || m.featuredReachable(f.Job)) {
+	if f := m.st.Featured; f != nil && m.featuredOK(f.Job) && (f.By == "admin" || m.featuredReachable(f.Job) || (f.Subway && m.featuredBySubway(f.Job))) {
 		return false
 	}
 	was := ""
 	if m.st.Featured != nil {
 		was = m.st.Featured.Job
 	}
-	next := m.pickFeatured()
+	next, bySubway := m.pickFeaturedWay()
 	if next == "" {
 		m.st.Featured = nil
 	} else {
-		m.st.Featured = &projFeatured{Job: next, Since: m.ms(), By: "auto"}
+		m.st.Featured = &projFeatured{Job: next, Since: m.ms(), By: "auto", Subway: bySubway}
 		m.queueNotice(m.featuredText(next))
 		log.Printf("projects: featured street project %s (%s)", next, m.t.Jobs[next].Label)
 	}
@@ -240,6 +265,25 @@ func (m *projects) ensureFeatured() bool {
 func (m *projects) featuredReachable(jobID string) bool {
 	_, reach := m.openWorldNow()
 	return projectReachable(m.t.Jobs[jobID], reach)
+}
+
+// featuredBySubway: is the job's board reached only by subway (not walkable, but the subway reaches it)?
+func (m *projects) featuredBySubway(jobID string) bool {
+	_, _, bySubway := m.featuredWorld(m.t.Jobs[jobID])
+	return bySubway
+}
+
+// featuredWorld is the world a featured job is reached in: the open world, or (its board not in
+// it) the open world by subway when that reaches it, then bySubway is true.
+func (m *projects) featuredWorld(job projJob) (closed, reach map[string]bool, bySubway bool) {
+	closed, reach = m.openWorldNow()
+	if reach == nil || projectReachable(job, reach) {
+		return closed, reach, false
+	}
+	if sub := openWorldBySubway(&m.t, closed); projectReachable(job, sub) {
+		return closed, sub, true
+	}
+	return closed, reach, false
 }
 
 // featuredBuilt: a project's last phase is done. The featured one is thanked in Global and the next is picked;
@@ -323,7 +367,7 @@ func (m *projects) featuredBoardRest(job projJob, closed, reach map[string]bool,
 
 // featuredBoard is the street to build it from (featuredBoardRest).
 func (m *projects) featuredBoard(job projJob) string {
-	closed, reach := m.openWorldNow()
+	closed, reach, _ := m.featuredWorld(job)
 	board, _ := m.featuredBoardRest(job, closed, reach, m.ms())
 	return board
 }
@@ -338,13 +382,16 @@ func (m *projects) jobLabel(job projJob) string {
 	return "a street"
 }
 
-// featuredText is Global's line when a project becomes featured.
+// featuredText is Global's line when a project becomes featured ("(by subway)" when only the subway reaches it).
 func (m *projects) featuredText(jobID string) string {
 	job := m.t.Jobs[jobID]
 	label := m.jobLabel(job)
 	in := ""
 	if job.Hub != "" {
 		in = " in " + job.Hub
+	}
+	if m.featuredBySubway(jobID) {
+		in += " (by subway)"
 	}
 	if job.Kind == "upgrade" {
 		return fmt.Sprintf("The featured street project is now the upgrade of %s%s. Help build it!", label, in)
@@ -396,8 +443,11 @@ func (m *projects) featuredMsg() map[string]any {
 	job := m.t.Jobs[f.Job]
 	phase, perc, whole := m.featuredProgress(f.Job)
 	now := m.ms()
-	closed, reach := m.openWorldNow()
+	closed, reach, bySubway := m.featuredWorld(job)
 	board, restEnd := m.featuredBoardRest(job, closed, reach, now)
+	if bySubway {
+		msg["subway"] = true
+	}
 	msg["job"], msg["kind"], msg["street"], msg["board"] = f.Job, job.Kind, job.Street, board
 	msg["label"], msg["hub"], msg["boardLabel"] = m.jobLabel(job), job.Hub, m.streetName(board)
 	msg["phase"], msg["phases"], msg["perc"], msg["percent"] = phase, len(job.Phases), perc, int(math.Floor(whole*100))
