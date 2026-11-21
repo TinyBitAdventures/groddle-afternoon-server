@@ -121,7 +121,7 @@ var projectsJSON []byte
 
 const (
 	ledgerRouteProject = "/groddle/v1/ledger/project"
-	projectWorkSlack   = 250 * time.Millisecond // a unit may arrive this early (timer and network jitter); the pace holds over time
+	projectWorkSlack   = 250 * time.Millisecond // a unit may arrive this early, and a late one keeps this much of its lateness (work's pace rule)
 	projectGiveEvery   = 250 * time.Millisecond
 	projectTopFive     = 5  // quest.js getTopFive
 	projectBoardSize   = 10 // items/include/jobs.js getJobLeaderboard 538: the top ten
@@ -1024,7 +1024,14 @@ func (m *projects) work(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, projectTextWorkDone)
 		return
 	}
-	// items/include/jobs.js startJobWork: one unit every 1,500 ms.
+	// items/include/jobs.js startJobWork: one unit every 1,500 ms. The pace rule: workAt is when
+	// the next unit is due, and a unit may come up to projectWorkSlack before it. Each unit moves
+	// workAt on by one unit from where it was, never from earlier than now less the slack. So a
+	// late unit (a slow phone network) keeps up to the slack of its lateness, and the next unit,
+	// sent on time but arriving quicker, may be up to twice the slack early (#594: resetting to
+	// now refused it and ended the run). A cheater gains nothing: workAt only ever moves on by a
+	// whole unit per unit taken, so over any run the units come no faster than one per 1,500 ms,
+	// ahead of that by at most twice the slack in all.
 	now := m.h.Now()
 	unit := time.Duration(m.t.WorkUnitMs) * time.Millisecond
 	next, ok := m.workAt[cl.ID()]
@@ -1032,8 +1039,8 @@ func (m *projects) work(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, projectTextPace)
 		return
 	}
-	if !ok || next.Before(now) {
-		next = now
+	if floor := now.Add(-projectWorkSlack); !ok || next.Before(floor) {
+		next = floor
 	}
 	m.workAt[cl.ID()] = next.Add(unit)
 	r := m.row(msg.Job)

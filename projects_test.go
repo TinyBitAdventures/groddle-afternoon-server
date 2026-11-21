@@ -285,12 +285,91 @@ func TestProjectWorkKeepsTheSourcePace(t *testing.T) {
 		t.Fatalf("one unit, then the pace: %v", msgs)
 	}
 	for i := 0; i < 5; i++ {
-		r.now = r.now.Add(1400 * time.Millisecond) // a little early each time: within the slack, once
+		r.now = r.now.Add(1300 * time.Millisecond) // early each time: within the slack twice, then refused
 		r.do(a, map[string]any{"t": "project_work", "job": projJobID, "req": "r138"})
 	}
 	msgs = drain(a)
 	if n := len(kinds(msgs, "project_worked")); n != 4 {
 		t.Fatalf("the pace holds over time (4 of 5 early units count): %d %v", n, errorsOf(msgs))
+	}
+}
+
+// workRun opens job 62's r138 (six units of work) for a fresh player and sends a unit at each
+// offset from the first: how many counted and how many the pace refused.
+func workRun(t *testing.T, at []time.Duration) (worked, paced int) {
+	t.Helper()
+	start := time.Unix(1_700_000_000, 0)
+	r := newProjRig(t, "", newFakeProjectLedger(), start)
+	r.m.ledger = nil
+	r.m.trusted = true
+	a := r.player(1, "Ada", projBoard)
+	for _, q := range r.reqs() {
+		if q.B == "1" && q.G == 1 {
+			r.now = r.now.Add(time.Second)
+			r.do(a, map[string]any{"t": "project_give", "job": projJobID, "req": q.ID, "n": q.Need, "currants": q.Need})
+		}
+	}
+	drain(a)
+	base := r.now.Add(time.Minute)
+	for _, d := range at {
+		r.now = base.Add(d)
+		r.do(a, map[string]any{"t": "project_work", "job": projJobID, "req": "r138"})
+		msgs := drain(a)
+		worked += len(kinds(msgs, "project_worked"))
+		for _, e := range errorsOf(msgs) {
+			if e != projectTextPace {
+				t.Fatalf("unit at %v: %q", d, e)
+			}
+			paced++
+		}
+	}
+	return worked, paced
+}
+
+// #594: a phone's units, sent every 1.5 s, arrive with the network's jitter. A late one then a
+// quick one must both count (the run used to stop on the quick one), while a client that sends
+// faster than the pace is still held to one unit per 1,500 ms.
+func TestProjectWorkPaceForgivesJitter(t *testing.T) {
+	ms := func(v int) time.Duration { return time.Duration(v) * time.Millisecond }
+	// Each unit sent 1,500 ms after the last, with a delay of 0 or 400 ms on the way: gaps of
+	// 1,900 then 1,100 (late, then quick), and the other way round.
+	for _, first := range []int{0, 400} {
+		var at []time.Duration
+		for i := 0; i < 6; i++ {
+			delay := first
+			if i%2 == 1 {
+				delay = 400 - first
+			}
+			at = append(at, ms(1500*i+delay))
+		}
+		if worked, paced := workRun(t, at); worked != 6 || paced != 0 {
+			t.Fatalf("jitter from %d ms: %d worked, %d refused (want all 6): %v", first, worked, paced, at)
+		}
+	}
+	// Uneven delays of up to 450 ms each way.
+	delays := []int{30, 450, 120, 0, 410, 60}
+	var at []time.Duration
+	for i, d := range delays {
+		at = append(at, ms(1500*i+d))
+	}
+	if worked, paced := workRun(t, at); worked != 6 || paced != 0 {
+		t.Fatalf("uneven jitter: %d worked, %d refused: %v", worked, paced, at)
+	}
+	// A client sending every 1,000 ms: refused, and held to the pace (6 units take 7 s, not 5).
+	at = nil
+	for i := 0; i < 8; i++ {
+		at = append(at, ms(1000*i))
+	}
+	worked, paced := workRun(t, at)
+	if worked != 6 || paced != 2 {
+		t.Fatalf("every 1,000 ms: %d worked, %d refused (want 6 and 2)", worked, paced)
+	}
+	at = nil
+	for i := 0; i < 6; i++ {
+		at = append(at, ms(1000*i))
+	}
+	if worked, paced := workRun(t, at); worked != 4 || paced != 2 {
+		t.Fatalf("every 1,000 ms for 5 s: %d worked, %d refused (want 4 and 2)", worked, paced)
 	}
 }
 
