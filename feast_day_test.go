@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -389,6 +390,63 @@ func TestFeastDayPilesClearTheStreetsFixtures(t *testing.T) {
 			if x+pileHalf > f.from-margin && x-pileHalf < f.to+margin {
 				t.Fatalf("pile at %d within %v px of %s (%.0f-%.0f)", s, margin, f.name, f.from, f.to)
 			}
+		}
+	}
+}
+
+// noticeModule stands in for channels.go: it keeps the lines posted to each room.
+type noticeModule struct{ lines []string }
+
+func (n *noticeModule) Register(r *Registry) {
+	r.Provide("channels.notice", func(room, text string) { n.lines = append(n.lines, room+": "+text) })
+}
+
+// Global hears Pot Luck Day once as the table is set out and the feast once as it is laid out, on
+// the timers at their start, and a restart does not say either again.
+func TestGlobalHearsPotLuckDayAndTheFeastOnceEach(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "feast-day.json")
+	notices := &noticeModule{}
+	rig := func(at time.Time) *feastDayRig {
+		r := newFeastDayRig(t, at, path)
+		modules = append(modules, func(h *Hub) Module { return notices })
+		r.hub = NewHub(func() time.Time { return r.now })
+		r.hub.afterFunc = func(d time.Duration, fn func()) func() bool {
+			ft := &toyTimer{at: r.now.Add(d), fn: fn}
+			r.timers = append(r.timers, ft)
+			return func() bool { ft.stopped = true; return true }
+		}
+		return r
+	}
+	r := rig(time.Date(2026, time.November, 21, 20, 0, 0, 0, urZone))
+	joinAt(r.hub, 1, "Ada", "GSOMEWHERE", 0, 0)
+	if len(notices.lines) != 0 {
+		t.Fatalf("before the season: %v", notices.lines)
+	}
+	r.advance(4*time.Hour + time.Second)
+	season := "global: Pot Luck Day is here! Bring a dish to the Harvest Table at Groddle Forest Junction. Until November 29."
+	if len(notices.lines) != 1 || notices.lines[0] != season {
+		t.Fatalf("at the season start: %v", notices.lines)
+	}
+	r.advance(4*24*time.Hour - 2*time.Second)
+	if len(notices.lines) != 1 {
+		t.Fatalf("before the feast: %v", notices.lines)
+	}
+	r.advance(2 * time.Second)
+	feast := "global: Thanksgiving feast today at Groddle Forest Junction: help yourself."
+	if len(notices.lines) != 2 || notices.lines[1] != feast {
+		t.Fatalf("at the feast: %v", notices.lines)
+	}
+	r.hub.Shutdown()
+	flushStateWrites("")
+	// A restart on the day: told already, nothing posted again.
+	r2 := rig(time.Date(2026, time.November, 26, 9, 0, 0, 0, urZone))
+	joinAt(r2.hub, 2, "Bo", feastStreet, 0, -120)
+	if len(notices.lines) != 2 {
+		t.Fatalf("after a restart: %v", notices.lines)
+	}
+	for _, l := range notices.lines {
+		if strings.ContainsRune(l, '—') {
+			t.Fatalf("an em dash: %q", l)
 		}
 	}
 }

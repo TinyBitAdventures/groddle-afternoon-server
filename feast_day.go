@@ -38,6 +38,9 @@ package main
 //	{"t":"feastday_ate","street":"G…","pile":{…},"left":56,"ate":3,"c":"corn"} to the eater
 //	{"t":"feastday_left","street":"G…","left":59}                            a lay on the table joined the pool
 //
+// Global hears it once on the day as it is laid out (feastDayTextGlobal, channels.go notice; the
+// day's key is kept as "told").
+//
 // The feast survives a restart (-feast-day-file, default realtime-feast-day.json beside
 // -secret-file; off: memory only).
 
@@ -70,6 +73,8 @@ const (
 	feastDayTextNoSeason = "The feast is only on Thanksgiving Day."
 	feastDayTextFull     = "You have had all 11 of your feast bites today. Pot says save room for next year."
 	feastDayTextGone     = "Too slow! Somebody else ate that bite."
+	// Global's line as the feast is laid out (ours; plain, no dashes).
+	feastDayTextGlobal = "Thanksgiving feast today at Groddle Forest Junction: help yourself."
 )
 
 // Where the piles lie, in the street's source x, as runs {from, to, spots}: right of the Harvest
@@ -117,6 +122,7 @@ type feastDaySaved struct {
 	Pot    map[string]int `json:"pot"`
 	Ate    map[int64]int  `json:"ate"`
 	Serial int            `json:"serial"`
+	Told   string         `json:"told,omitempty"` // the day Global was told of
 }
 
 type feastDay struct {
@@ -127,6 +133,7 @@ type feastDay struct {
 	pot      map[string]int // Pot's top-up, decided as the day starts
 	ate      map[int64]int  // player -> bites eaten today
 	serial   int
+	told     string // the day Global was told of ("feast_day:2026")
 	eatAt    map[int64]time.Time
 	refill   [feastDayPiles]func() bool
 	ending   func() bool
@@ -153,7 +160,7 @@ func newFeastDay(h *Hub) Module {
 
 // load takes a saved feast, keeping only what makes sense (spots in range, food, bites 1..3).
 func (m *feastDay) load(s feastDaySaved) {
-	m.key, m.serial = s.Key, s.Serial
+	m.key, m.serial, m.told = s.Key, s.Serial, s.Told
 	for _, p := range s.Piles {
 		if p.S >= 0 && p.S < feastDayPiles && p.B > 0 && p.B <= feastDayBites && feastTakes(p.C) {
 			p.X = feastDaySpots[p.S]
@@ -330,10 +337,17 @@ func (m *feastDay) start() {
 	log.Printf("feast day: laid out (%s, %d laid this week, Pot adds %d, %d servings)", m.key, total, max(0, feastDayPotDishes-total), m.left())
 }
 
-// wake settles the feast and tells the street when it changed.
+// wake settles the feast and tells the street when it changed, and Global once on the day.
 func (m *feastDay) wake() {
 	if m.settle() {
 		m.broadcastState()
+	}
+	if m.key != "" && m.told != m.key {
+		if post, _ := m.h.ProvidedLocked("channels.notice").(func(string, string)); post != nil {
+			post("global", feastDayTextGlobal)
+			m.told = m.key
+			m.saveSoon()
+		}
 	}
 }
 
@@ -511,7 +525,7 @@ func (m *feastDay) eat(cl *Client, frame json.RawMessage) {
 }
 
 func (m *feastDay) saved() feastDaySaved {
-	return feastDaySaved{Key: m.key, Piles: m.shown(), Placed: m.placed, Pot: m.pot, Ate: m.ate, Serial: m.serial}
+	return feastDaySaved{Key: m.key, Piles: m.shown(), Placed: m.placed, Pot: m.pot, Ate: m.ate, Serial: m.serial, Told: m.told}
 }
 
 // saveSoon writes the feast off the hub lock (statewrite.go).

@@ -35,6 +35,9 @@ package main
 //	{"t":"feast_laid",…,"mine":true,"first":true,"use":{…}}                              to the one who laid it
 //	{"t":"feast_state","street":"G…","on":false,"rows":[],"total":0}                    the season over: packed away
 //
+// Global hears it once a season when the table is set out (feastTextGlobal, channels.go notice; the
+// season's key is kept as "told" so a restart does not say it again).
+//
 // The table survives a restart (-feast-file, default realtime-feast.json beside -secret-file; off:
 // memory only). It also counts each kind of food laid this season ("counts": class -> lays, only
 // classes the table takes, so at most the food classes), which Thanksgiving Day's feast draws from
@@ -61,6 +64,12 @@ const (
 	feastTextNotDish  = "Only a dish or a crop belongs on the Harvest Table."
 	feastTextNotHere  = "The Harvest Table is in Groddle Forest Junction."
 )
+
+// feastTextGlobal is Global's line when Pot Luck Day starts (ours; plain, no dashes): to day is the
+// window's last day of November.
+func feastTextGlobal(to int) string {
+	return fmt.Sprintf("Pot Luck Day is here! Bring a dish to the Harvest Table at Groddle Forest Junction. Until November %d.", to)
+}
 
 // data/harvest-table.json (the game's tools/build-realtime-harvest-table.mjs): the classes the game's
 // table takes (js/pot-luck-feast.js layableKind): its dishes (Harvest Stuffing, Pot's harvest dishes,
@@ -102,6 +111,7 @@ type feastSaved struct {
 	Total  int             `json:"total"`
 	Counts map[string]int  `json:"counts,omitempty"`
 	Daily  map[int64]int64 `json:"daily"`
+	Told   string          `json:"told,omitempty"` // the season Global was told of
 }
 
 type harvestTable struct {
@@ -111,6 +121,7 @@ type harvestTable struct {
 	total    int
 	counts   map[string]int  // class -> lays this season (G1009)
 	daily    map[int64]int64 // player -> game day of their last offering
+	told     string          // the season Global was told of ("pot_luck_day:2026")
 	layAt    map[int64]time.Time
 	uses     *useAsker
 	path     string
@@ -128,7 +139,7 @@ func newHarvestTable(h *Hub) Module {
 			log.Printf("feast %s: %v (the Harvest Table is kept in memory only)", m.path, err)
 			m.path = ""
 		} else if ok {
-			m.key, m.rows, m.total = s.Key, s.Rows, s.Total
+			m.key, m.rows, m.total, m.told = s.Key, s.Rows, s.Total, s.Told
 			if s.Daily != nil {
 				m.daily = s.Daily
 			}
@@ -199,11 +210,29 @@ func (m *harvestTable) pack(now time.Time) bool {
 	return true
 }
 
-// wake settles the table and tells the street when the season changed.
+// wake settles the table and tells the street when the season changed, and Global once a season.
 func (m *harvestTable) wake() {
 	if m.settle() {
 		m.broadcastState()
 	}
+	m.announce()
+}
+
+// announce posts Global's line for a season it has not told yet (none without the chat module).
+func (m *harvestTable) announce() {
+	if m.key == "" || m.told == m.key {
+		return
+	}
+	post, _ := m.h.ProvidedLocked("channels.notice").(func(string, string))
+	if post == nil {
+		return
+	}
+	y, _, _, _ := seasonDate(m.h.Now())
+	_, to := potLuckWindow(y)
+	post("global", feastTextGlobal(to))
+	m.told = m.key
+	m.saveSoon()
+	log.Printf("feast: Global told of %s", m.key)
 }
 
 // settle sets the table out or packs it away as the calendar says, and arms the timer for the next
@@ -341,7 +370,7 @@ func (m *harvestTable) lay(cl *Client, frame json.RawMessage) {
 }
 
 func (m *harvestTable) saved() feastSaved {
-	return feastSaved{Key: m.key, Rows: m.rows, Total: m.total, Counts: m.counts, Daily: m.daily}
+	return feastSaved{Key: m.key, Rows: m.rows, Total: m.total, Counts: m.counts, Daily: m.daily, Told: m.told}
 }
 
 // saveSoon writes the table off the hub lock (statewrite.go).
