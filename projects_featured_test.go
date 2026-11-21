@@ -310,7 +310,8 @@ func TestFeaturedOnTheRealTable(t *testing.T) {
 	m := newProjectsWith(h, table, "")
 	id := m.pickFeatured()
 	job := m.t.Jobs[id]
-	if id == "" || job.Exempt || job.Built || !featuredFrontier(job, m.closedStreets()) {
+	_, reach := m.openWorldNow()
+	if id == "" || job.Exempt || job.Built || !featuredFrontier(job, m.closedStreets()) || reach == nil || !projectReachable(job, reach) {
 		t.Fatalf("a new world features %q (%+v)", id, job)
 	}
 	if text := m.featuredText(id); strings.Contains(text, "a street") || strings.ContainsAny(text, "—–") {

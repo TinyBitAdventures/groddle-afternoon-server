@@ -255,6 +255,11 @@ type projTable struct {
 	Restorations map[string]projRestoration `json:"restorations"`
 	// Street tsid -> public name, for the featured project's notices (projects_featured.go).
 	Names map[string]string `json:"names"`
+	// The open-road rule's world (openroads.go, the game's js/open-roads.js): the starter street,
+	// every signpost and door road (locked doors left out) and the free ways (teleporters).
+	Start string              `json:"start,omitempty"`
+	Roads map[string][]string `json:"roads,omitempty"`
+	Free  map[string][]string `json:"free,omitempty"`
 }
 
 func (t *projTable) class(job projJob, phase int) (projClass, bool) {

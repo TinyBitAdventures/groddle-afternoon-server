@@ -11,10 +11,13 @@ package main
 // The pick (pickFeatured), from the open shared street projects: a street-building or
 // street-upgrade job (never a group hall or a home's restoration), not built from the start, not
 // one every player counts as built (projJob.Exempt: a subway street, a road from the starting
-// street), and not done. Among them, in order:
+// street), not done, and one players can reach (report #566, G1075): its board stands in the open
+// world, the streets the starter street reaches over open roads (openroads.go openWorld; an upgrade's
+// street is in it). Parsin's Trail SE in Baqala was featured because one neighbour was built, though
+// no open road joined that pocket to the world. Among them, in order:
 //  1. on the frontier: a closed street with a signpost neighbour that is open (one of the streets
 //     it opens from or is offered on is not itself an unbuilt street), or an upgrade of an open
-//     street;
+//     street (with no roads in the table, the only test of where it stands);
 //  2. not resting: a street whose last street or upgrade job finished under 30 minutes ago offers
 //     none, started or not (locations/inc_jobs.js jobs_get_available 463-467; projects.go
 //     availability), so its board does not show. A resting project comes after every open one,
@@ -27,7 +30,8 @@ package main
 // its board opens; the street stays quiet meanwhile, as in Glitch.
 //
 // It stays featured until its last phase is done (featuredBuilt), then the next is picked the same
-// way. An administrator may choose one or clear the choice through the console's signed call
+// way; a pick the rule made that players cannot reach (one kept from before the reach test) is
+// picked again. An administrator may choose one or clear the choice through the console's signed call
 // (project_featured below); a chosen one also stays until it is built.
 //
 // Server to client:
@@ -42,7 +46,7 @@ package main
 //
 // Row is projects.go's (rowJSON) with nobody's share in "mine". perc is the current phase's share by base cost (quest.js 1012, three places, rounded down);
 // percent the whole project's, whole numbers. board is the street to build it from (the first
-// offering street that is open). Global chat (channels.go notice) hears it when a project becomes
+// offering street in the open world). Global chat (channels.go notice) hears it when a project becomes
 // featured and when it is built (featuredText, builtText).
 //
 // The console's call (POST /ws?call=project_featured, signed as admin.go's):
@@ -109,21 +113,6 @@ func (m *projects) featuredOK(jobID string) bool {
 	return true
 }
 
-// closedStreets is every street still to be built: a street project's street, not done, not built from the start, not exempt.
-func (m *projects) closedStreets() map[string]bool {
-	out := map[string]bool{}
-	for id, job := range m.t.Jobs {
-		if job.Kind != "street" || job.Built || job.Exempt {
-			continue
-		}
-		if r := m.st.Jobs[id]; r != nil && r.Done > 0 {
-			continue
-		}
-		out[gStreet(job.Street)] = true
-	}
-	return out
-}
-
 // featuredFrontier: is the job next to the open world (a closed street with an open neighbour, an upgrade of an open street)?
 func featuredFrontier(job projJob, closed map[string]bool) bool {
 	if job.Kind == "upgrade" {
@@ -180,7 +169,7 @@ func jobIDLess(a, b string) bool {
 
 // pickFeatured is the rule (the file's header): the job to feature next, or "" when none is open.
 func (m *projects) pickFeatured() string {
-	closed := m.closedStreets()
+	closed, reach := m.openWorldNow()
 	now := m.ms()
 	type cand struct {
 		id       string
@@ -196,8 +185,11 @@ func (m *projects) pickFeatured() string {
 		if job.Kind == "upgrade" && closed[gStreet(job.Street)] {
 			continue // its board stands on a street nobody can reach yet
 		}
+		if !projectReachable(job, reach) {
+			continue // #566: no open road from the world reaches its board
+		}
 		_, _, whole := m.featuredProgress(id)
-		_, restEnd := m.featuredBoardRest(job, closed, now)
+		_, restEnd := m.featuredBoardRest(job, closed, reach, now)
 		list = append(list, cand{id: id, frontier: featuredFrontier(job, closed), progress: whole, resting: restEnd > 0})
 	}
 	if len(list) == 0 {
@@ -222,7 +214,7 @@ func (m *projects) pickFeatured() string {
 // ensureFeatured picks a featured project when none stands (or the one kept can no longer be:
 // built some other way, gone from the table). True when it changed.
 func (m *projects) ensureFeatured() bool {
-	if f := m.st.Featured; f != nil && m.featuredOK(f.Job) {
+	if f := m.st.Featured; f != nil && m.featuredOK(f.Job) && (f.By == "admin" || m.featuredReachable(f.Job)) {
 		return false
 	}
 	was := ""
@@ -242,6 +234,12 @@ func (m *projects) ensureFeatured() bool {
 	}
 	m.save()
 	return true
+}
+
+// featuredReachable: can players reach the job's board from the open world (openroads.go)?
+func (m *projects) featuredReachable(jobID string) bool {
+	_, reach := m.openWorldNow()
+	return projectReachable(m.t.Jobs[jobID], reach)
 }
 
 // featuredBuilt: a project's last phase is done. The featured one is thanked in Global and the next is picked;
@@ -295,11 +293,12 @@ func (m *projects) restEndAt(street string, now int64) int64 {
 
 // featuredBoardRest is the street to build it from, and when that street's rest ends (0: its board
 // shows now). The first open offering street not resting; when every open one rests, the one that
-// opens first; with none open, the first offering street (or the job's own).
-func (m *projects) featuredBoardRest(job projJob, closed map[string]bool, now int64) (string, int64) {
+// opens first; with none open, the first offering street (or the job's own). Open is in the open
+// world (`reach`, openroads.go) when the table has roads, else not closed.
+func (m *projects) featuredBoardRest(job projJob, closed, reach map[string]bool, now int64) (string, int64) {
 	board, end := "", int64(0)
 	for _, s := range job.Offer {
-		if closed[gStreet(s)] {
+		if closed[gStreet(s)] || (reach != nil && !reach[gStreet(s)]) {
 			continue
 		}
 		e := int64(0)
@@ -324,7 +323,8 @@ func (m *projects) featuredBoardRest(job projJob, closed map[string]bool, now in
 
 // featuredBoard is the street to build it from (featuredBoardRest).
 func (m *projects) featuredBoard(job projJob) string {
-	board, _ := m.featuredBoardRest(job, m.closedStreets(), m.ms())
+	closed, reach := m.openWorldNow()
+	board, _ := m.featuredBoardRest(job, closed, reach, m.ms())
 	return board
 }
 
@@ -396,7 +396,8 @@ func (m *projects) featuredMsg() map[string]any {
 	job := m.t.Jobs[f.Job]
 	phase, perc, whole := m.featuredProgress(f.Job)
 	now := m.ms()
-	board, restEnd := m.featuredBoardRest(job, m.closedStreets(), now)
+	closed, reach := m.openWorldNow()
+	board, restEnd := m.featuredBoardRest(job, closed, reach, now)
 	msg["job"], msg["kind"], msg["street"], msg["board"] = f.Job, job.Kind, job.Street, board
 	msg["label"], msg["hub"], msg["boardLabel"] = m.jobLabel(job), job.Hub, m.streetName(board)
 	msg["phase"], msg["phases"], msg["perc"], msg["percent"] = phase, len(job.Phases), perc, int(math.Floor(whole*100))

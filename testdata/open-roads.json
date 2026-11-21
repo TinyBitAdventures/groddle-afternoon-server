@@ -1,0 +1,71 @@
+{
+  "_doc": "The open-road rule's cases (root R11, G1075), answered the same by openroads.go (openroads_test.go) and the game's js/open-roads.js (tests/open-roads.test.js). jobs as data/projects.json has them (built: built from the start; exempt: a subway street or a road from the start, which the game works out from start and its subway list). done: projects finished. kept: streets one player has stood on (the game's grandfathered), which must change nothing here. closed: streets closed for everyone; reach: the open world; reachable: the projects whose board is in it; featured: pickFeatured's answer (the old one-neighbour test picked job 1, Parsin's Trail SE in report #566).",
+  "cases": [
+    {
+      "name": "a frontier street behind a closed road (report #566)",
+      "start": "GS",
+      "roads": {"GS": ["GA", "GE"], "GA": ["GS", "GX", "GD"], "GX": ["GA", "GB"], "GB": ["GX", "GP"], "GP": ["GB"], "GE": ["GS"], "GD": ["GA", "GLI3272LOTD1B1F"], "GLI3272LOTD1B1F": ["GD"], "GT": ["GB"]},
+      "free": {},
+      "jobs": {
+        "1": {"kind": "street", "street": "GP", "offer": ["GB"], "connecting": ["GB"]},
+        "2": {"kind": "street", "street": "GX", "offer": ["GA"], "connecting": ["GA"]},
+        "3": {"kind": "upgrade", "street": "GA", "offer": ["GA"]},
+        "4": {"kind": "upgrade", "street": "GB", "offer": ["GB"]},
+        "5": {"kind": "street", "street": "GB", "offer": ["GX"], "connecting": ["GX"]},
+        "6": {"kind": "street", "street": "GE", "offer": ["GS"], "connecting": ["GS"], "exempt": true},
+        "7": {"kind": "street", "street": "GD", "offer": ["GA"], "connecting": ["GA"], "built": true},
+        "8": {"kind": "street", "street": "GLI3272LOTD1B1F", "offer": ["GD"], "connecting": ["GD"], "exempt": true}
+      },
+      "done": ["5"],
+      "kept": ["GX", "GB", "GP"],
+      "closed": ["GP", "GX"],
+      "reach": ["GA", "GD", "GE", "GLI3272LOTD1B1F", "GS"],
+      "reachable": ["2", "3"],
+      "featured": "2"
+    },
+    {
+      "name": "the road into the pocket is built",
+      "start": "GS",
+      "roads": {"GS": ["GA", "GE"], "GA": ["GS", "GX", "GD"], "GX": ["GA", "GB"], "GB": ["GX", "GP"], "GP": ["GB"], "GE": ["GS"], "GD": ["GA", "GLI3272LOTD1B1F"], "GLI3272LOTD1B1F": ["GD"], "GT": ["GB"]},
+      "free": {},
+      "jobs": {
+        "1": {"kind": "street", "street": "GP", "offer": ["GB"], "connecting": ["GB"]},
+        "2": {"kind": "street", "street": "GX", "offer": ["GA"], "connecting": ["GA"]},
+        "3": {"kind": "upgrade", "street": "GA", "offer": ["GA"]},
+        "4": {"kind": "upgrade", "street": "GB", "offer": ["GB"]},
+        "5": {"kind": "street", "street": "GB", "offer": ["GX"], "connecting": ["GX"]},
+        "6": {"kind": "street", "street": "GE", "offer": ["GS"], "connecting": ["GS"], "exempt": true},
+        "7": {"kind": "street", "street": "GD", "offer": ["GA"], "connecting": ["GA"], "built": true},
+        "8": {"kind": "street", "street": "GLI3272LOTD1B1F", "offer": ["GD"], "connecting": ["GD"], "exempt": true}
+      },
+      "done": ["2", "5"],
+      "kept": [],
+      "closed": ["GP"],
+      "reach": ["GA", "GB", "GD", "GE", "GLI3272LOTD1B1F", "GS", "GX"],
+      "reachable": ["1", "3", "4"],
+      "featured": "1"
+    },
+    {
+      "name": "a teleporter joins the pocket to the world",
+      "start": "GS",
+      "roads": {"GS": ["GA", "GE"], "GA": ["GS", "GX", "GD"], "GX": ["GA", "GB"], "GB": ["GX", "GP"], "GP": ["GB"], "GE": ["GS"], "GD": ["GA", "GLI3272LOTD1B1F"], "GLI3272LOTD1B1F": ["GD"], "GT": ["GB"]},
+      "free": {"GE": ["GT"]},
+      "jobs": {
+        "1": {"kind": "street", "street": "GP", "offer": ["GB"], "connecting": ["GB"]},
+        "2": {"kind": "street", "street": "GX", "offer": ["GA"], "connecting": ["GA"]},
+        "3": {"kind": "upgrade", "street": "GA", "offer": ["GA"]},
+        "4": {"kind": "upgrade", "street": "GB", "offer": ["GB"]},
+        "5": {"kind": "street", "street": "GB", "offer": ["GX"], "connecting": ["GX"]},
+        "6": {"kind": "street", "street": "GE", "offer": ["GS"], "connecting": ["GS"], "exempt": true},
+        "7": {"kind": "street", "street": "GD", "offer": ["GA"], "connecting": ["GA"], "built": true},
+        "8": {"kind": "street", "street": "GLI3272LOTD1B1F", "offer": ["GD"], "connecting": ["GD"], "exempt": true}
+      },
+      "done": ["5"],
+      "kept": [],
+      "closed": ["GP", "GX"],
+      "reach": ["GA", "GB", "GD", "GE", "GLI3272LOTD1B1F", "GS", "GT"],
+      "reachable": ["1", "2", "3", "4"],
+      "featured": "1"
+    }
+  ]
+}
