@@ -32,7 +32,7 @@ package main
 //	{"t":"project_worked","job":"62","req":"r138","cost":15,"left":5}                         your unit counted
 //	{"t":"project_reward","id":"…","job":"62","phase":0,"cls":"…","final":true,"share":0.5912,
 //	     "participation":59.12,"rewards":{…},"performance":{…},"winner":true,"top5":true,"phases":1,"option":"","readyAt":ms,
-//	     "finisher":true,"shares":{"<phase class>":59.12}}                                        shares on the last phase only;
+//	     "finisher":true,"shares":{"<phase class>":59.12},"overall":31.4}                         shares and overall on the last phase only;
 //	     a contributor of an earlier phase only gets one too at the end, paying nothing ("complete":true)
 //	{"t":"error","code":"project","message":"…"}
 //
@@ -1143,6 +1143,49 @@ func (m *projects) sharesOf(job projJob, r *projRow, player int64) map[string]fl
 	return out
 }
 
+// overallShare is one player's share of all the work on a project: what they put into every phase over
+// every phase's total, so each phase counts by its size (each phase's part capped at its total).
+func overallShare(mine, totals []int64) float64 {
+	var got, all int64
+	for i, t := range totals {
+		if t <= 0 {
+			continue
+		}
+		all += t
+		if i < len(mine) {
+			got += min(max(mine[i], 0), t)
+		}
+	}
+	if all <= 0 {
+		return 0
+	}
+	return float64(got) / float64(all)
+}
+
+// overallShareOf is overallShare over a project's phases (quest.js getTotalBasecost each). G1109 (Austin
+// 2026-11-21): the street's completion line "You did {job_participation}% of the work" names this.
+// Glitch filled it from the last phase only (quest.js expandText 261), so a player who built phases 1
+// and 2 and missed the last read 0%.
+func (m *projects) overallShareOf(job projJob, r *projRow, player int64) float64 {
+	mine := make([]int64, len(job.Phases))
+	totals := make([]int64, len(job.Phases))
+	for i := range job.Phases {
+		if cls, ok := m.t.class(job, i); ok {
+			for _, q := range cls.Reqs {
+				totals[i] += q.Need * q.Cost
+			}
+		}
+		if i < len(r.Per) {
+			for _, c := range r.Per[i].Mine {
+				if c.ID == player {
+					mine[i] += c.Cost
+				}
+			}
+		}
+	}
+	return overallShare(mine, totals)
+}
+
 func (m *projects) rollDrop(table []projDrop) *projDropRow {
 	roll := int(math.Floor(m.rng()*100)) + 1
 	for _, d := range table {
@@ -1289,6 +1332,7 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 			"finisher": len(by) > 0 && by[0] == c.ID}
 		if final {
 			msg["shares"] = m.sharesOf(job, r, c.ID)
+			msg["overall"] = sharePercent(m.overallShareOf(job, r, c.ID))
 		}
 		if isHomeKind(job.Kind) {
 			m.homeReward(msg, job, c.ID, share)
@@ -1329,6 +1373,7 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 				msg["winner"], msg["top5"], msg["phases"], msg["option"], msg["readyAt"] = false, false, phases, option, 0
 				msg["count"], msg["cost"], msg["total"], msg["finisher"] = len(rec.Mine), 0, total, false
 				msg["shares"], msg["complete"], msg["player"] = m.sharesOf(job, r, c.ID), true, c.ID
+				msg["overall"] = sharePercent(m.overallShareOf(job, r, c.ID))
 				completes = append(completes, msg)
 			}
 		}
