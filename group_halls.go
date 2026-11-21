@@ -337,11 +337,22 @@ func (m *projects) claimed(a *hallAsk, ans hallAnswer) {
 // —— The clock ——
 
 // armHalls sets the clock on every standing claim (after a restart).
+// The clocks are set after the walk: a claim that ran out while the server was down fires at
+// once on another goroutine, and its expiry deletes from m.st.Jobs, so it must not start while
+// this loop still ranges over the map.
 func (m *projects) armHalls() {
+	type armed struct {
+		id   string
+		hall *projHall
+	}
+	var due []armed
 	for id, r := range m.st.Jobs {
 		if r.Hall != nil && r.Hall.Until > 0 {
-			m.armHall(id, r.Hall)
+			due = append(due, armed{id, r.Hall})
 		}
+	}
+	for _, a := range due {
+		m.armHall(a.id, a.hall)
 	}
 }
 
