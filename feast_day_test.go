@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -59,13 +63,14 @@ func TestFeastDayIsOnlyThanksgiving(t *testing.T) {
 			t.Fatalf("%v: on %v", c.at, !c.on)
 		}
 	}
-	// G1015a: from the table to 700 (clear of the shrine's base ~730), none on the spice tree's
-	// trunk and roots (~379-451, x 422).
-	if feastDaySpots[0] != 230 || feastDaySpots[feastDayPiles-1] != 700 || feastDaySpots[6] != 490 {
+	// G1015a and lane potluckk: the game's spots (js/feast-day.js FEAST_SPOTS), none on the spice
+	// tree's trunk, the last clear of the shrine's base.
+	want := [feastDayPiles]int{230, 249, 268, 287, 306, 325, 344, 515, 535, 556, 576, 597, 617, 637, 658, 678}
+	if feastDaySpots != want {
 		t.Fatalf("spots %v", feastDaySpots)
 	}
 	for i, x := range feastDaySpots {
-		if (x > 345 && x < 490) || (i > 0 && x <= feastDaySpots[i-1]+20) {
+		if (x > 344 && x < 515) || (i > 0 && x < feastDaySpots[i-1]+19) {
 			t.Fatalf("spot %d at %d: %v", i, x, feastDaySpots)
 		}
 	}
@@ -324,5 +329,66 @@ func TestFeastDayIsLaidOutAtMidnightForWhoeverIsThere(t *testing.T) {
 	r.advance(24 * time.Hour)
 	if st := lastOf(t, ada, "feastday_state"); st["on"] != false {
 		t.Fatalf("the next day: %v", st)
+	}
+}
+
+// Every feast pile, at the widest pile's width (89 px), keeps clear of what stands on Groddle Forest
+// Junction's floor where this server holds it: the shrine (data/rook.json, its base 118 px wide), the
+// street's trees on that floor (data/objects.json; the spice tree's trunk 26 px left of its foot to 42
+// right, as the game draws it mirrored) and the subway door (~1099). The last pile at 700 overlapped
+// the shrine's base, the first right of the tree at 490 its trunk.
+func TestFeastDayPilesClearTheStreetsFixtures(t *testing.T) {
+	const (
+		left     = -3000.0 // Groddle Forest Junction's bounds: source x = street px + left
+		pileHalf = 45.0
+		margin   = 6.0
+	)
+	type span struct {
+		name     string
+		from, to float64
+	}
+	var fixtures []span
+	var rook struct {
+		Streets map[string][]any `json:"streets"`
+	}
+	if b, err := os.ReadFile("data/rook.json"); err != nil || json.Unmarshal(b, &rook) != nil {
+		t.Fatalf("data/rook.json: %v", err)
+	}
+	sh := rook.Streets["G"+feastStreetKey]
+	if len(sh) < 2 {
+		t.Fatalf("no shrine on the street: %v", sh)
+	}
+	shrineX := sh[1].(float64) + left
+	fixtures = append(fixtures, span{"shrine", shrineX - 59, shrineX + 59})
+	var objs struct {
+		Streets map[string]struct {
+			Trees [][]any `json:"trees"`
+		} `json:"streets"`
+	}
+	if json.Unmarshal(objectsJSON, &objs) != nil {
+		t.Fatal("data/objects.json")
+	}
+	for _, tr := range objs.Streets["G"+feastStreetKey].Trees {
+		i, x, y := int(tr[0].(float64)), tr[2].(float64)+left, tr[3].(float64)
+		if y < 1000 { // up on a ledge, not the piles' floor (~1100)
+			continue
+		}
+		l, r := -50*0.84, 31*0.84
+		if i%2 == 1 {
+			l, r = -31*0.84, 50*0.84
+		}
+		fixtures = append(fixtures, span{fmt.Sprintf("tree %d (%s)", i, tr[1]), x + l, x + r})
+	}
+	fixtures = append(fixtures, span{"subway door", 1099 - 50, 1099 + 50})
+	if math.Abs(shrineX-789) > 2 {
+		t.Fatalf("shrine at %.1f", shrineX)
+	}
+	for _, s := range feastDaySpots {
+		x := float64(s)
+		for _, f := range fixtures {
+			if x+pileHalf > f.from-margin && x-pileHalf < f.to+margin {
+				t.Fatalf("pile at %d within %v px of %s (%.0f-%.0f)", s, margin, f.name, f.from, f.to)
+			}
+		}
 	}
 }

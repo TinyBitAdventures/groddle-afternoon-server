@@ -73,10 +73,12 @@ const (
 )
 
 // Where the piles lie, in the street's source x, as runs {from, to, spots}: right of the Harvest
-// Table (its right end ~202), either side of the spice tree's trunk (x 422, trunk and roots ~379-451;
-// G1015a), ending at 700 clear of the shrine online and the Hardware Vendor solo (~790, base from
-// ~730) and the subway door (~1099); signpost 2 (-291) is left of the table.
-var feastDayRuns = [...][3]int{{230, 345, 6}, {490, 700, 10}}
+// Table (its right end ~202), either side of the spice tree's trunk (x 422, drawn mirrored so its
+// trunk is ~396-464; G1015a), ending clear of the shrine online (foot 789, base 730-848; the
+// Hardware Vendor solo about there) and the subway door (~1099); signpost -291 is left of the table.
+// The widest pile (89 px) keeps 6 px clear of the trunk and the shrine's base (the game's
+// js/feast-day.js FEAST_DAY_RULES.runs, PILE_HALF, PILE_MARGIN).
+var feastDayRuns = [...][3]int{{230, 344, 7}, {515, 678, 9}}
 
 var feastDaySpots = func() [feastDayPiles]int {
 	var out [feastDayPiles]int
