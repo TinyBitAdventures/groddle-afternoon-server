@@ -94,7 +94,8 @@ type spaceRig struct {
 
 const moonStreet = "GDOBUP8IR8E2IPH"
 
-func newSpaceRig(t *testing.T) *spaceRig {
+// newSpaceRig: the parties and quoins modules, and any extra one a test needs (objects_party_test.go).
+func newSpaceRig(t *testing.T, extra ...moduleFactory) *spaceRig {
 	r := &spaceRig{partyRig: &partyRig{t: t, now: time.Unix(1_700_000_000, 0)}}
 	d := testQuoinData()
 	d.streets[moonStreet] = []quoinSpot{{X: 100, Y: 500, Type: "xp", Class: "slow medium-large xp"}}
@@ -103,6 +104,7 @@ func newSpaceRig(t *testing.T) *spaceRig {
 		func(h *Hub) Module { r.m = newParties(h).(*parties); return r.m },
 		func(h *Hub) Module { r.q = newQuoinsWith(h, d); return r.q },
 	}
+	modules = append(modules, extra...)
 	r.hub = NewHub(func() time.Time { return r.now })
 	modules = saved
 	r.hub.afterFunc = func(d time.Duration, fn func()) func() bool {

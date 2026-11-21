@@ -251,7 +251,8 @@ func (m *parties) registerSpaces(r *Registry) {
 		r.Handle("party_space_dev", m.kept(m.devSpace))
 	}
 	r.GateJoin(m.spaceGate)
-	// quoins.go: a space's instance has its template's natural quoins (party quoins between the members).
+	// quoins.go and objects_upgrades.go: a space's instance has its template's natural quoins and its
+	// rocks, trees and nodes, its own and shared by the party in it.
 	r.Provide("party.spaceStreet", func(street string) string {
 		if p := m.spaces.byStreet[street]; p != nil && p.space != nil {
 			return partyTemplates[p.space.template].street
@@ -611,6 +612,10 @@ func (m *parties) deleteSpace(p *party, why string) {
 	}
 	for _, o := range m.h.StreetLocked(s.street) {
 		m.h.leaveLocked(o)
+	}
+	// #576: its rocks, trees and nodes were the party's own (objects_upgrades.go layoutOf): gone with it.
+	if drop, ok := m.h.ProvidedLocked("objects.dropStreet").(func(string)); ok {
+		drop(s.street)
 	}
 	log.Printf("party space %s: closed (%s)", s.street, why)
 	m.saveSoon()

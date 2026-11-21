@@ -318,6 +318,9 @@ func (o *objects) load() error {
 		}
 	}
 	for street, recs := range f.Streets {
+		if partyInstance(street) {
+			continue
+		}
 		if o.w.upgrades[street] != nil {
 			// Its layout is the built upgrade's or its own: the first look settles it (objects_upgrades.go).
 			o.laidFor[street] = laidUnknown
@@ -466,13 +469,17 @@ func (o *objects) save() bool {
 	}
 	f := objFile{V: 1, Streets: map[string]map[string]*objRec{}, Captures: o.capturesRecord(), GuanoStart: msOf(o.guanoStart)}
 	for street, at := range o.guanoAt {
+		if partyInstance(street) {
+			continue
+		}
 		if f.GuanoAt == nil {
 			f.GuanoAt = map[string]int64{}
 		}
 		f.GuanoAt[street] = msOf(at)
 	}
 	for street, room := range o.streets {
-		if len(room) == 0 {
+		if len(room) == 0 || partyInstance(street) {
+			// A Party Space's objects live as long as the space, in memory only (objects_upgrades.go).
 			continue
 		}
 		recs := make(map[string]*objRec, len(room))
