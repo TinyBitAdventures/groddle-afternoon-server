@@ -96,6 +96,30 @@ func potLuckLeft(now time.Time) time.Duration {
 	return max(time.Second, end.Sub(now))
 }
 
+// potLuckStartIn is how long until the next Pot Luck Day starts (midnight on Ur's clock, the window's
+// first day), 0 while it is on or under a held QA date.
+func potLuckStartIn(now time.Time) time.Duration {
+	if _, _, _, held := seasonDate(now); held || potLuckOn(now) {
+		return 0
+	}
+	return nextUrMidnight(now, func(y int) int { from, _ := potLuckWindow(y); return from })
+}
+
+// nextUrMidnight is how long from now to the start (00:00 on Ur's clock) of the November day dayOf
+// names, this year's if it is still to come, else next year's.
+func nextUrMidnight(now time.Time, dayOf func(y int) int) time.Duration {
+	y := now.In(urZone).Year()
+	start := time.Date(y, time.November, dayOf(y), 0, 0, 0, 0, urZone)
+	if !start.After(now) {
+		start = time.Date(y+1, time.November, dayOf(y+1), 0, 0, 0, 0, urZone)
+	}
+	return start.Sub(now)
+}
+
+// seasonWakeMax caps a wait for a season's start: the timer wakes at least this often, settles and
+// arms again, so a long wait follows the wall clock (a clock step, a suspended host) rather than drifting.
+const seasonWakeMax = 6 * time.Hour
+
 // askDress is a Pot Luck Day costume on a street Chicken: the refusals, then the ledger takes the
 // costume, then the Chicken wears it for everyone.
 func (o *objects) askDress(cl *Client, m objAct, street string, spot *objSpot) {

@@ -44,7 +44,8 @@ func TestModulesGetTheirKindsAndHooks(t *testing.T) {
 	}
 	ran := false
 	hub.After(time.Minute, func() { ran = hub.ClientLocked(1) != nil })
-	fired[0]()
+	// The last timer is this one: modules arm their own on connect (the seasons' start and end).
+	fired[len(fired)-1]()
 	if !ran {
 		t.Fatal("After runs its func with the lock held and the hub usable")
 	}

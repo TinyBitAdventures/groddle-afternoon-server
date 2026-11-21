@@ -305,3 +305,24 @@ func TestFeastDayALayOnTheDayRefillsSpotsThePoolLeftEmpty(t *testing.T) {
 		t.Fatalf("the new dish is laid %v", r.day.piles[0])
 	}
 }
+
+// The feast is laid out at Thanksgiving Day's first second for a player already standing on the
+// street, with nobody joining or eating (it was laid out only on a join or a bite).
+func TestFeastDayIsLaidOutAtMidnightForWhoeverIsThere(t *testing.T) {
+	r := newFeastDayRig(t, time.Date(2026, time.November, 25, 22, 0, 0, 0, urZone), "")
+	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
+	if st := lastOf(t, ada, "feastday_state"); st["on"] != false {
+		t.Fatalf("the day before: %v", st)
+	}
+	r.advance(time.Date(2026, time.November, 25, 23, 59, 59, 0, urZone).Sub(r.now))
+	noneOf(t, ada, "feastday_state")
+	r.advance(2 * time.Second)
+	st := lastOf(t, ada, "feastday_state")
+	if st["on"] != true || len(st["piles"].([]any)) != feastDayPiles {
+		t.Fatalf("at midnight: %v", st)
+	}
+	r.advance(24 * time.Hour)
+	if st := lastOf(t, ada, "feastday_state"); st["on"] != false {
+		t.Fatalf("the next day: %v", st)
+	}
+}

@@ -8,9 +8,12 @@ package main
 // the table fills over the week. The server holds it: the offerings (the newest feastKeep, with the
 // count of all of them), and each player's game day of their last offering, so a player's first
 // offering of a game day is decided here, once ("first": the game gives that player a little mood
-// and favor with Pot). When Pot Luck Day ends the table is packed away for everyone: a timer at the
-// window's end clears it and tells the street, and a table read after the end (a state file, a
-// restart) or from another year is cleared as it is read.
+// and favor with Pot). The table is set out and packed away on timers, as Glitch's own seasonal
+// spawns came and went with the calendar for whoever stood there: at the window's start (midnight
+// Pacific) the street hears the table is out (a player already standing there sees it without
+// rejoining), and at its end it is cleared and the street told; a table read after the end (a state
+// file, a restart) or from another year is cleared as it is read. The timers are armed at the first
+// connect (h.After is the test's once the hub is built) and again at each change.
 //
 // Client to server:
 //
@@ -102,16 +105,17 @@ type feastSaved struct {
 }
 
 type harvestTable struct {
-	h      *Hub
-	key    string // the season's year ("pot_luck_day:2026"), "" when packed away
-	rows   []feastRow
-	total  int
-	counts map[string]int  // class -> lays this season (G1009)
-	daily  map[int64]int64 // player -> game day of their last offering
-	layAt  map[int64]time.Time
-	uses   *useAsker
-	path   string
-	ending func() bool // the end-of-season timer's stop
+	h        *Hub
+	key      string // the season's year ("pot_luck_day:2026"), "" when packed away
+	rows     []feastRow
+	total    int
+	counts   map[string]int  // class -> lays this season (G1009)
+	daily    map[int64]int64 // player -> game day of their last offering
+	layAt    map[int64]time.Time
+	uses     *useAsker
+	path     string
+	ending   func() bool // the end-of-season timer's stop
+	starting func() bool // the start-of-season timer's stop
 }
 
 func init() { modules = append(modules, newHarvestTable) }
@@ -147,6 +151,8 @@ func (m *harvestTable) Register(r *Registry) {
 	r.Handle("feast_lay", m.lay)
 	r.Handle("feast_sync", func(cl *Client, _ json.RawMessage) { m.joined(cl) })
 	r.OnJoin(m.joined)
+	// The season's timers start with the first player online (and wake the table after a restart).
+	r.OnConnect(func(*Client) { m.wake() })
 	r.OnDisconnect(func(cl *Client) { delete(m.layAt, cl.ID()) })
 	r.OnShutdown(func() { m.save() })
 	// For tests and other modules: the table's count and its newest offering.
@@ -193,18 +199,32 @@ func (m *harvestTable) pack(now time.Time) bool {
 	return true
 }
 
-// settle packs the table away when its season is over and arms the end-of-season timer (the
-// season's last second; a held QA date never ends). Reports whether the table changed season.
+// wake settles the table and tells the street when the season changed.
+func (m *harvestTable) wake() {
+	if m.settle() {
+		m.broadcastState()
+	}
+}
+
+// settle sets the table out or packs it away as the calendar says, and arms the timer for the next
+// change: the season's end (its last second; a held QA date never ends) or, out of season, its start
+// (midnight on Ur's clock, woken at least every seasonWakeMax). Reports whether the table changed season.
 func (m *harvestTable) settle() bool {
 	now := m.h.Now()
 	cleared := m.pack(now)
+	if m.key == "" && m.starting == nil {
+		if wait := potLuckStartIn(now); wait > 0 {
+			m.starting = m.h.After(min(wait, seasonWakeMax), func() {
+				m.starting = nil
+				m.wake()
+			})
+		}
+	}
 	if m.key != "" && m.ending == nil {
 		if left := potLuckLeft(now); left > 0 && left < 300*24*time.Hour {
 			m.ending = m.h.After(left+time.Second, func() {
 				m.ending = nil
-				if m.settle() {
-					m.broadcastState()
-				}
+				m.wake()
 			})
 		}
 	}

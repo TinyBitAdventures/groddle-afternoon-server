@@ -14,8 +14,10 @@ package main
 // (items/spawner.js 23-31 spawn_class/max_count/spawn_interval, 163-174 the timer restarting).
 // A week laid with fewer than feastDayPotDishes dishes is topped up to that many by Pot, with his own
 // harvest dishes (js/pot-luck-feast.js HARVEST_DISHES). Each player eats at most feastDayCap bites
-// that day. At midnight the leftovers are packed away for everyone (a timer at the day's end, as the
-// Harvest Table's own end timer); the table itself stays until Pot Luck Day ends.
+// that day. The feast is laid out at the day's first second and the leftovers packed away at
+// midnight, both on timers that tell the street (a player already standing there sees the piles come
+// without rejoining), as the Harvest Table's own; the table itself stays until Pot Luck Day ends. The
+// timers are armed at the first connect and again at each change.
 //
 // The energy, mood, fullness and badges of a bite are the game's (it eats from a one-item stock,
 // game.js eatFromStock): the game refuses a bite at full energy, stuffed or dead before it asks.
@@ -116,18 +118,19 @@ type feastDaySaved struct {
 }
 
 type feastDay struct {
-	h      *Hub
-	key    string // "feast_day:2026" on the day, "" otherwise
-	piles  [feastDayPiles]feastPile
-	placed map[string]int // dishes put out per class (Pot's too)
-	pot    map[string]int // Pot's top-up, decided as the day starts
-	ate    map[int64]int  // player -> bites eaten today
-	serial int
-	eatAt  map[int64]time.Time
-	refill [feastDayPiles]func() bool
-	ending func() bool
-	roll   func() float64
-	path   string
+	h        *Hub
+	key      string // "feast_day:2026" on the day, "" otherwise
+	piles    [feastDayPiles]feastPile
+	placed   map[string]int // dishes put out per class (Pot's too)
+	pot      map[string]int // Pot's top-up, decided as the day starts
+	ate      map[int64]int  // player -> bites eaten today
+	serial   int
+	eatAt    map[int64]time.Time
+	refill   [feastDayPiles]func() bool
+	ending   func() bool
+	starting func() bool // the timer for the day's first second, armed off the day
+	roll     func() float64
+	path     string
 }
 
 func init() { modules = append(modules, newFeastDay) }
@@ -177,6 +180,8 @@ func (m *feastDay) Register(r *Registry) {
 	r.Handle("feastday_eat", m.eat)
 	r.Handle("feastday_sync", func(cl *Client, _ json.RawMessage) { m.joined(cl) })
 	r.OnJoin(m.joined)
+	// The day's timers start with the first player online (and wake the feast after a restart).
+	r.OnConnect(func(*Client) { m.wake() })
 	r.OnDisconnect(func(cl *Client) { delete(m.eatAt, cl.ID()) })
 	r.OnShutdown(func() { m.saveSoon() })
 	// harvest_table.go calls it after each lay: on the day a new dish joins the pool at once.
@@ -223,6 +228,15 @@ func feastDayLeft(now time.Time) time.Duration {
 	t := now.In(urZone)
 	end := time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, urZone)
 	return max(time.Second, end.Sub(now))
+}
+
+// feastDayStartIn is how long until the next Thanksgiving Day starts (00:00 on Ur's clock), 0 on the
+// day or under a held QA date.
+func feastDayStartIn(now time.Time) time.Duration {
+	if _, _, _, held := seasonDate(now); held || feastDayKey(now) != "" {
+		return 0
+	}
+	return nextUrMidnight(now, thanksgiving)
 }
 
 // counts is the week's lays per class (harvest_table.go), or none without the table.
@@ -314,8 +328,16 @@ func (m *feastDay) start() {
 	log.Printf("feast day: laid out (%s, %d laid this week, Pot adds %d, %d servings)", m.key, total, max(0, feastDayPotDishes-total), m.left())
 }
 
-// settle starts or packs away the feast as the calendar says, and arms the day's end and any refills
-// a restart left waiting. Reports whether the feast changed (a new day, or packed away).
+// wake settles the feast and tells the street when it changed.
+func (m *feastDay) wake() {
+	if m.settle() {
+		m.broadcastState()
+	}
+}
+
+// settle starts or packs away the feast as the calendar says, and arms the timer for the next change
+// (the day's end, or off the day its start, woken at least every seasonWakeMax) and any refills a
+// restart left waiting. Reports whether the feast changed (a new day, or packed away).
 func (m *feastDay) settle() bool {
 	now := m.h.Now()
 	key := feastDayKey(now)
@@ -339,15 +361,21 @@ func (m *feastDay) settle() bool {
 		changed = true
 	}
 	if m.key == "" {
+		if m.starting == nil {
+			if wait := feastDayStartIn(now); wait > 0 {
+				m.starting = m.h.After(min(wait, seasonWakeMax), func() {
+					m.starting = nil
+					m.wake()
+				})
+			}
+		}
 		return changed
 	}
 	if m.ending == nil {
 		if left := feastDayLeft(now); left > 0 && left < 300*24*time.Hour {
 			m.ending = m.h.After(left+time.Second, func() {
 				m.ending = nil
-				if m.settle() {
-					m.broadcastState()
-				}
+				m.wake()
 			})
 		}
 	}

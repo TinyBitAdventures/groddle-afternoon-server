@@ -338,3 +338,33 @@ func TestHarvestTableCountsEachKindLaidThisSeason(t *testing.T) {
 		t.Fatalf("after the season %v", later.mod.counts)
 	}
 }
+
+// The table is set out at Pot Luck Day's first second for a player already standing on its street,
+// with nobody joining, laying or reconnecting (it was set out only on a join or a lay).
+func TestHarvestTableIsSetOutAtTheSeasonStartForWhoeverIsThere(t *testing.T) {
+	r := newFeastRig(t, time.Date(2026, time.November, 21, 14, 0, 0, 0, urZone), "")
+	ada := joinAt(r.hub, 1, "Ada", feastStreet, 0, -120)
+	if st := lastOf(t, ada, "feast_state"); st["on"] != false {
+		t.Fatalf("the day before: %v", st)
+	}
+	start := time.Date(2026, time.November, 22, 0, 0, 0, 0, urZone)
+	r.advance(start.Add(-time.Second).Sub(r.now))
+	noneOf(t, ada, "feast_state")
+	if r.mod.key != "" {
+		t.Fatalf("set out a second early: %q", r.mod.key)
+	}
+	r.advance(2 * time.Second)
+	st := lastOf(t, ada, "feast_state")
+	if st["on"] != true || st["street"] != feastStreet {
+		t.Fatalf("at the start: %v", st)
+	}
+	// It is packed away at the end, and set out again a year later, all on timers.
+	r.advance(time.Date(2026, time.November, 30, 0, 0, 2, 0, urZone).Sub(r.now))
+	if st := lastOf(t, ada, "feast_state"); st["on"] != false {
+		t.Fatalf("after the end: %v", st)
+	}
+	r.advance(time.Date(2027, time.November, 21, 0, 0, 1, 0, urZone).Sub(r.now))
+	if st := lastOf(t, ada, "feast_state"); st["on"] != true || r.mod.key != "pot_luck_day:2027" {
+		t.Fatalf("next year: %v", st)
+	}
+}
