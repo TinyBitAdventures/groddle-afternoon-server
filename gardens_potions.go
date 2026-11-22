@@ -197,7 +197,7 @@ func (g *gardens) handlePotion(cl *Client, frame json.RawMessage) {
 	seeds := 0
 	if potion.action == "plant" {
 		seed, ok := g.w.seeds[m.Seed]
-		if !ok || seed.bed != bed.bed {
+		if !ok || !seed.fits(bed.bed) {
 			line := gardenNoCropSeeds
 			if bed.bed == "herb" {
 				line = gardenNoHerbSeeds

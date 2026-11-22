@@ -145,12 +145,16 @@ var (
 // ---------------------------------------------------------------------------
 
 type gardenSeed struct {
-	bed      string
-	g1, g2   int64 // the two stages at rules.pace
-	l1, l2   int64 // the same on the clock from before it (rules.legacy)
+	bed      string // default, herb, or any (a seed that fits both beds)
+	g1, g2   int64  // the two stages at rules.pace
+	l1, l2   int64  // the same on the clock from before it (rules.legacy)
 	crop     string
 	produces int
 }
+
+// fits says whether the seed goes in a bed of this kind. Pumpkin Seeds are "any": seed_pumpkin.js tags them
+// both seed and herb_seed, so they plant in a crop or an herb garden (GardenView.as 500 lists herb_seed items).
+func (s gardenSeed) fits(bed string) bool { return s.bed == "any" || s.bed == bed }
 
 type gardenBed struct {
 	bed        string // the kind: default (crops) or herb
@@ -207,7 +211,7 @@ func loadGardenWorld(raw []byte) (*gardenWorld, error) {
 		g2, ok3 := r[2].(float64)
 		crop, ok4 := r[3].(string)
 		n, ok5 := r[4].(float64)
-		if !(ok1 && ok2 && ok3 && ok4 && ok5) || (bed != "default" && bed != "herb") || g1 <= 0 || g2 <= 0 || crop == "" || n < 1 {
+		if !(ok1 && ok2 && ok3 && ok4 && ok5) || (bed != "default" && bed != "herb" && bed != "any") || g1 <= 0 || g2 <= 0 || crop == "" || n < 1 {
 			return nil, fmt.Errorf("bad seed %s %v", id, r)
 		}
 		old := file.Rules.Legacy.Seeds[id]
@@ -873,7 +877,7 @@ func (g *gardens) plant(rp *gardenReply, bed *gardenBed) {
 		return
 	}
 	seed, ok := g.w.seeds[rp.m.Seed]
-	if !ok || seed.bed != bed.bed {
+	if !ok || !seed.fits(bed.bed) {
 		line := gardenCropOnly
 		if bed.bed == "herb" {
 			line = gardenHerbOnly

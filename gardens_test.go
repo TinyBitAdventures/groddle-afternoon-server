@@ -832,3 +832,27 @@ func TestGardenHerbGardensStreetsHaveABedInEveryBox(t *testing.T) {
 		t.Fatalf("herb9 on Chakra Phool is %v", bed)
 	}
 }
+
+// Pumpkin Seeds plant in a crop or an herb bed (seed_pumpkin.js tags them seed and herb_seed;
+// GardenView.as 500), so the rules mark them "any".
+func TestGardenPumpkinSeedsPlantInEitherBed(t *testing.T) {
+	if s := gardenWorldData.seeds["seed_pumpkin"]; s.bed != "any" || !s.fits("herb") || !s.fits("default") {
+		t.Fatalf("seed_pumpkin rule %+v", s)
+	}
+	if s := gardenWorldData.seeds["seed_spinach"]; s.fits("herb") || !s.fits("default") {
+		t.Fatalf("seed_spinach rule %+v", s)
+	}
+	r := newGardenRig(t, false)
+	a := r.gardener(1, "Ada")
+	r.gact(a, 1, "default:1-1", "plant", map[string]any{"seed": "seed_pumpkin"})
+	if ok := r.only(a, "garden_ok"); plotOf(t, ok, "default:1-1")["state"] != "seeds" {
+		t.Fatalf("a pumpkin seed in the crop bed answered %v", ok)
+	}
+	h := r.bed("herb")
+	b := r.player(2, "Bo", gardenStreet, h.x+20, h.y)
+	r.drain(b)
+	r.gact(b, 2, "herb:1-1", "plant", map[string]any{"seed": "seed_pumpkin"})
+	if ok := r.only(b, "garden_ok"); plotOf(t, ok, "herb:1-1")["state"] != "seeds" {
+		t.Fatalf("a pumpkin seed in the herb bed answered %v", ok)
+	}
+}
