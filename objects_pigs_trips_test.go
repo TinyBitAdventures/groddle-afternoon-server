@@ -219,3 +219,41 @@ func TestAPiggysWalkToFoodOutlivesARestart(t *testing.T) {
 		t.Fatalf("after a restart it still eats and comes back: %+v, hunger %d", ob.trip, ob.hunger)
 	}
 }
+
+// A Piggy's pet, nibble and feed are measured from where the Piggy is now (pigX: on its trip to food
+// or on its path), as every page draws it and as the source measured from the Piggy itself
+// (npc_piggy.js proximity_override 800), not from its planned spot: one gone 1,456 px for a tree's
+// fruit had a player beside it told "You need to be closer".
+func TestAPiggyAwayForFoodIsPettedWhereItIs(t *testing.T) {
+	r := newObjRig(t)
+	street := "GIFQRA323ME2GCO"
+	pig := sharedWorld.streets[street]["pig:0"]
+	treeID := fruitTreeFor(t, r, street, pig)
+	tree := sharedWorld.streets[street][treeID]
+	a := r.player(1, "Ada", street, tree.x, tree.y)
+	hungryPigsOnly(r, street, "pig:0")
+	r.act(a, 1, treeID, "food", nil)
+	r.drain(a)
+	ob := r.mod.streets[street]["pig:0"]
+	if ob.trip == nil {
+		t.Fatalf("the hungry Piggy set off for %s", treeID)
+	}
+	r.advance(time.Duration(ob.trip.Leg)*time.Millisecond + time.Second) // at the tree, eating
+	at := r.mod.pigX(street, ob)
+	away := math.Copysign(1, at-pig.x)
+	beside := at + away*200 // beside it, on the far side from its spot
+	if math.Abs(beside-pig.x) <= pigReachX || math.Abs(at-pig.x) < 1000 {
+		t.Fatalf("the test wants a Piggy well away from its spot: spot %v, now %v", pig.x, at)
+	}
+	b := r.player(2, "Bo", street, beside, pig.y)
+	r.act(b, 1, "pig:0", "pet", nil)
+	if far := farAnswer(r.drain(b)); far != nil {
+		t.Fatalf("a pet beside the Piggy at %v (its spot %v) was refused: %v", at, pig.x, far)
+	}
+	// Near its spot but more than two screens from where it is now: too far.
+	c := r.player(3, "Cy", street, at-away*(pigReachX+100), pig.y)
+	r.act(c, 1, "pig:0", "pet", nil)
+	if far := farAnswer(r.drain(c)); far == nil || far["message"] != objTextFarWalker {
+		t.Fatalf("a pet 1,700 px from where the Piggy is should be far: %v", far)
+	}
+}

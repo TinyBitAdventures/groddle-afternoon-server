@@ -1179,16 +1179,25 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	}
 	reachX, reachY := float64(objReachX), float64(objReachY)
 	farText := objTextFar
+	fromX := spot.x
 	if spot.kind == "pig" {
-		// A Piggy wanders and walks to food, each client's its own way: about two screens.
+		// A Piggy walks its path and goes for food on the server's clock, and every page draws it
+		// there (street-objects-feature piggyAt from the snapshot's homes and trips): measured from
+		// where it is now (pigX), as the source measured from the Piggy itself (proximity_override
+		// 800 on pet, nibble and feed), with about two screens' room for a page that draws it a little off.
 		reachX, reachY = pigReachX, pigReachY
 		farText = objTextFarWalker
+		ob := o.streets[street][spot.id]
+		if ob == nil {
+			ob = o.fresh(spot) // untouched: on its path from the start, nothing armed
+		}
+		fromX = o.pigX(street, ob)
 	}
 	if isCreature(spot.kind) {
 		reachX, reachY = creatureReach(spot)
 		farText = objTextFarWalker
 	}
-	if x, y := cl.Pos(); !anyDistance(spot.kind, m.Verb) && (math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY) {
+	if x, y := cl.Pos(); !anyDistance(spot.kind, m.Verb) && (math.Abs(x-fromX) > reachX || math.Abs(y-spot.y) > reachY) {
 		no("far", farText, nil)
 		return
 	}
