@@ -61,7 +61,8 @@ package main
 //
 // Every "objs" frame carries "now" (the server's Unix ms, the street animals' shared clock); the
 // snapshot says "creatures":true when this server shares the street animals, "animals" names them
-// and "spots" gives each Batterfly's, Heli Kitty's and Crab's place ({"batterfly:0":[x,y]}).
+// and "spots" gives each Batterfly's, Heli Kitty's and Crab's place ({"batterfly:0":[x,y]}), and
+// each rock's, tree's and node's ({"rock:2":[x,y]}, {"node:npc_salmon:3":[x,y]}: placedBySnapshot).
 //
 // A Wood Tree is tree:<i> too: {"id":"tree:3","maturity":5,"count":1}, with its care once tended
 // ("pets","waters","petted","watered": trees.go woodTend, everyone's pet and water every 5 minutes
@@ -1006,6 +1007,16 @@ func (o *objects) broadcast(street string, except int64, obs ...*liveObj) {
 // Messages
 // ---------------------------------------------------------------------------
 
+// placedBySnapshot: a rock, a street tree (a Wood Tree too) or a resource node, which an online page
+// draws at the snapshot's spot for its id (R43, #587). Every page planned these itself and named each
+// by its plan index, so any planner input only the page had (Indri Slope's Qurazy marker moved its
+// salmon when the planner reseated the ones behind front art) named another spot, and reach was
+// refused with objTextFar while the player stood on it. Glitch had one place for each: the client
+// drew the location's items where the server said they were.
+func placedBySnapshot(kind string) bool {
+	return kind == "rock" || kind == "tree" || kind == "wood" || kind == "node"
+}
+
 func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 	street := cl.Street()
 	if street == "" || !o.allow(cl) {
@@ -1045,9 +1056,10 @@ func (o *objects) handleSync(cl *Client, frame json.RawMessage) {
 		if isCreature(spot.kind) {
 			animals = append(animals, id)
 		}
-		if spot.kind == "batterfly" || walker(spot.kind) {
+		if spot.kind == "batterfly" || walker(spot.kind) || placedBySnapshot(spot.kind) {
 			// A Heli Kitty's and a Crab's spot too (slice 2): their planner groups come after groups a
 			// player's own projects and the seasons add, so every page walks them from the server's.
+			// R43 (#587): and every rock, tree and node's, drawn there online (street-objects-feature).
 			places[id] = []float64{spot.x, spot.y}
 		}
 	}
