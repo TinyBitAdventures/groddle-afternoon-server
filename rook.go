@@ -443,7 +443,8 @@ type rookAttack struct {
 	primed     *rookPrime
 	attackers  map[int64]int // strike damage per player (completeAttack 290-298)
 	lastStrike map[int64]time.Time
-	rests      bool // the schedule started it: whoever meets it rests rookPlayerRest (rook_dev starts do not)
+	rests      bool      // the schedule started it: whoever meets it rests rookPlayerRest (rook_dev starts do not)
+	arrivedAt  time.Time // the Rook arrived (arrive): the alerts' since (rook_alert.go)
 }
 
 // rookTimer is one named timer of an attack; a fired timer runs only while it is still the one named.
@@ -503,6 +504,8 @@ type rook struct {
 	// (G335 slice 5, objects_uses.go); balming holds the rooked thing while it waits.
 	uses    *useAsker
 	balming map[string]bool // street + "|" + key
+	// alertSig is the attacks under way last told to everyone (rook_alert.go alertChanged).
+	alertSig string
 }
 
 func newRook(h *Hub) Module {
@@ -539,6 +542,7 @@ func (m *rook) Register(r *Registry) {
 	r.Handle("rook_revive_start", m.handleReviveStart)
 	r.Handle("rook_revive_stop", m.handleReviveStop)
 	r.Handle("rook_dev", m.handleDev)
+	r.Handle("rook_attacks", m.handleAttacks) // rook_alert.go
 	r.OnJoin(m.joined)
 	r.OnLeave(m.left)
 	r.OnDisconnect(func(cl *Client) { delete(m.limits, cl.ID()); delete(m.arrived, cl.ID()) })
@@ -724,6 +728,7 @@ func (m *rook) message(tsid string, ev map[string]any) map[string]any {
 
 func (m *rook) broadcast(tsid string, ev map[string]any) {
 	m.h.BroadcastStreetLocked(tsid, m.message(tsid, ev), 0)
+	m.alertChanged() // every change to an attack goes by here: the Butlers' list (rook_alert.go)
 }
 
 // ---------------------------------------------------------------------------
@@ -920,6 +925,7 @@ func (m *rook) arrive(a *rookAttack, ev map[string]any) {
 	a.crowd = max(1, len(m.h.StreetLocked(a.street)))
 	a.maxHealth, a.maxStun = rookScale(a.crowd)
 	a.health, a.stun, a.phase = a.maxHealth, 0, "build_up"
+	a.arrivedAt = m.h.Now()
 	m.scheduleWingBeat(a, rookWingBeat)
 	a.clockAt = a.wingAt
 	if ev == nil {
