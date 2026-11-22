@@ -18,10 +18,12 @@ package main
 //  1. on the frontier: a closed street with a signpost neighbour that is open (one of the streets
 //     it opens from or is offered on is not itself an unbuilt street), or an upgrade of an open
 //     street (with no roads in the table, the only test of where it stands);
-//  2. not resting: a street whose last street or upgrade job finished under 30 minutes ago offers
-//     none, started or not (locations/inc_jobs.js jobs_get_available 463-467; projects.go
-//     availability), so its board does not show. A resting project comes after every open one,
-//     whatever its progress (G1023: the line pointed players at a street with no board);
+//  2. open now: not resting, a street whose last street or upgrade job finished under 30 minutes
+//     ago offers none, started or not (locations/inc_jobs.js jobs_get_available 463-467; projects.go
+//     availability), so its board does not show (G1023: the line pointed players at a street with no
+//     board); and not waiting between phases (projRow.Ready, projects.go gate: Glitch's jobs.js
+//     getAvailableJobs 2-62 skips a waiting job, G1140). One that rests or waits comes after every
+//     open one, whatever its progress;
 //  3. the most progress (phases done plus the current phase's share by base cost, quest.js 1012);
 //  4. the lowest job id (numbers before words), so every server picks the same.
 //
@@ -34,6 +36,16 @@ package main
 // it after it was picked) sends the rest's end as "ready" with "rest":true, so the game says when
 // its board opens; the street stays quiet meanwhile, as in Glitch.
 //
+// Waiting between phases (G1140, Austin 2026-11-22: "the featured line skips projects waiting
+// between phases"): our rule, as Glitch had no featured project. When the featured project's phase
+// is done and the next one waits (featuredPhaseWait), the rule picks again; when it finds a project
+// open now, that one stands in and the waiting one is kept as Back, and Global hears it
+// (standInText). When the wait ends (a timer, checked again on every sync and on start) Back is the
+// featured project again, whatever the stand-in's progress, as it was featured first and is kept
+// until built (G656); Global hears that too (againText). A stand-in that waits or is built in the
+// meantime gives way the same way, Back kept. With nothing open to stand in, the waiting one stays
+// featured and sends its "ready". An administrator's choice is not moved (it stays until built).
+//
 // It stays featured until its last phase is done (featuredBuilt), then the next is picked the same
 // way; a pick the rule made that players cannot reach (one kept from before the reach test) is
 // picked again. An administrator may choose one or clear the choice through the console's signed call
@@ -44,7 +56,10 @@ package main
 //	{"t":"project_featured","now":ms,"job":"62","kind":"street","street":"GLI…","board":"GLI…",
 //	     "label":"Lowland Slough","hub":"Shimla Mirch","boardLabel":"…","phase":0,"phases":1,
 //	     "perc":0.25,"percent":25,"since":ms,"by":"auto","row":Row,
-//	     "ready":ms,"rest":true,"subway":true}                      subway: its board is reached only by subway;
+//	     "ready":ms,"rest":true,"subway":true,
+//	     "back":{"job":"3","label":"Ex Lane","ready":ms}}           back: the featured project waiting between phases,
+//	                                                                featured again at ready (this one stands in);
+//	                                                                subway: its board is reached only by subway;
 //	                                                                ready: the next phase opens (rest absent), or the
 //	                                                                board street's post-build rest ends (rest true)          answering every project_sync (a client syncs once connected), to everyone
 //	                                                                when it changes, and as it moves (at most every featuredEvery)
@@ -87,6 +102,9 @@ type projFeatured struct {
 	By    string `json:"by,omitempty"` // "admin" when an administrator chose it
 	// Subway: picked by subway because nothing was walkable; it stays while the subway reaches it.
 	Subway bool `json:"subway,omitempty"`
+	// Back (G1140): the featured project waiting between phases while this one stands in; it is
+	// featured again when its next phase opens.
+	Back *projFeatured `json:"back,omitempty"`
 }
 
 // featuredLive is what is not kept: the Global notice waiting for the chat, the progress push.
@@ -94,6 +112,8 @@ type featuredLive struct {
 	notice  []string // lines for Global not yet posted (a pick before the chat module was there)
 	pending bool     // a progress push is waiting for its timer
 	dev     bool     // GRODDLE_PROJECTS_DEV=1: project_featured_dev
+	backAt  int64    // ms the Back timer is set for (0: none)
+	backOff func() bool
 }
 
 func init() { serviceHandlers["project_featured"] = adminProjectFeatured }
@@ -215,7 +235,8 @@ func (m *projects) pickFeaturedIn(closed, reach map[string]bool) string {
 		}
 		_, _, whole := m.featuredProgress(id)
 		_, restEnd := m.featuredBoardRest(job, closed, reach, now)
-		list = append(list, cand{id: id, frontier: featuredFrontier(job, closed), progress: whole, resting: restEnd > 0})
+		waits := m.featuredWaitEnd(id) > 0 // G1140: between phases
+		list = append(list, cand{id: id, frontier: featuredFrontier(job, closed), progress: whole, resting: restEnd > 0 || waits})
 	}
 	if len(list) == 0 {
 		return ""
@@ -237,28 +258,149 @@ func (m *projects) pickFeaturedIn(closed, reach map[string]bool) string {
 }
 
 // ensureFeatured picks a featured project when none stands (or the one kept can no longer be:
-// built some other way, gone from the table). True when it changed.
+// built some other way, gone from the table). A stand-in that can no longer be gives way to Back
+// when it is open, else to another stand-in (refeature). True when it changed.
 func (m *projects) ensureFeatured() bool {
-	if f := m.st.Featured; f != nil && m.featuredOK(f.Job) && (f.By == "admin" || m.featuredReachable(f.Job) || (f.Subway && m.featuredBySubway(f.Job))) {
+	f := m.st.Featured
+	if f != nil && m.featuredUsable(f) {
 		return false
 	}
+	var back *projFeatured
+	if f != nil && f.Back != nil && m.featuredUsable(f.Back) {
+		back = f.Back
+	}
+	return m.refeature(back)
+}
+
+// featuredUsable: may f stay featured (an open street project players can reach, or an administrator's choice)?
+func (m *projects) featuredUsable(f *projFeatured) bool {
+	return m.featuredOK(f.Job) && (f.By == "admin" || m.featuredReachable(f.Job) || (f.Subway && m.featuredBySubway(f.Job)))
+}
+
+// featuredWaitEnd is when a job's next phase opens (ms), 0 when it is not waiting between phases.
+func (m *projects) featuredWaitEnd(jobID string) int64 {
+	if r := m.st.Jobs[jobID]; r != nil && r.Done == 0 && r.Ready > m.ms() {
+		return r.Ready
+	}
+	return 0
+}
+
+// featuredOpenNow: does the job's board take things now (not waiting between phases, its board street not resting)?
+func (m *projects) featuredOpenNow(jobID string) bool {
+	if m.featuredWaitEnd(jobID) > 0 {
+		return false
+	}
+	closed, reach, _ := m.featuredWorld(m.t.Jobs[jobID])
+	_, restEnd := m.featuredBoardRest(m.t.Jobs[jobID], closed, reach, m.ms())
+	return restEnd == 0
+}
+
+// refeature runs the rule again. back (nil: none) is the featured project waiting between phases:
+// open again, it is featured; still waiting, a project open now stands in for it, and with none
+// open it stays featured. True when the featured project changed.
+func (m *projects) refeature(back *projFeatured) bool {
 	was := ""
 	if m.st.Featured != nil {
 		was = m.st.Featured.Job
 	}
-	next, bySubway := m.pickFeaturedWay()
-	if next == "" {
+	if back != nil {
+		back.Back = nil
+	}
+	switch next, bySubway := m.pickFeaturedWay(); {
+	case back != nil && (m.featuredWaitEnd(back.Job) == 0 || next == "" || next == back.Job || !m.featuredOpenNow(next)):
+		// Open again, or nothing open to stand in for it (the rule ranks waiting ones last).
+		m.st.Featured = back
+		if back.Job != was && m.featuredWaitEnd(back.Job) == 0 {
+			m.queueNotice(m.againText(back.Job))
+		}
+	case next == "":
 		m.st.Featured = nil
-	} else {
+	case back != nil:
+		m.st.Featured = &projFeatured{Job: next, Since: m.ms(), By: "auto", Subway: bySubway, Back: back}
+		if next != was {
+			m.queueNotice(m.standInText(back.Job, next))
+			log.Printf("projects: featured street project %s stands in while %s waits for its next phase", next, back.Job)
+		}
+	default:
 		m.st.Featured = &projFeatured{Job: next, Since: m.ms(), By: "auto", Subway: bySubway}
 		m.queueNotice(m.featuredText(next))
 		log.Printf("projects: featured street project %s (%s)", next, m.t.Jobs[next].Label)
 	}
-	if next == was {
+	m.armFeaturedBack()
+	now := ""
+	if m.st.Featured != nil {
+		now = m.st.Featured.Job
+	}
+	if now == was {
 		return false
 	}
 	m.save()
 	return true
+}
+
+// featuredPhaseWait (projects.go, a phase done and the next one waits): the featured project, or
+// the one standing in for it, steps aside while it waits when another is open now (G1140).
+func (m *projects) featuredPhaseWait(jobID string) {
+	f := m.st.Featured
+	if f == nil || f.Job != jobID || f.By == "admin" || m.featuredWaitEnd(jobID) == 0 {
+		return
+	}
+	back := f.Back
+	if back == nil || !m.featuredUsable(back) {
+		self := *f
+		back = &self
+	}
+	if m.refeature(back) {
+		m.flushFeaturedNotice()
+		m.toAll(m.featuredMsg())
+	}
+}
+
+// featuredReopen: Back's next phase is open, so it is featured again. Run by the Back timer, on
+// every sync and on start (a timer does not outlive the server).
+func (m *projects) featuredReopen() {
+	f := m.st.Featured
+	if f == nil || f.Back == nil {
+		m.armFeaturedBack()
+		return
+	}
+	if !m.featuredUsable(f.Back) {
+		f.Back = nil
+		m.armFeaturedBack()
+		m.save()
+		return
+	}
+	if m.featuredWaitEnd(f.Back.Job) > 0 {
+		m.armFeaturedBack()
+		return
+	}
+	if m.refeature(f.Back) {
+		m.flushFeaturedNotice()
+		m.toAll(m.featuredMsg())
+	}
+}
+
+// armFeaturedBack sets the timer for Back's wait to end (and stops one no longer wanted).
+func (m *projects) armFeaturedBack() {
+	at := int64(0)
+	if f := m.st.Featured; f != nil && f.Back != nil {
+		at = m.featuredWaitEnd(f.Back.Job)
+	}
+	if at == m.feat.backAt {
+		return
+	}
+	if m.feat.backOff != nil {
+		m.feat.backOff()
+		m.feat.backOff = nil
+	}
+	m.feat.backAt = at
+	if at == 0 || m.h == nil {
+		return
+	}
+	m.feat.backOff = m.h.After(time.Duration(at-m.ms())*time.Millisecond, func() {
+		m.feat.backAt, m.feat.backOff = 0, nil
+		m.featuredReopen()
+	})
 }
 
 // featuredReachable: can players reach the job's board from the open world (openroads.go)?
@@ -296,8 +438,7 @@ func (m *projects) featuredBuilt(jobID string) {
 		return
 	}
 	m.queueNotice(m.builtText(jobID))
-	m.st.Featured = nil
-	m.ensureFeatured()
+	m.ensureFeatured() // the built one is no longer usable: Back, when one waits, or the rule's next
 	m.flushFeaturedNotice()
 	m.toAll(m.featuredMsg())
 }
@@ -402,6 +543,26 @@ func (m *projects) featuredText(jobID string) string {
 	return fmt.Sprintf("The featured street project is now %s%s. Help build it!", label, in)
 }
 
+// featuredName is how a line names a job mid-sentence: "Ex Lane", "the upgrade of Ay Way".
+func (m *projects) featuredName(jobID string) string {
+	job := m.t.Jobs[jobID]
+	if job.Kind == "upgrade" {
+		return "the upgrade of " + m.jobLabel(job)
+	}
+	return m.jobLabel(job)
+}
+
+// standInText is Global's line when a project stands in for the featured one waiting between phases (G1140).
+func (m *projects) standInText(backID, jobID string) string {
+	now := strings.TrimSuffix(strings.TrimPrefix(m.featuredText(jobID), "The featured street project is now "), " Help build it!")
+	return fmt.Sprintf("While %s waits for its next phase, the featured street project is %s Help build it!", m.featuredName(backID), now)
+}
+
+// againText is Global's line when the waiting one's next phase opens and it is featured again (G1140).
+func (m *projects) againText(jobID string) string {
+	return fmt.Sprintf("The next phase of %s is open, and it is the featured street project again. Help build it!", m.featuredName(jobID))
+}
+
 // builtText is Global's line when the featured project is built.
 func (m *projects) builtText(jobID string) string {
 	job := m.t.Jobs[jobID]
@@ -460,6 +621,14 @@ func (m *projects) featuredMsg() map[string]any {
 	if restEnd > now && (r == nil || restEnd > r.Ready) {
 		msg["ready"], msg["rest"] = restEnd, true
 	}
+	// G1140: standing in for the featured project waiting between phases.
+	if b := f.Back; b != nil && m.featuredOK(b.Job) {
+		back := map[string]any{"job": b.Job, "label": m.jobLabel(m.t.Jobs[b.Job]), "kind": m.t.Jobs[b.Job].Kind}
+		if end := m.featuredWaitEnd(b.Job); end > 0 {
+			back["ready"] = end
+		}
+		msg["back"] = back
+	}
 	// The board's row (rowJSON, nobody's share): the Projects panel shows what it still needs anywhere.
 	msg["row"] = m.rowJSON(f.Job, r, 0)
 	return msg
@@ -480,11 +649,13 @@ func (m *projects) setFeatured(jobID string) string {
 		return "bad"
 	}
 	if f := m.st.Featured; f != nil && f.Job == jobID {
-		f.By = "admin"
+		f.By, f.Back = "admin", nil
+		m.armFeaturedBack()
 		m.save()
 		return "set"
 	}
 	m.st.Featured = &projFeatured{Job: jobID, Since: m.ms(), By: "admin"}
+	m.armFeaturedBack()
 	m.queueNotice(m.featuredText(jobID))
 	m.save()
 	m.flushFeaturedNotice()

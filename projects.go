@@ -459,6 +459,7 @@ func newProjectsWith(h *Hub, t projTable, path string) *projects {
 		m.save()
 	}
 	m.ensureFeatured() // projects_featured.go: one featured project, picked now when none stands
+	m.featuredReopen() // and one waiting between phases is featured again once open (its timer)
 	return m
 }
 
@@ -1412,6 +1413,7 @@ func (m *projects) settleIfComplete(jobID string, by ...int64) {
 		if r.Hall != nil {
 			r.Hall.Until = 0 // quest.js onJobTimeout 1359: only the claimed phase has the clock
 		}
+		m.featuredPhaseWait(jobID) // projects_featured.go: a waiting featured project steps aside (G1140)
 	}
 	for _, msg := range completes {
 		player := msg["player"].(int64)
@@ -1587,6 +1589,7 @@ func (m *projects) sync(cl *Client, frame json.RawMessage) {
 		}
 	}
 	m.h.SendLocked(cl, map[string]any{"t": "project_world", "now": m.ms(), "built": built, "rest": m.st.Rest})
+	m.featuredReopen()                  // projects_featured.go: Back, once open (G1140)
 	m.h.SendLocked(cl, m.featuredMsg()) // projects_featured.go
 	if cl.Street() != "" {
 		jobs := map[string]any{}

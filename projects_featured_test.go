@@ -255,6 +255,97 @@ func TestFeaturedRestingComesAfterOpenAndSendsTheRestEnd(t *testing.T) {
 	}
 }
 
+// G1140 (Austin 2026-11-22): the featured line skips a project waiting between phases (Glitch's
+// jobs.js getAvailableJobs 2-62 offers no waiting job) and comes back to it when its next phase opens.
+func TestFeaturedStepsAsideWhileItWaitsBetweenPhases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "projects.json")
+	r := newFpRig(t, path)
+	since := r.m.ms() - 1000
+	r.m.st.Featured = &projFeatured{Job: "3", Since: since, By: "auto"}
+	ada := r.player(7, "Ada", "GZ")
+	drain(ada)
+	// Phase 1 of Ex Lane done: phase 2 waits 60 s, so Bee Road (open, the frontier's lowest id) stands in.
+	r.do(ada, map[string]any{"t": "project_featured_dev", "finish": true})
+	f := r.m.st.Featured
+	if f == nil || f.Job != "2" || f.Back == nil || f.Back.Job != "3" || f.Back.Since != since {
+		t.Fatalf("while 3 waits: %+v", f)
+	}
+	notes := r.globalNotes()
+	if want := "While Ex Lane waits for its next phase, the featured street project is Bee Road, the road from Yonder in Testwood. Help build it!"; notes[len(notes)-1] != want {
+		t.Fatalf("Global heard %q", notes)
+	}
+	got := kinds(drain(ada), "project_featured")
+	if len(got) == 0 {
+		t.Fatal("no project_featured for the stand-in")
+	}
+	last := got[len(got)-1]
+	back, _ := last["back"].(map[string]any)
+	if last["job"] != "2" || back == nil || back["job"] != "3" || back["label"] != "Ex Lane" || back["ready"].(float64) != float64(r.m.ms()+60_000) {
+		t.Fatalf("the stand-in's message: %v", last)
+	}
+	// The rule itself ranks the waiting one after every open one.
+	r.m.row("3").Got["r1"] = 9
+	if pick := r.m.pickFeatured(); pick == "3" {
+		t.Fatal("the pick took a project waiting between phases")
+	}
+	r.m.row("3").Got["r1"] = 0
+	// Kept across a restart, Back and all.
+	r2 := newFpRig(t, path)
+	if f := r2.m.st.Featured; f == nil || f.Job != "2" || f.Back == nil || f.Back.Job != "3" || len(r2.m.feat.notice) != 0 {
+		t.Fatalf("after a restart: %+v", f)
+	}
+	// The wait ends: Ex Lane is featured again, as it was (Since kept), and Global hears it.
+	r.now = r.now.Add(61 * time.Second)
+	r.fire()
+	if f := r.m.st.Featured; f == nil || f.Job != "3" || f.Back != nil || f.Since != since {
+		t.Fatalf("after the wait: %+v", f)
+	}
+	notes = r.globalNotes()
+	if want := "The next phase of Ex Lane is open, and it is the featured street project again. Help build it!"; notes[len(notes)-1] != want {
+		t.Fatalf("Global heard %q", notes)
+	}
+	got = kinds(drain(ada), "project_featured")
+	if len(got) == 0 || got[len(got)-1]["job"] != "3" || got[len(got)-1]["back"] != nil || got[len(got)-1]["ready"] != nil {
+		t.Fatalf("the return reached Ada as %v", got)
+	}
+	// The restarted server had no timer from before: a sync after the wait brings Ex Lane back too.
+	r2.now = r2.now.Add(61 * time.Second)
+	r2.player(9, "Bo", "GY")
+	if r2.featured() != "3" || r2.m.st.Featured.Back != nil {
+		t.Fatalf("after the restart's wait: %+v", r2.m.st.Featured)
+	}
+}
+
+// G1140: a stand-in built while the featured one waits hands back to it when it is open, and to
+// another stand-in while it still waits; with nothing open, the waiting one stays featured.
+func TestFeaturedStandInBuiltOrNothingOpen(t *testing.T) {
+	r := newFpRig(t, "")
+	r.m.st.Featured = &projFeatured{Job: "3", Since: r.m.ms(), By: "auto"}
+	ada := r.player(7, "Ada", "GZ")
+	r.do(ada, map[string]any{"t": "project_featured_dev", "finish": true})
+	if f := r.m.st.Featured; f.Job != "2" || f.Back == nil {
+		t.Fatalf("stand-in: %+v", f)
+	}
+	// Bee Road is built from Yonder, so Yonder rests and Yonder's upgrade (7) is not open: no other
+	// stand-in, so Ex Lane is featured again, still waiting, and says when it opens.
+	r.do(ada, map[string]any{"t": "project_featured_dev", "finish": true})
+	f := r.m.st.Featured
+	if f == nil || f.Job != "3" || f.Back != nil {
+		t.Fatalf("after the stand-in was built: %+v", f)
+	}
+	if msg := r.m.featuredMsg(); msg["ready"] != r.m.st.Jobs["3"].Ready || msg["rest"] != nil {
+		t.Fatalf("waiting featured: %v", msg)
+	}
+	// An administrator's choice is not moved while it waits.
+	r2 := newFpRig(t, "")
+	r2.m.setFeatured("3")
+	bo := r2.player(9, "Bo", "GZ")
+	r2.do(bo, map[string]any{"t": "project_featured_dev", "finish": true})
+	if f := r2.m.st.Featured; f.Job != "3" || f.By != "admin" || f.Back != nil {
+		t.Fatalf("an administrator's choice moved: %+v", f)
+	}
+}
+
 func TestFeaturedIsKeptAcrossARestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "projects.json")
 	r := newFpRig(t, path)
