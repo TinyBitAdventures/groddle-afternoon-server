@@ -1131,6 +1131,23 @@ var objNodeYield = map[string]struct {
 // woodPlanks is items/wood_tree.js:880 plankProdMap, the planks by maturity (endHarvest 766).
 var woodPlanks = [6]int{25, 30, 40, 50, 60, 80}
 
+// objAnyDistance is each street animal's verbs the source let a player use from anywhere on the
+// street ("disable_proximity": true, the client sent no walk and the server measured nothing):
+// naming and renaming (npc_piggy.js verbs.name 750 and rename 786, npc_chicken.js 677 and 707,
+// npc_butterfly.js 471 and 506, npc_batterfly.js 635 and 670; the page sends both as "name"), a
+// Butterfly's massage and milk and a Batterfly's feed. #604: a player beside the Piggy she had
+// named was told to come closer, as each page walks a Piggy its own way. The page's reach for these
+// is none too (js/verb-ranges-data.js 0).
+var objAnyDistance = map[string]map[string]bool{
+	"pig":       {"name": true},
+	"chicken":   {"name": true},
+	"butterfly": {"name": true, "massage": true, "milk": true},
+	"batterfly": {"name": true, "feed": true},
+}
+
+// anyDistance: the verb on this kind takes no reach check (objAnyDistance).
+func anyDistance(kind, verb string) bool { return objAnyDistance[kind][verb] }
+
 func refuse(code, message string) verdict { return verdict{code: code, message: message} }
 
 func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
@@ -1171,7 +1188,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		reachX, reachY = creatureReach(spot)
 		farText = objTextFarWalker
 	}
-	if x, y := cl.Pos(); math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY {
+	if x, y := cl.Pos(); !anyDistance(spot.kind, m.Verb) && (math.Abs(x-spot.x) > reachX || math.Abs(y-spot.y) > reachY) {
 		no("far", farText, nil)
 		return
 	}
