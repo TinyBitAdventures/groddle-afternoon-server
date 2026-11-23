@@ -197,7 +197,8 @@ func (m *ims) Register(r *Registry) {
 		m.forget(cl.ID())
 	})
 	r.OnShutdown(func() { m.save() })
-	r.Provide("ims.self", m) // chatstore.go reads the kept lines once
+	r.Provide("ims.self", m)            // chatstore.go reads the kept lines once
+	r.Provide("ims.renamed", m.renamed) // rename.go
 	// buddies.go calls this when a player's signed list is in: their blocks are known, so their lines can go.
 	r.Provide("im.watched", m.watched)
 }
@@ -670,6 +671,20 @@ func (m *ims) react(cl *Client, frame json.RawMessage) {
 }
 
 // —— The state file ——
+
+// renamed: a character's new name (rename.go) on every conversation they are in, kept with them.
+func (m *ims) renamed(id int64, name string) {
+	changed := false
+	for key := range m.by[id] {
+		if c := m.convs[key]; c != nil && c.Names[c.side(id)] != name {
+			c.Names[c.side(id)] = name
+			changed = true
+		}
+	}
+	if changed {
+		m.saveSoon()
+	}
+}
 
 func (m *ims) saveSoon() {
 	if m.path == "" || m.saving {

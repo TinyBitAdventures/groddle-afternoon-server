@@ -280,9 +280,20 @@ func (m *boards) Register(r *Registry) {
 	r.Handle("board_take", m.takeFrame)
 	r.OnJoin(m.sendState)
 	r.OnDisconnect(func(cl *Client) { delete(m.rates, cl.ID()) })
-	r.Provide("boards.self", m) // the console's board_remove
+	r.Provide("boards.self", m)            // the console's board_remove
+	r.Provide("boards.renamed", m.renamed) // rename.go
 	// How many notes a street's board holds (for other modules and tests).
 	r.Provide("boards.count", func(street string) int { return len(m.byBoard[boardKey(street, 0)]) })
+}
+
+// renamed: a character's new name (rename.go) on the notes they pinned, as the site names them on a reload.
+// A street's players see it on their next join (sendState).
+func (m *boards) renamed(id int64, name string) {
+	for _, n := range m.notes {
+		if n.Author == id && !n.Remake {
+			n.AuthorName = name
+		}
+	}
 }
 
 // hasBoard: a public street the game hangs a Notice Board on.

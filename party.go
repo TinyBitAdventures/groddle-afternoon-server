@@ -166,6 +166,20 @@ func (m *parties) Register(r *Registry) {
 	r.OnLeave(func(cl *Client, _ string) { m.moved(cl.ID(), true) })
 	r.OnDisconnect(m.disconnected)
 	m.registerSpaces(r)
+	r.Provide("party.renamed", m.renamed) // rename.go
+}
+
+// renamed: a character's new name (rename.go) for invites by name and in their party's member list.
+func (m *parties) renamed(id int64, name string) {
+	if _, ok := m.names[id]; ok {
+		m.names[id] = name
+	}
+	if p := m.of[id]; p != nil {
+		if mem := p.member(id); mem != nil {
+			mem.name = name
+			m.push(p)
+		}
+	}
 }
 
 // —— Sending ——

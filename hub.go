@@ -42,6 +42,7 @@ import (
 //	{"t":"pong"}
 //	{"t":"teleport","street":"GA5…","x":0,"y":0,"by":"admin"}  an administrator moved you (teleport.go; the site's call, never a client's)
 //	{"t":"admin_message"|"booted"|"admin_give"|"admin_refill",…}  the administrators' console (admin.go; the site's calls, never a client's)
+//	{"t":"renamed","id":7,"name":"Ada Two","was":"Ada"}  a character changed their name (rename.go; the site's call), to everyone
 //
 // One live session per character: a second socket for the same player closes the
 // first with closeReplaced. One character per login in the game: a login's
