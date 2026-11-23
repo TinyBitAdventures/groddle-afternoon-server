@@ -72,11 +72,28 @@ func TestAChickenWearsOneCostumeForEveryone(t *testing.T) {
 	if !seen || !ev {
 		t.Fatalf("Bo saw the costume %v, the dress %v", seen, ev)
 	}
-	// Dressed already: it keeps its costume, and Bo keeps his plume.
+	// G1181: the costume it wears is refused before the ledger, and Ada keeps her second tailfan.
+	l.give(1, "turkey_tailfan", 1)
+	r.drain(a)
+	r.act(a, 4, "chicken:1", "dress", map[string]any{"c": "turkey_tailfan"})
+	r.advance(0)
+	if no := r.only(a, "obj_no"); no["code"] != "same" || no["message"] != "This Chicken is already wearing a Turkey Tailfan." || l.held[1]["turkey_tailfan"] != 1 {
+		t.Fatalf("the same costume again answered %v", no)
+	}
+	// G1181: the other costume re-dresses it, for everyone: Bo's plume goes on over Ada's tailfan.
+	r.drain(a)
 	r.act(b, 1, "chicken:1", "dress", map[string]any{"c": "rooster_plume"})
 	r.advance(0)
-	if no := r.only(b, "obj_no"); no["code"] != "dressed" || no["message"] != costumeAlready || l.held[2]["rooster_plume"] != 1 {
-		t.Fatalf("a second costume answered %v", no)
+	if ok := r.only(b, "obj_ok"); objOf(ok, "chicken:1")["cos"] != "rooster_plume" || ok["use"] == nil || l.held[2]["rooster_plume"] != 0 {
+		t.Fatalf("Bo's re-dress answered %v (left %d)", ok, l.held[2]["rooster_plume"])
+	}
+	seen, ev = false, false
+	for _, m := range r.drain(a) {
+		seen = seen || (m["t"] == "objs" && objOf(m, "chicken:1")["cos"] == "rooster_plume")
+		ev = ev || (m["t"] == "obj_ev" && m["ev"] == "dress" && m["c"] == "rooster_plume" && num(m["by"]) == 2)
+	}
+	if !seen || !ev {
+		t.Fatalf("Ada saw the plume %v, the re-dress %v", seen, ev)
 	}
 	// Another Chicken takes a plume.
 	ch0 := sharedWorld.streets[defaultStreet]["chicken:0"]
@@ -88,7 +105,7 @@ func TestAChickenWearsOneCostumeForEveryone(t *testing.T) {
 		t.Fatalf("Di's plume answered %v", ok)
 	}
 	// A snapshot shows both.
-	if syncOf(r, a, "chicken:1")["cos"] != "turkey_tailfan" || syncOf(r, a, "chicken:0")["cos"] != "rooster_plume" {
+	if syncOf(r, a, "chicken:1")["cos"] != "rooster_plume" || syncOf(r, a, "chicken:0")["cos"] != "rooster_plume" {
 		t.Fatal("the snapshot does not show the costumes")
 	}
 	// Only a Chicken: dress is no Butterfly's verb.
@@ -100,6 +117,43 @@ func TestAChickenWearsOneCostumeForEveryone(t *testing.T) {
 		if no := r.only(c, "obj_no"); no["code"] != "bad_verb" {
 			t.Fatalf("a dressed Butterfly answered %v", no)
 		}
+	}
+}
+
+// G1181: two re-dresses at once: the first the ledger answers wins, the other is too slow and its costume stays used.
+func TestTwoReDressesAtOnceOneIsTooSlow(t *testing.T) {
+	seasonDateForTest = "2026-11-26"
+	defer func() { seasonDateForTest = "" }()
+	r, l := usesRig(t)
+	ch := sharedWorld.streets[defaultStreet]["chicken:1"]
+	a := r.player(1, "Ada", defaultStreet, ch.x, ch.y)
+	b := r.player(2, "Bo", defaultStreet, ch.x, ch.y)
+	c := r.player(3, "Cy", defaultStreet, ch.x, ch.y)
+	l.give(1, "turkey_tailfan", 1)
+	l.give(2, "rooster_plume", 1)
+	l.give(3, "rooster_plume", 1)
+	r.act(a, 1, "chicken:1", "dress", map[string]any{"c": "turkey_tailfan"})
+	r.advance(0)
+	r.only(a, "obj_ok")
+	r.drain(b)
+	r.drain(c)
+	r.act(b, 1, "chicken:1", "dress", map[string]any{"c": "rooster_plume"})
+	r.act(c, 1, "chicken:1", "dress", map[string]any{"c": "rooster_plume"})
+	r.advance(0)
+	if ok := r.only(b, "obj_ok"); objOf(ok, "chicken:1")["cos"] != "rooster_plume" {
+		t.Fatalf("Bo's re-dress answered %v", ok)
+	}
+	var slow map[string]any
+	for _, m := range r.drain(c) {
+		if m["t"] == "obj_no" {
+			slow = m
+		}
+	}
+	if slow == nil || slow["code"] != "dressed" || slow["message"] != costumeTooSlow || l.held[3]["rooster_plume"] != 0 {
+		t.Fatalf("Cy's late re-dress answered %v (left %d)", slow, l.held[3]["rooster_plume"])
+	}
+	if r.mod.streets[defaultStreet]["chicken:1"].costume != "rooster_plume" {
+		t.Fatal("the Chicken does not wear Bo's plume")
 	}
 }
 

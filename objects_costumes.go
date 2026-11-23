@@ -12,11 +12,13 @@ package main
 //	{"t":"obj_act","req":7,"id":"chicken:1","verb":"dress","c":"turkey_tailfan"}
 //
 // Refused, in this order, with the game's own lines (js/pot-luck.js POT_LUCK_LINES): out of
-// season ("no_season"), a class that is no costume ("not_costume"), a Chicken that is already
-// dressed ("dressed": it keeps its costume until the season ends). Then the site's ledger takes the
-// costume, a whole item (objects_uses.go, as an incubated egg), and the Chicken wears it for
-// everyone: obj_ok to the dresser (with "use"), its new state to the street, obj_ev "dress" with
-// "c". When Pot Luck Day ends (Ur's calendar, Pacific time, as the game's js/seasons.js) every
+// season ("no_season"), a class that is no costume ("not_costume"), a Chicken already wearing that
+// costume ("same"). A Chicken in the other costume is re-dressed (G1181, Austin 2026-11-23: one
+// costume can replace the other). Then the site's ledger takes the costume, a whole item
+// (objects_uses.go, as an incubated egg), and the Chicken wears it for everyone: obj_ok to the
+// dresser (with "use"), its new state to the street, obj_ev "dress" with "c". Who may dress a
+// Chicken they dressed before is the player's own record (each player counts each Chicken once,
+// the game's pot-luck-feature `counted`); the server holds only what the Chicken wears. When Pot Luck Day ends (Ur's calendar, Pacific time, as the game's js/seasons.js) every
 // costume falls off for everyone: a timer at the window's end clears and broadcasts them, and a
 // costume read after the end (a state file, a restart) is dropped as it is read.
 //
@@ -42,9 +44,16 @@ var chickenCostumes = map[string]bool{"turkey_tailfan": true, "rooster_plume": t
 const (
 	costumeNoSeason = "Chickens only dress up for Pot Luck Day."
 	costumeNotOne   = "That isn't something a Chicken can wear."
-	costumeAlready  = "This Chicken is already dressed for the feast. It is keeping it on until Pot Luck Day is over."
 	costumeTooSlow  = "Too slow! Somebody else dressed this Chicken first."
 )
+
+// costumeSame is the game's POT_LUCK_LINES.same: re-dressing in the costume it already wears (G1181).
+func costumeSame(c string) string {
+	return "This Chicken is already wearing a " + costumeLabels[c] + "."
+}
+
+// The costumes' names (js/pot-luck.js POT_LUCK_ITEMS label).
+var costumeLabels = map[string]string{"turkey_tailfan": "Turkey Tailfan", "rooster_plume": "Rooster Plume"}
 
 var urZone = func() *time.Location {
 	if z, err := time.LoadLocation("America/Los_Angeles"); err == nil {
@@ -120,8 +129,8 @@ func nextUrMidnight(now time.Time, dayOf func(y int) int) time.Duration {
 // arms again, so a long wait follows the wall clock (a clock step, a suspended host) rather than drifting.
 const seasonWakeMax = 6 * time.Hour
 
-// askDress is a Pot Luck Day costume on a street Chicken: the refusals, then the ledger takes the
-// costume, then the Chicken wears it for everyone.
+// askDress is a Pot Luck Day costume on a street Chicken (bare, or in the other costume): the
+// refusals, then the ledger takes the costume, then the Chicken wears it for everyone.
 func (o *objects) askDress(cl *Client, m objAct, street string, spot *objSpot) {
 	ob := o.get(street, spot)
 	before := o.state(ob)
@@ -132,10 +141,11 @@ func (o *objects) askDress(cl *Client, m objAct, street string, spot *objSpot) {
 	case !chickenCostumes[m.C]:
 		o.finishAct(cl, m, street, ob, before, refuse("not_costume", costumeNotOne))
 		return
-	case ob.costume != "":
-		o.finishAct(cl, m, street, ob, before, refuse("dressed", costumeAlready))
+	case ob.costume == m.C:
+		o.finishAct(cl, m, street, ob, before, refuse("same", costumeSame(m.C)))
 		return
 	}
+	was := ob.costume
 	o.uses.ask(cl, m.C, 1, func(use map[string]any, code, message string) {
 		ob := o.get(street, spot)
 		before := o.state(ob)
@@ -143,9 +153,9 @@ func (o *objects) askDress(cl *Client, m objAct, street string, spot *objSpot) {
 			o.finishAct(cl, m, street, ob, before, refuse(code, message))
 			return
 		}
-		if ob.costume != "" {
-			// Dressed by someone else while the ledger answered: the costume it took stays used, as an
-			// incubated egg does in the same race (askIncubate).
+		if ob.costume != was {
+			// Dressed (or re-dressed) by someone else while the ledger answered: the costume it took
+			// stays used, as an incubated egg does in the same race (askIncubate).
 			o.finishAct(cl, m, street, ob, before, refuse("dressed", costumeTooSlow))
 			return
 		}
