@@ -264,15 +264,16 @@ func TestFeaturedStepsAsideWhileItWaitsBetweenPhases(t *testing.T) {
 	r.m.st.Featured = &projFeatured{Job: "3", Since: since, By: "auto"}
 	ada := r.player(7, "Ada", "GZ")
 	drain(ada)
+	heard := len(r.globalNotes())
 	// Phase 1 of Ex Lane done: phase 2 waits 60 s, so Bee Road (open, the frontier's lowest id) stands in.
 	r.do(ada, map[string]any{"t": "project_featured_dev", "finish": true})
 	f := r.m.st.Featured
 	if f == nil || f.Job != "2" || f.Back == nil || f.Back.Job != "3" || f.Back.Since != since {
 		t.Fatalf("while 3 waits: %+v", f)
 	}
-	notes := r.globalNotes()
-	if want := "While Ex Lane waits for its next phase, the featured street project is Bee Road, the road from Yonder in Testwood. Help build it!"; notes[len(notes)-1] != want {
-		t.Fatalf("Global heard %q", notes)
+	// Global hears nothing of the swap (Austin 2026-11-22): the game shows it from project_featured.
+	if notes := r.globalNotes(); len(notes) != heard {
+		t.Fatalf("Global heard the stand-in: %q", notes[heard:])
 	}
 	got := kinds(drain(ada), "project_featured")
 	if len(got) == 0 {
@@ -294,15 +295,14 @@ func TestFeaturedStepsAsideWhileItWaitsBetweenPhases(t *testing.T) {
 	if f := r2.m.st.Featured; f == nil || f.Job != "2" || f.Back == nil || f.Back.Job != "3" || len(r2.m.feat.notice) != 0 {
 		t.Fatalf("after a restart: %+v", f)
 	}
-	// The wait ends: Ex Lane is featured again, as it was (Since kept), and Global hears it.
+	// The wait ends: Ex Lane is featured again, as it was (Since kept), and Global hears nothing.
 	r.now = r.now.Add(61 * time.Second)
 	r.fire()
 	if f := r.m.st.Featured; f == nil || f.Job != "3" || f.Back != nil || f.Since != since {
 		t.Fatalf("after the wait: %+v", f)
 	}
-	notes = r.globalNotes()
-	if want := "The next phase of Ex Lane is open, and it is the featured street project again. Help build it!"; notes[len(notes)-1] != want {
-		t.Fatalf("Global heard %q", notes)
+	if notes := r.globalNotes(); len(notes) != heard {
+		t.Fatalf("Global heard the return: %q", notes[heard:])
 	}
 	got = kinds(drain(ada), "project_featured")
 	if len(got) == 0 || got[len(got)-1]["job"] != "3" || got[len(got)-1]["back"] != nil || got[len(got)-1]["ready"] != nil {
@@ -327,11 +327,16 @@ func TestFeaturedStandInBuiltOrNothingOpen(t *testing.T) {
 		t.Fatalf("stand-in: %+v", f)
 	}
 	// Bee Road is built from Yonder, so Yonder rests and Yonder's upgrade (7) is not open: no other
-	// stand-in, so Ex Lane is featured again, still waiting, and says when it opens.
+	// stand-in, so Ex Lane is featured again, still waiting, and says when it opens. Global hears the
+	// build, as before G1140, and nothing of the return.
+	heard := len(r.globalNotes())
 	r.do(ada, map[string]any{"t": "project_featured_dev", "finish": true})
 	f := r.m.st.Featured
 	if f == nil || f.Job != "3" || f.Back != nil {
 		t.Fatalf("after the stand-in was built: %+v", f)
+	}
+	if notes := r.globalNotes(); len(notes) != heard+1 || notes[heard] != r.m.builtText("2") {
+		t.Fatalf("Global heard %q after the stand-in was built", notes[heard:])
 	}
 	if msg := r.m.featuredMsg(); msg["ready"] != r.m.st.Jobs["3"].Ready || msg["rest"] != nil {
 		t.Fatalf("waiting featured: %v", msg)

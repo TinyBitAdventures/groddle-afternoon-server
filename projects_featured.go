@@ -39,10 +39,11 @@ package main
 // Waiting between phases (G1140, Austin 2026-11-22: "the featured line skips projects waiting
 // between phases"): our rule, as Glitch had no featured project. When the featured project's phase
 // is done and the next one waits (featuredPhaseWait), the rule picks again; when it finds a project
-// open now, that one stands in and the waiting one is kept as Back, and Global hears it
-// (standInText). When the wait ends (a timer, checked again on every sync and on start) Back is the
-// featured project again, whatever the stand-in's progress, as it was featured first and is kept
-// until built (G656); Global hears that too (againText). A stand-in that waits or is built in the
+// open now, that one stands in and the waiting one is kept as Back. When the wait ends (a timer,
+// checked again on every sync and on start) Back is the featured project again, whatever the
+// stand-in's progress, as it was featured first and is kept until built (G656). Global hears
+// neither swap (Austin 2026-11-22): the game shows them from project_featured ("back"), a toast
+// and the Projects panel's row. A stand-in that waits or is built in the
 // meantime gives way the same way, Back kept. With nothing open to stand in, the waiting one stays
 // featured and sends its "ready". An administrator's choice is not moved (it stays until built).
 //
@@ -309,16 +310,13 @@ func (m *projects) refeature(back *projFeatured) bool {
 	switch next, bySubway := m.pickFeaturedWay(); {
 	case back != nil && (m.featuredWaitEnd(back.Job) == 0 || next == "" || next == back.Job || !m.featuredOpenNow(next)):
 		// Open again, or nothing open to stand in for it (the rule ranks waiting ones last).
-		m.st.Featured = back
-		if back.Job != was && m.featuredWaitEnd(back.Job) == 0 {
-			m.queueNotice(m.againText(back.Job))
-		}
+		m.st.Featured = back // no Global line for the return (Austin 2026-11-22)
 	case next == "":
 		m.st.Featured = nil
 	case back != nil:
+		// No Global line for a stand-in either (Austin 2026-11-22): the game shows it from project_featured.
 		m.st.Featured = &projFeatured{Job: next, Since: m.ms(), By: "auto", Subway: bySubway, Back: back}
 		if next != was {
-			m.queueNotice(m.standInText(back.Job, next))
 			log.Printf("projects: featured street project %s stands in while %s waits for its next phase", next, back.Job)
 		}
 	default:
@@ -541,26 +539,6 @@ func (m *projects) featuredText(jobID string) string {
 		return fmt.Sprintf("The featured street project is now %s, the road from %s%s. Help build it!", label, board, in)
 	}
 	return fmt.Sprintf("The featured street project is now %s%s. Help build it!", label, in)
-}
-
-// featuredName is how a line names a job mid-sentence: "Ex Lane", "the upgrade of Ay Way".
-func (m *projects) featuredName(jobID string) string {
-	job := m.t.Jobs[jobID]
-	if job.Kind == "upgrade" {
-		return "the upgrade of " + m.jobLabel(job)
-	}
-	return m.jobLabel(job)
-}
-
-// standInText is Global's line when a project stands in for the featured one waiting between phases (G1140).
-func (m *projects) standInText(backID, jobID string) string {
-	now := strings.TrimSuffix(strings.TrimPrefix(m.featuredText(jobID), "The featured street project is now "), " Help build it!")
-	return fmt.Sprintf("While %s waits for its next phase, the featured street project is %s Help build it!", m.featuredName(backID), now)
-}
-
-// againText is Global's line when the waiting one's next phase opens and it is featured again (G1140).
-func (m *projects) againText(jobID string) string {
-	return fmt.Sprintf("The next phase of %s is open, and it is the featured street project again. Help build it!", m.featuredName(jobID))
 }
 
 // builtText is Global's line when the featured project is built.
