@@ -71,7 +71,7 @@ package main
 // npc_piggy.js verbs.name 750-784 and rename 786-816. Animal Kinship V names (the client says so
 // with the "ak5" perk, as "ak6" for a nibble); a Piggy with no name, the player who named it, or
 // anyone an hour after the last naming may (re)name it; a sad Piggy refuses a first name (765).
-// The name is cut to 32 characters of a-z, 0-9 and spaces (41) and goes through the word filter
+// The name is cut to 32 characters of a-z, 0-9, spaces and (G1207) ' - . (41) and goes through the word filter
 // (wordfilter.go, the remake's own addition) before anyone sees it. The street hears it as obj_ev
 // "name" (sendBubble with no pc, 49: everyone sees 'And they shall call me "..."'). The street's
 // Chickens, Butterflies and Batterflies (objects_creatures.go) take the same include, so nameAnimal
@@ -126,18 +126,46 @@ func (o *objects) nameState(ob *liveObj, m map[string]any) {
 }
 
 // sanitizeAnimalName is onInputBoxResponse 41 (substr(0, 32), then only a-z, 0-9 and spaces) and the
-// word filter after it, as the game's js/animal-husbandry.js nameAnimal does.
+// word filter after it, as the game's js/animal-husbandry.js animalNameAsSaved does. G1207 (Austin
+// 2026-11-23, an invention): an apostrophe, a hyphen and a period are kept too, a curly apostrophe
+// (U+2018, U+2019) as the straight one. The 32 count as the game's substr counts them (UTF-16 units),
+// so a name cut here is the name the game's hint showed.
 func sanitizeAnimalName(raw string) string {
-	if len(raw) > pigNameMax {
-		raw = raw[:pigNameMax]
-	}
 	var b strings.Builder
-	for i := 0; i < len(raw); i++ {
-		if c := raw[i]; isWordLetter(c) || isWordDigit(c) || c == ' ' {
-			b.WriteByte(c)
+	units := 0
+	for _, r := range raw {
+		n := 1
+		if r > 0xFFFF {
+			n = 2
+		}
+		if units+n > pigNameMax {
+			break
+		}
+		units += n
+		if r == '\u2018' || r == '\u2019' {
+			r = '\''
+		}
+		if r < 0x80 && animalNameByte(byte(r)) {
+			b.WriteRune(r)
 		}
 	}
 	return filterWords(b.String())
+}
+
+// animalNameByte is a character an animal's name keeps (G1207: letters, numbers, spaces and ' - .).
+func animalNameByte(c byte) bool {
+	return isWordLetter(c) || isWordDigit(c) || c == ' ' || c == '\'' || c == '-' || c == '.'
+}
+
+// animalNameOK is a saved name with a letter or a number in it (the game's ANIMAL_NAME_NEEDS):
+// "-'." alone is no name.
+func animalNameOK(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if isWordLetter(name[i]) || isWordDigit(name[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // nameSingle is each nameable street animal's name_single (npc_piggy.js 5, npc_chicken.js,
@@ -162,7 +190,7 @@ func (o *objects) nameAnimal(street string, ob *liveObj, m objAct, perks map[str
 		return refuse("sad", pigNameSad) // verbs.name conditions 764-766 (rename has no such check)
 	}
 	name := sanitizeAnimalName(m.Name)
-	if strings.TrimSpace(name) == "" {
+	if !animalNameOK(name) {
 		return refuse("empty", pigNameEmpty)
 	}
 	if name == ob.userName {

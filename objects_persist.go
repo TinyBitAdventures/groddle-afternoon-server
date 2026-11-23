@@ -227,7 +227,7 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 			}
 			ob.petters[id] = day
 		}
-		if name := sanitizeAnimalName(r.Name); name != "" {
+		if name := sanitizeAnimalName(r.Name); animalNameOK(name) {
 			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
 		}
 		if r.GoneDay > 0 && (r.GoneWhy == "capture" || r.GoneWhy == "youth") {
@@ -245,7 +245,7 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 		if spot.kind == "batterfly" {
 			ob.guano = clamp(r.Guano, 0, guanoCap)
 		}
-		if name := sanitizeAnimalName(r.Name); name != "" && nameSingle[spot.kind] != "" {
+		if name := sanitizeAnimalName(r.Name); animalNameOK(name) && nameSingle[spot.kind] != "" {
 			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
 		}
 		if _, egg := o.w.rules.Incubate.Hatches[r.IncEgg]; egg && spot.kind == "chicken" && r.IncBy > 0 && r.IncEnd > 0 {

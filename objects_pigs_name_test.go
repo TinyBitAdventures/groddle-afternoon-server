@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,11 +22,11 @@ func TestAStreetPiggysNameIsEveryones(t *testing.T) {
 	if no := r.only(a, "obj_no"); no["code"] != "skill" || no["message"] != pigNameSkill {
 		t.Fatalf("a name without Animal Kinship V answered %v", no)
 	}
-	// onInputBoxResponse 41: 32 characters at most, only a-z, 0-9 and spaces.
+	// onInputBoxResponse 41: 32 characters at most, only a-z, 0-9 and spaces (and G1207's ' - .).
 	r.now = r.now.Add(time.Second)
 	r.act(a, 2, "pig:2", "name", map[string]any{"name": "Wil-bur! the 2nd, of the Grand Mile and beyond", "perks": ak5})
 	ok := r.only(a, "obj_ok")
-	want := "Wilbur the 2nd of the Grand M" // cut at 32 first, then stripped (41)
+	want := "Wil-bur the 2nd of the Grand M" // cut at 32 first, then stripped (41), the hyphen kept (G1207)
 	if ok["name"] != want || objOf(ok, "pig:2")["name"] != want || num(objOf(ok, "pig:2")["namer"]) != 1 {
 		t.Fatalf("the name answered %v", ok)
 	}
@@ -64,6 +65,10 @@ func TestAStreetPiggysNameIsEveryones(t *testing.T) {
 	r.act(a, 5, "pig:2", "name", map[string]any{"name": "!!!", "perks": ak5})
 	if no := r.only(a, "obj_no"); no["code"] != "empty" || no["message"] != pigNameEmpty {
 		t.Fatalf("a name of no letters answered %v", no)
+	}
+	r.act(a, 6, "pig:2", "name", map[string]any{"name": "-'.", "perks": ak5})
+	if no := r.only(a, "obj_no"); no["code"] != "empty" {
+		t.Fatalf("a name of only ' - . answered %v (G1207: it still needs a letter or a number)", no)
 	}
 	// An hour on, anyone may: Bo's name, through the word filter.
 	r.now = r.now.Add(pigRenameAfter + time.Second)
@@ -137,12 +142,26 @@ func TestAPiggysNameOutlivesARestart(t *testing.T) {
 func TestSanitizeAnimalName(t *testing.T) {
 	for in, want := range map[string]string{
 		"Wilbur":                               "Wilbur",
-		"  Mr. Snuffles  ":                     "  Mr Snuffles  ",
+		"  Mr. Snuffles  ":                     "  Mr. Snuffles  ",
 		"Ünïcödé":                              "ncd",
 		"abcdefghijklmnopqrstuvwxyz0123456789": "abcdefghijklmnopqrstuvwxyz012345",
+		// G1207: apostrophe, hyphen and period kept; curly apostrophes made straight; the rest dropped.
+		"Dr. Oink!":                           "Dr. Oink",
+		"Mr O'Hare-Smythe":                    "Mr O'Hare-Smythe",
+		"Mr O\u2019Hare \u2018Jr\u2019":       "Mr O'Hare 'Jr'",
+		"Oink \U0001F437 #1":                  "Oink  1",
+		"Wil-bur! the 2nd, of the Grand Mile": "Wil-bur the 2nd of the Grand M",
+		// 32 as the game's substr counts them: a curly apostrophe is one, an emoji two.
+		"\u2019" + strings.Repeat("a", 40):     "'" + strings.Repeat("a", 31),
+		"\U0001F437" + strings.Repeat("b", 40): strings.Repeat("b", 30),
 	} {
 		if got := sanitizeAnimalName(in); got != want {
 			t.Errorf("sanitizeAnimalName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for name, ok := range map[string]bool{"Dr. Oink": true, "-'.": false, "   ": false, "": false, "7": true} {
+		if animalNameOK(name) != ok {
+			t.Errorf("animalNameOK(%q) = %v, want %v", name, !ok, ok)
 		}
 	}
 }
