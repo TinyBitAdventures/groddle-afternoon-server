@@ -70,7 +70,10 @@ func newHallRig(t *testing.T, path string, now time.Time) (*projRig, *fakeHallSi
 	led := newFakeProjectLedger()
 	site := newFakeHallSite(led)
 	r := newProjRig(t, path, led, now)
+	// The start may already have armed a hall timer that reads m.halls under the hub lock.
+	r.hub.mu.Lock()
 	r.m.halls = site
+	r.hub.mu.Unlock()
 	site.members[hallGroup1] = map[int64]bool{1: true}
 	site.names[hallGroup1] = "Ada Pals"
 	return r, site
