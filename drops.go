@@ -28,10 +28,10 @@ package main
 //     location.js deleteTakeables (4619-4626) is called from nowhere, and
 //     dropped_on is only ever cleared by a pickup (takeable.js 41-42, 83).
 //
-// Here: on a public street (no "_" in its id) and on a player's home street
-// (HOME_<owner>, below); house rooms, Tower floors, party spaces, races and
-// arenas are private places, where each player's drops stay their own as in
-// solo. Nothing moves on the client's word. A drop is
+// Here: on a public street (no "_" in its id), on a player's home street
+// (HOME_<owner>, below), in their house and on their Tower's floors (HOUSE_<owner>,
+// TOWER_<owner>_<floor>, below); party spaces, races and arenas are private places,
+// where each player's drops stay their own as in solo. Nothing moves on the client's word. A drop is
 // asked of the site's ledger (groddle-afternoon-site src/LedgerDrop.php,
 // POST groddle/v1/ledger/drop, signed as ledger.go signs): the stack leaves
 // the dropper's ledger and waits in the site's groddle_drops, in nobody's
@@ -94,7 +94,23 @@ package main
 //     x it draws ("ox") with a drop and a pickup; positions are compared with it taken off.
 //   - The owner's own stacks on their own home street never go back to the pack after dropKeep
 //     (it is their street; dropStreetMax still bounds it). A visitor's do, as anywhere.
-//   - The house, its back yard and the Tower's floors stay each player's own for now.
+//
+// The house, its back yard and the Tower's floors (G1190, Austin 2026-11-23: "make house floors
+// shared as in Glitch", reversing his 2026-11-10 ruling that kept them private): in the original
+// the house (with the back yard on its left, the one "house-right" location) and the Tower were
+// locations like the street, so takeable_drop and takeable_pickup ran there too. The one home
+// rule is house_lock (takeable.js 33-36, 179-198; main.js doModifyItem 4870-4891): a stack the
+// owner sets down on a furniture plat (a shelf, a table: a plat whose source is a piece) in their
+// own house or Tower is locked to the owner (pols_is_owner, not key-holders) for good; a stack on
+// the floor is anyone's once its dropper has walked 100 px away, key-holder, let-in visitor or
+// owner alike (acl keys only open the door and the cabinets, inc_acl_keys.js). So HOUSE_<owner>
+// (site HOUSE-<owner>) and TOWER_<owner>_<floor> (site TOWER-<owner>-<floor>) are shared as the
+// home street is, for whoever homes.go lets in. Ours there: what the owner sets on furniture never
+// comes here (the owner's game keeps it in the save, as house_lock kept it the owner's; visitors
+// see it through the site's visit, Neighbours.php stackRows); in the house a stack's x is kept
+// from the house's left end, as on the street (the back yard grows to the left and moves the
+// house); a Tower floor's x is its own (the Tower does not move); the owner's own stacks there
+// stay past dropKeep, as on the home street.
 //
 // Pick up how many (G560): a pickup may name a part of the stack (main.js
 // 3227-3240 splits the stack, takeable_pickup takes the split part and the
@@ -117,7 +133,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
-	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -143,7 +159,7 @@ const (
 
 	dropTextSoulbound = "This item is locked to you and can't be dropped."                                 // takeable.js:118
 	dropTextCant      = "That can't be dropped for others to find."                                        // ours: the ledger does not carry it
-	dropTextPrivate   = "Only a drop on a public street or a home street is shared."                       // ours
+	dropTextPrivate   = "Only a drop on a public street or at someone's home is shared."                    // ours
 	dropTextFull      = "This street can't hold any more dropped things."                                  // ours
 	dropTextShort     = "You don't have enough of that item."                                              // inc_trading.js:456
 	dropTextBusy      = "Wait a moment, you are still dropping something."                                 // ours
@@ -159,42 +175,42 @@ const (
 
 var dropOpRe = regexp.MustCompile(`^drop-[0-9a-f]{16}$`)
 
-// A home street as this server names it and as the site keeps it (the header, "A home street").
+// A home place as this server names it and as the site keeps it (the header, "A home street" and
+// "The house"): the site's street names take letters, digits and "-" only.
 var (
-	dropHomeRe     = regexp.MustCompile(`^HOME_([1-9][0-9]{0,17})$`)
-	dropHomeSiteRe = regexp.MustCompile(`^HOME-([1-9][0-9]{0,17})$`)
+	dropHomeSiteRe  = regexp.MustCompile(`^(HOME|HOUSE)-([1-9][0-9]{0,17})$`)
+	dropTowerSiteRe = regexp.MustCompile(`^TOWER-([1-9][0-9]{0,17})-([0-9])$`)
 )
 
-// dropHomeOwner is whose home street this is, or 0 for any other place.
+// dropHomeOwner is whose home this place is (their home street, house or a Tower floor), or 0 for
+// any other place.
 func dropHomeOwner(street string) int64 {
-	m := dropHomeRe.FindStringSubmatch(street)
-	if m == nil {
-		return 0
+	if id, _ := homeOwner(street); id > 0 {
+		return id
 	}
-	id, _ := strconv.ParseInt(m[1], 10, 64)
-	return id
+	return towerOwner(street)
 }
 
 // dropSiteStreet is a street as the site is told it.
 func dropSiteStreet(street string) string {
 	if dropHomeOwner(street) > 0 {
-		return "HOME-" + street[len(homeStreetPrefix):]
+		return strings.ReplaceAll(street, "_", "-")
 	}
 	return street
 }
 
 // dropStreetFromSite is a street the site names, as players join it.
 func dropStreetFromSite(street string) string {
-	if dropHomeSiteRe.MatchString(street) {
-		return homeStreetPrefix + street[len("HOME-"):]
+	if dropHomeSiteRe.MatchString(street) || dropTowerSiteRe.MatchString(street) {
+		return strings.ReplaceAll(street, "-", "_")
 	}
 	return street
 }
 
 // dropOrigin is the x a game says its positions on this street start from: the house's x on a
-// home street, nothing anywhere else.
+// home street and in the house, nothing anywhere else (a Tower floor does not move).
 func dropOrigin(street string, ox *float64) float64 {
-	if ox == nil || dropHomeOwner(street) == 0 || math.IsNaN(*ox) || math.Abs(*ox) > 1e6 {
+	if id, _ := homeOwner(street); ox == nil || id == 0 || math.IsNaN(*ox) || math.Abs(*ox) > 1e6 {
 		return 0
 	}
 	return math.Round(*ox)
@@ -504,7 +520,7 @@ func (m *drops) eat(id, pig string, done func(bool)) {
 }
 
 // dropShared: a public street (follow.go's rule for a private place) or a player's home street,
-// where drops are everyone's.
+// house or Tower floor, where drops are everyone's.
 func dropShared(street string) bool { return !followPrivate(street) || dropHomeOwner(street) > 0 }
 
 // load asks the site for every stack on the ground, again until it answers.
@@ -948,7 +964,7 @@ func (m *drops) sweep() {
 	now := m.h.Now()
 	old := []*groundStack{}
 	for _, s := range m.stacks {
-		// An owner's own stack on their own home street stays (the header, "A home street").
+		// An owner's own stack at their own home stays (the header, "A home street" and "The house").
 		if s.picking == 0 && now.Sub(s.At) >= dropKeep && dropHomeOwner(s.Street) != s.By {
 			old = append(old, s)
 		}

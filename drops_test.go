@@ -277,18 +277,14 @@ func TestDropsFollowTheRulesForWhatIsShared(t *testing.T) {
 			t.Fatalf("%v: %v", c.item, f)
 		}
 	}
-	// A private place keeps each player's drops their own.
-	r.at(ada, "HOUSE_7", 0, 0)
+	// A private place keeps each player's drops their own: a party space, a race, a name that is no home.
+	// (A house and a Tower floor are shared since G1190: TestAHousesAndATowerFloorsDropsAreShared.)
+	r.at(ada, "PARTY_7", 0, 0)
 	st := pick(t, drain(ada), "ground_state")
 	if len(st["stacks"].([]any)) != 0 {
-		t.Fatalf("a house shows no shared stacks: %v", st)
+		t.Fatalf("a party space shows no shared stacks: %v", st)
 	}
-	r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 1}})
-	if f := only(t, drain(ada), "ground_dropped"); f["why"] != "private" {
-		t.Fatalf("in a house: %v", f)
-	}
-	// So does a Tower floor, a party space and a race.
-	for _, street := range []string{"TOWER_7_0", "PARTY_3", "RACE_ab12", "HOME_7_x", "HOME_0", "XHOME_7"} {
+	for _, street := range []string{"TOWER_7_10", "HOUSE_07", "PARTY_3", "RACE_ab12", "HOME_7_x", "HOME_0", "XHOME_7"} {
 		r.at(ada, street, 0, 0)
 		drain(ada)
 		r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 1}})
@@ -464,7 +460,7 @@ func TestTheStacksOnTheGroundComeFromTheSiteAfterARestart(t *testing.T) {
 	r.site.err = nil
 	r.site.ground = []dropRow{
 		{ID: "drop-00000000000000aa", By: 9, Name: "Bo", Street: dropStreet, X: 10, Y: -20, C: "cherry", N: 5, At: r.now.Unix() - 60},
-		{ID: "drop-00000000000000bb", By: 9, Name: "Bo", Street: "HOUSE_9", X: 10, Y: -20, C: "cherry", N: 5, At: r.now.Unix()},
+		{ID: "drop-00000000000000bb", By: 9, Name: "Bo", Street: "PARTY_9", X: 10, Y: -20, C: "cherry", N: 5, At: r.now.Unix()},
 		{ID: "not-a-drop", By: 9, Street: dropStreet, C: "cherry", N: 5},
 	}
 	if r.fire(dropLoadRetry) != 1 {
@@ -905,3 +901,115 @@ func TestAPublicStreetIgnoresAnOrigin(t *testing.T) {
 		t.Fatalf("an origin does not bring a far picker closer: %v", f)
 	}
 }
+
+// G1190: the house (with its back yard) and the Tower's floors are shared as the home street is:
+// the site hears HOUSE-<owner> and TOWER-<owner>-<floor>, the house keeps x from its left end, a
+// Tower floor its own x, and the dropper's 100 px guard holds for the owner and a key-holder alike.
+func TestAHousesAndATowerFloorsDropsAreShared(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	// Ada's house: both games draw its left end at x 750 (a back yard of five segments).
+	r.at(ada, "HOUSE_7", 900, 600)
+	r.at(bo, "HOUSE_7", 960, 600)
+	for _, cl := range []*Client{ada, bo} {
+		if st := pick(t, drain(cl), "ground_state"); st["street"] != "HOUSE_7" {
+			t.Fatalf("the house's stacks are listed: %v", st)
+		}
+	}
+	r.do(ada, map[string]any{"t": "ground_drop", "ref": "d1", "item": map[string]any{"c": "musicblock_d_green_01", "n": 1}, "x": 920, "y": 600, "ox": 750})
+	r.settle()
+	if len(r.site.drops) != 1 {
+		t.Fatalf("the site is asked once: %v", r.site.drops)
+	}
+	c := r.site.drops[0]
+	if c.ID != 7 || c.Street != "HOUSE-7" || c.X != 170 || c.Y != 600 {
+		t.Fatalf("the site hears the house its way, x from the house: %+v", c)
+	}
+	drain(ada)
+	if s := only(t, drain(bo), "ground_added")["stack"].(map[string]any); s["id"] != c.Op || s["x"] != float64(170) {
+		t.Fatalf("the visitor sees the owner's drop: %v", s)
+	}
+	// Ada stands by it: Bo (a key-holder is no owner, takeable.js 33-44) is refused.
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": c.Op, "ox": 750})
+	if f := only(t, drain(bo), "ground_taken"); f["why"] != "locked" || f["text"] != pickTextLocked {
+		t.Fatalf("the owner's guard holds in the house: %v", f)
+	}
+	// She walks across the room: the floor stack is anyone's (takeable.js 41-42).
+	r.move(ada, 1400, 600)
+	r.do(bo, map[string]any{"t": "ground_pickup", "id": c.Op, "ox": 750})
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != c.Op+":9:pickup" {
+		t.Fatalf("the visitor took it: %v", r.site.takes)
+	}
+
+	// A Tower floor: its own x (an origin is ignored), its own name at the site.
+	r.at(ada, "TOWER_7_2", 500, 600)
+	r.at(bo, "TOWER_7_2", 1500, 600)
+	drain(ada)
+	drain(bo)
+	r.do(bo, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 2}, "x": 1510, "y": 600, "ox": 900})
+	r.settle()
+	if c := r.site.drops[1]; c.ID != 9 || c.Street != "TOWER-7-2" || c.X != 1510 {
+		t.Fatalf("the site hears the Tower floor its way: %+v", c)
+	}
+	if s := pick(t, drain(ada), "ground_added")["stack"].(map[string]any); s["x"] != float64(1510) {
+		t.Fatalf("the owner sees the visitor's drop on her floor: %v", s)
+	}
+}
+
+// The site's names come back as the places players join, and nothing else is a home.
+func TestHomePlacesAsTheSiteKeepsThem(t *testing.T) {
+	for street, site := range map[string]string{"HOME_7": "HOME-7", "HOUSE_7": "HOUSE-7", "TOWER_7_0": "TOWER-7-0", "TOWER_12_8": "TOWER-12-8", dropStreet: dropStreet} {
+		if got := dropSiteStreet(street); got != site {
+			t.Fatalf("%s goes to the site as %s, not %s", street, got, site)
+		}
+		if back := dropStreetFromSite(site); back != street {
+			t.Fatalf("%s comes back as %s, not %s", site, back, street)
+		}
+		if !dropShared(street) {
+			t.Fatalf("%s is shared", street)
+		}
+	}
+	for _, s := range []string{"HOUSE_07", "HOUSE_", "TOWER_7", "TOWER_7_10", "TOWER_0_1", "PARTY_7", "RACE_7", "HOME_7_x"} {
+		if dropShared(s) || dropHomeOwner(s) != 0 {
+			t.Fatalf("%s is no home place", s)
+		}
+	}
+	for _, s := range []string{"HOUSE-07", "TOWER-7-10", "TOWER-7", "PARTY-7"} {
+		if dropStreetFromSite(s) != s {
+			t.Fatalf("%s is left as the site names it", s)
+		}
+	}
+	if dropOrigin("TOWER_7_1", ptrFloat(640)) != 0 || dropOrigin("HOUSE_7", ptrFloat(640)) != 640 {
+		t.Fatal("the house keeps x from its left end, a Tower floor its own")
+	}
+}
+
+// The owner's own stacks in the house stay past dropKeep; a visitor's go home; old rows load.
+func TestTheOwnersHouseStacksStayAndAVisitorsGoHome(t *testing.T) {
+	r := newDropRig(t)
+	r.m.loaded = false
+	r.site.ground = []dropRow{
+		{ID: "drop-00000000000000aa", By: 7, Name: "Ada", Street: "HOUSE-7", X: 10, Y: 600, C: "apple", N: 3, At: r.now.Unix()},
+		{ID: "drop-00000000000000bb", By: 9, Name: "Bo", Street: "HOUSE-7", X: 40, Y: 600, C: "apple", N: 2, At: r.now.Unix()},
+		{ID: "drop-00000000000000cc", By: 7, Name: "Ada", Street: "TOWER-7-0", X: 500, Y: 600, C: "apple", N: 1, At: r.now.Unix()},
+	}
+	r.m.load()
+	r.settle()
+	ada := r.connect(7, "Ada")
+	r.at(ada, "HOUSE_7", 900, 600)
+	if st := pick(t, drain(ada), "ground_state"); len(st["stacks"].([]any)) != 2 {
+		t.Fatalf("both house stacks are back: %v", st)
+	}
+	r.now = r.now.Add(dropKeep)
+	r.fire(dropSweepEvery)
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != "drop-00000000000000bb:9:return" {
+		t.Fatalf("only the visitor's stack went home: %v", r.site.takes)
+	}
+	if r.m.stacks["drop-00000000000000aa"] == nil || r.m.stacks["drop-00000000000000cc"] == nil {
+		t.Fatal("the owner's stay in the house and on the Tower floor")
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
