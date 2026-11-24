@@ -205,3 +205,85 @@ func TestAStackBeingMergedIntoIsTakenByNobody(t *testing.T) {
 		t.Fatalf("free again, with 3: %+v", r.m.stacks[a])
 	}
 }
+
+// Austin 2026-11-24: "Let them pile up on floors." A one-per-stack class (stackmax 1: an Emblem of Mab)
+// joins a like stack of the same dropper on a house or Tower floor with no cap; a stackmax over 1 keeps
+// its cap; a tool (wear) or a class whose copies carry words (a Teleportation Script, which the game
+// keeps one to a stack) never joins; a street never merges.
+func TestOneToAStackThingsPileUpOnAHouseFloor(t *testing.T) {
+	r, ada, _ := houseRig(t)
+	first := r.houseDrop(ada, "emblem_mab", 1, 1000, nil)
+	a := first["stack"].(map[string]any)["id"].(string)
+	for i := 0; i < 4; i++ {
+		r.m.rates = map[int64]*bucket{}
+		got := r.houseDrop(ada, "emblem_mab", 1, 1010, nil)
+		if got["status"] != "settled" || got["into"] != a {
+			t.Fatalf("emblem %d joins the pile: %v", i+2, got)
+		}
+	}
+	if c := r.site.drops[4]; c.Into != a || c.Max != 1 {
+		t.Fatalf("the site is told the stack and the class's stackmax: %+v", c)
+	}
+	if s := r.m.stacks[a]; s == nil || s.N != 5 || len(r.m.byStreet["HOUSE_7"]) != 1 {
+		t.Fatalf("one pile of 5: %+v", r.m.byStreet["HOUSE_7"])
+	}
+	// A pile set down whole (3 at once) is one drop there, and joins too.
+	r.m.rates = map[int64]*bucket{}
+	if got := r.houseDrop(ada, "emblem_mab", 3, 1000, map[string]any{"into": a}); got["status"] != "settled" || got["into"] != a {
+		t.Fatalf("three at once onto the pile: %v", got)
+	}
+	if s := r.m.stacks[a]; s.N != 8 {
+		t.Fatalf("a pile of 8: %+v", s)
+	}
+	// A stackmax over 1 keeps its cap (a Moonstone's 3).
+	r.m.rates = map[int64]*bucket{}
+	m := r.houseDrop(ada, "gem_moonstone", 3, 1500, nil)["stack"].(map[string]any)["id"].(string)
+	r.m.rates = map[int64]*bucket{}
+	r.houseDrop(ada, "gem_moonstone", 1, 1500, map[string]any{"into": m})
+	if c := r.site.drops[len(r.site.drops)-1]; c.Into != "" {
+		t.Fatalf("a full Moonstone stack is not named: %+v", c)
+	}
+	// A Teleportation Script (stackmax 1, words of its own: the game's keepsOwnStack) never joins, even with no words.
+	r.m.rates = map[int64]*bucket{}
+	s := r.houseDrop(ada, "teleportation_script", 1, 2000, nil)["stack"].(map[string]any)["id"].(string)
+	r.m.rates = map[int64]*bucket{}
+	r.houseDrop(ada, "teleportation_script", 1, 2000, map[string]any{"into": s})
+	if c := r.site.drops[len(r.site.drops)-1]; c.Into != "" {
+		t.Fatalf("a script keeps its own stack: %+v", c)
+	}
+	// A tool (its wear) never joins.
+	r.m.rates = map[int64]*bucket{}
+	p := r.houseDrop(ada, "pick", 1, 2400, map[string]any{"item": map[string]any{"c": "pick", "n": 1, "r": 100}})["stack"].(map[string]any)["id"].(string)
+	r.m.rates = map[int64]*bucket{}
+	r.houseDrop(ada, "pick", 1, 2400, map[string]any{"item": map[string]any{"c": "pick", "n": 1, "r": 100}, "into": p})
+	if c := r.site.drops[len(r.site.drops)-1]; c.Into != "" {
+		t.Fatalf("a tool keeps its own stack: %+v", c)
+	}
+	// A pile of emblems dropped whole on a street is still one stackmax: refused there.
+	r2 := newDropRig(t)
+	cy := r2.connect(11, "Cy")
+	r2.at(cy, dropStreet, 1000, -100)
+	drain(cy)
+	r2.do(cy, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "emblem_mab", "n": 2}, "x": 1000, "y": -120})
+	r2.settle()
+	if f := only(t, drain(cy), "ground_dropped"); f["status"] != "refused" || f["why"] != "count" {
+		t.Fatalf("two emblems in one street drop: %v", f)
+	}
+}
+
+// The owner's floor move of one emblem pile onto another joins it whole (the same pile rule).
+func TestAnEmblemPileMovedOntoAnotherJoinsIt(t *testing.T) {
+	r, ada, _ := houseRig(t)
+	a := r.houseDrop(ada, "emblem_mab", 2, 1000, nil)["stack"].(map[string]any)["id"].(string)
+	r.m.rates = map[int64]*bucket{}
+	b := r.houseDrop(ada, "emblem_mab", 1, 1600, nil)["stack"].(map[string]any)["id"].(string)
+	r.m.rates = map[int64]*bucket{}
+	r.do(ada, map[string]any{"t": "ground_move", "id": b, "x": 1000, "y": 600, "ox": 750, "into": a})
+	r.settle()
+	if c := r.site.moves[0]; c.Into != a {
+		t.Fatalf("the move names the pile: %+v", c)
+	}
+	if s := r.m.stacks[a]; s == nil || s.N != 3 || r.m.stacks[b] != nil {
+		t.Fatalf("one pile of 3: %+v", r.m.byStreet["HOUSE_7"])
+	}
+}

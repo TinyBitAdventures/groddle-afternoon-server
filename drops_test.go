@@ -32,6 +32,15 @@ type fakeDropSite struct {
 	moves  []moveCall
 }
 
+// fakePileCap is LedgerDrop::pileCap as this server names stacks: a stackmax of 1 piles up (the site
+// reads pts and tag from its own table; this server never names a stack of a tool or a tagged class).
+func fakePileCap(max int) int {
+	if max == 1 {
+		return dropPileMax
+	}
+	return max
+}
+
 func (f *fakeDropSite) drop(c dropCall) dropAnswer {
 	f.drops = append(f.drops, c)
 	if f.silent {
@@ -45,7 +54,7 @@ func (f *fakeDropSite) drop(c dropCall) dropAnswer {
 	}
 	joined := 0
 	if c.Into != "" {
-		joined = min(c.Item.N, c.Max-f.held[c.Into])
+		joined = min(c.Item.N, fakePileCap(c.Max)-f.held[c.Into])
 	}
 	rest := c.Item.N - joined
 	f.held[c.Op] = rest
@@ -68,7 +77,7 @@ func (f *fakeDropSite) dropMove(c moveCall) dropAnswer {
 	n := f.held[c.Drop]
 	joined := 0
 	if c.Into != "" {
-		joined = min(n, c.Max-f.held[c.Into])
+		joined = min(n, fakePileCap(c.Max)-f.held[c.Into])
 	}
 	left := n - joined
 	f.held[c.Drop] = left
