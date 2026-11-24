@@ -1096,3 +1096,29 @@ func TestJoiningAHouseFindsStacksTheSiteMovedThere(t *testing.T) {
 		}
 	}
 }
+
+// G1224 live check: the owner who loads (and so moves their old floor drops) within a minute of being in the
+// house still sees them at once: the owner's own join always asks the site.
+func TestTheOwnersJoinAlwaysAsksForMovedStacks(t *testing.T) {
+	r := newDropRig(t)
+	ada := r.connect(7, "Ada")
+	r.at(ada, "HOUSE_7", 900, 600)
+	r.settle()
+	drain(ada)
+	r.site.ground = []dropRow{{ID: "drop-00000000000000b1", Street: "HOUSE-7", C: "apple", N: 3, X: 300, Y: 620, By: 7, Name: "Ada", At: 1_690_000_000}}
+	r.now = r.now.Add(20 * time.Second)
+	r.at(ada, "HOUSE_7", 950, 600)
+	r.settle()
+	if len(r.site.asked) != 2 {
+		t.Fatalf("the owner's join within the minute asks again: %v", r.site.asked)
+	}
+	if f := pick(t, drain(ada), "ground_added"); f["stack"].(map[string]any)["id"] != "drop-00000000000000b1" {
+		t.Fatalf("the moved stack shows at once: %v", f)
+	}
+	bo := r.connect(9, "Bo")
+	r.at(bo, "HOUSE_7", 1500, 600)
+	r.settle()
+	if len(r.site.asked) != 2 {
+		t.Fatalf("a visitor within the minute does not ask again: %v", r.site.asked)
+	}
+}

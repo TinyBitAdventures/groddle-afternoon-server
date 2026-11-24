@@ -648,7 +648,10 @@ func (m *drops) sendState(cl *Client) {
 		return
 	}
 	m.h.SendLocked(cl, m.stateMsg(cl.Street()))
-	m.refresh(cl.Street())
+	street := cl.Street()
+	// The owner coming into their own house or Tower floor always asks: the site moves a save's old floor
+	// drops on the owner's load (G1224), and they must show at once, not after the minute.
+	m.refresh(street, dropHomeOwner(street) == cl.ID() || towerOwner(street) == cl.ID())
 }
 
 // refresh asks the site, at most once a dropRefreshEvery, for the stacks lying in a house or on a
@@ -656,12 +659,12 @@ func (m *drops) sendState(cl *Client) {
 // A save's old floor drops are moved to the shared floor on the owner's load (G1224, the site's
 // HouseFloors), after this server loaded the ground. Only new ids are added: a stack held here
 // already, or one taken or eaten (no longer on the ground at the site), is left as it is.
-func (m *drops) refresh(street string) {
+func (m *drops) refresh(street string, owner bool) {
 	if !m.loaded || !dropIndoors(street) {
 		return
 	}
 	now := m.h.Now()
-	if at, ok := m.refreshed[street]; ok && now.Sub(at) < dropRefreshEvery {
+	if at, ok := m.refreshed[street]; ok && !owner && now.Sub(at) < dropRefreshEvery {
 		return
 	}
 	if m.refreshed == nil {
