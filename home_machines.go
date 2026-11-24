@@ -11,12 +11,13 @@ package main
 // (players/inc_making.js:836).
 //
 // This module checks what the site cannot see: that the actor stands in the
-// owner's home, on HOME_<owner>, in HOUSE_<owner> or on a floor of their
+// owner's home, on HOME_<owner>, in HOUSE_<owner> (an upper floor of the house is
+// HOUSE_<owner>_<floor>, the owner's alone; G1249) or on a floor of their
 // Tower, TOWER_<owner>_<floor> (the verbs' ok_states "in_location"; homes.go
 // lets only the owner, holders of the site's pass and, in the house, a
 // key-holder or someone let in), that only the owner sets one down, and that
 // neither blocks the other. It names the place to the site ("street",
-// "house", "tower:<floor>"; lane HOMES2, Austin 2026-11-01: "Machines may
+// "house", "house:<floor>", "tower:<floor>"; lane HOMES2, Austin 2026-11-01: "Machines may
 // stand on the home street, in the house and in the Tower"), so a machine is
 // used only by someone standing where it stands. The site decides the rest from the
 // machine's row, the recipe data and the actor's ledger and stored save
@@ -59,6 +60,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -291,7 +293,8 @@ var machineRooms = map[string]string{
 }
 
 // machinePlace names where in owner's home a street is: "street" (HOME_<owner>), "house"
-// (HOUSE_<owner>) or "tower:<floor>" (TOWER_<owner>_<floor>); in a machine room its place,
+// (HOUSE_<owner>, the ground floor), "house:<floor>" (HOUSE_<owner>_<floor>, an upper floor) or
+// "tower:<floor>" (TOWER_<owner>_<floor>); in a machine room its place,
 // whoever the owner; "" anywhere else.
 func machinePlace(street string, owner int64) (string, string) {
 	if p := machineRooms[street]; p != "" {
@@ -303,6 +306,15 @@ func machinePlace(street string, owner int64) (string, string) {
 		}
 		_, floor, _ := strings.Cut(strings.TrimPrefix(street, towerStreetPrefix), "_")
 		return "tower:" + floor, street
+	}
+	// G1249 (#669): an upper floor of the house, HOUSE_<owner>_<floor> ("house:<floor>"). Glitch's
+	// house was one location, so a machine stood on any floor of it (machine_stand.js canDrop
+	// 770-794 refuses only near another, near the ends and in an instance).
+	if o, f := houseFloorOwner(street); o > 0 {
+		if o != owner {
+			return "", ""
+		}
+		return "house:" + strconv.Itoa(f), street
 	}
 	o, house := homeOwner(street)
 	if o != owner || o == 0 {

@@ -171,6 +171,57 @@ func TestMachinesStandInTheHouseAndTheTower(t *testing.T) {
 	}
 }
 
+// G1249 (#669): a machine on an upper floor of the house. Glitch's house was one location (every
+// floor of it), so a machine stood and ran on any floor; here the floor is HOUSE_<owner>_<floor>,
+// the owner's own room, and the site hears "house:<floor>".
+func TestMachinesStandOnAnUpperFloorOfTheHouse(t *testing.T) {
+	r := newMachineRig(t)
+	for street, place := range map[string]string{"HOUSE_7_1": "house:1", "HOUSE_7_2": "house:2", "HOUSE_7": "house"} {
+		if p, s := machinePlace(street, 7); p != place || s != street {
+			t.Fatalf("%s: %q %q", street, p, s)
+		}
+	}
+	for _, s := range []string{"HOUSE_9_1", "HOUSE_7_3", "HOUSE_7_0"} {
+		if p, _ := machinePlace(s, 7); p != "" {
+			t.Fatalf("%s is not an upper floor of Ada's house: %q", s, p)
+		}
+	}
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.join(ada, "HOUSE_7_1")
+	r.pass(bo, 7, "Ada", true)
+	r.join(bo, house(7))
+	drain(ada)
+	drain(bo)
+	for i, verb := range []map[string]any{
+		{"verb": "place", "class": "woodworker", "rx": 400},
+		{"verb": "use", "id": "hm-00000000000000aa", "key": "board", "qty": 2},
+		{"verb": "collect", "id": "hm-00000000000000aa"},
+		{"verb": "take", "id": "hm-00000000000000aa"},
+	} {
+		frame := map[string]any{"t": "home_machine", "req": i + 1, "owner": 7}
+		for k, v := range verb {
+			frame[k] = v
+		}
+		r.do(ada, frame)
+		r.settle()
+		if c := r.site.calls[i]; c.Place != "house:1" || c.Verb != verb["verb"] || c.Actor != 7 {
+			t.Fatalf("the site hears the second floor: %+v", c)
+		}
+		if a := only(t, drain(ada), "home_machine_done"); a["status"] != "settled" {
+			t.Fatalf("%v: %v", verb["verb"], a)
+		}
+	}
+	if got := drain(bo); len(got) != 0 {
+		t.Fatalf("Bo on the ground floor is not told of the second floor's machine: %v", got)
+	}
+	// Bo cannot reach it from the ground floor: there it is the house's place, which the site matches to the row.
+	r.do(bo, map[string]any{"t": "home_machine", "req": 9, "owner": 7, "verb": "refuel", "id": "hm-00000000000000aa"})
+	r.settle()
+	if c := r.site.calls[len(r.site.calls)-1]; c.Place != "house" {
+		t.Fatalf("an act from the ground floor names the ground floor: %+v", c)
+	}
+}
+
 func TestMachineActsMustBeWellFormed(t *testing.T) {
 	r := newMachineRig(t)
 	ada, bo, _ := r.onHerStreet()

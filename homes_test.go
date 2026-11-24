@@ -441,3 +441,32 @@ func TestTowerFloorsAreOpenLikeTheHomeStreet(t *testing.T) {
 		t.Fatalf("a blocked visitor stays out: %s", got)
 	}
 }
+
+// G1249 (#669): an upper floor of the house is HOUSE_<owner>_<floor>, the owner's own room (G153):
+// a pass, a key or being let in opens the ground floor, never an upper one.
+func TestAnUpperHouseFloorIsTheOwnersAlone(t *testing.T) {
+	for street, want := range map[string][2]int64{"HOUSE_7_1": {7, 1}, "HOUSE_7_2": {7, 2}, "HOUSE_7_0": {0, 0}, "HOUSE_7_3": {0, 0}, "HOUSE_7_01": {0, 0}, "HOUSE_07_1": {0, 0}, "HOUSE_7": {0, 0}, "TOWER_7_1": {0, 0}, "HOME_7_1": {0, 0}} {
+		if o, f := houseFloorOwner(street); o != want[0] || int64(f) != want[1] {
+			t.Errorf("%s: %d %d, want %v", street, o, f, want)
+		}
+	}
+	if o, inside := homeOwner("HOUSE_7_1"); o != 0 || inside {
+		t.Fatal("homeOwner reads no upper floor: the modules that key on the house leave it alone")
+	}
+	r := newHomesRig(t)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.join(ada, "HOUSE_7_1")
+	if f := drain(ada); f[0]["t"] != "street" {
+		t.Fatalf("the owner goes up to her second floor: %v", f)
+	}
+	r.pass(bo, 7, "Ada", true)
+	drain(bo)
+	r.join(bo, house(7))
+	if f := drain(bo); f[0]["t"] != "street" {
+		t.Fatalf("a key-holder comes into the house: %v", f)
+	}
+	r.join(bo, "HOUSE_7_1")
+	if got := buddyKinds(drain(bo)); got != "error:home_locked" {
+		t.Fatalf("but never upstairs: %s", got)
+	}
+}

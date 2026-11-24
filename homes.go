@@ -70,6 +70,7 @@ const (
 	houseStreetPrefix = "HOUSE_"
 	towerStreetPrefix = "TOWER_"
 	towerFloorsMax    = 9                // config_base.js towers MAX_FLOORS (the floor under construction is index 8 at most)
+	houseFloorsMax    = 3                // config_base.js home_limits MAX_FLOORS ("R2: 2, R3: 3"): upper floors 1 and 2
 	homeKnockWait     = 20 * time.Second // inc_houses.js:146 the knock prompt's timeout 20
 	homePassLife      = time.Hour        // ours: the longest a pass is honoured, whatever it says
 	homeSummonLife    = 2 * time.Minute  // ours: how long a summons into the owner's house waits for its arrival
@@ -176,6 +177,29 @@ func towerOwner(street string) int64 {
 		return 0
 	}
 	return n
+}
+
+// houseFloorOwner reads the owner's id and floor from a HOUSE_<id>_<floor> street: an upper floor
+// of their house (1 is the second floor, up to houseFloorsMax-1), or 0. Glitch's house was one
+// location, every floor of it (locations/inc_homes.js homes_add_floor_at 189-219 stacks the floors);
+// the remake's floors are rooms of their own (G153), and an upper floor is the owner's own room: no
+// pass, key or knock lets anyone else in. Its own street lets the owner's acts there (home_machines.go)
+// be the server's word for where they stand (G1249, #669). homeOwner reads none of these.
+func houseFloorOwner(street string) (int64, int) {
+	rest, ok := strings.CutPrefix(street, houseStreetPrefix)
+	if !ok {
+		return 0, 0
+	}
+	id, floor, ok := strings.Cut(rest, "_")
+	if !ok {
+		return 0, 0
+	}
+	n, err := strconv.ParseInt(id, 10, 64)
+	f, ferr := strconv.Atoi(floor)
+	if err != nil || ferr != nil || n <= 0 || strconv.FormatInt(n, 10) != id || f < 1 || f >= houseFloorsMax || strconv.Itoa(f) != floor {
+		return 0, 0
+	}
+	return n, f
 }
 
 // homeOwner reads the owner's id from a HOME_<id> or HOUSE_<id> street; 0 for any other street.
@@ -300,6 +324,13 @@ func (m *homes) send(id int64, msg any) {
 // —— Who may stand where (pols_canEnter) ——
 
 func (m *homes) gate(cl *Client, street string) (bool, string, string) {
+	// An upper house floor is the owner's own room (G153): nobody else joins it.
+	if o, _ := houseFloorOwner(street); o > 0 {
+		if o == cl.ID() {
+			return true, "", ""
+		}
+		return false, "home_locked", homeTextLocked
+	}
 	owner, house := homeOwner(street)
 	if t := towerOwner(street); t > 0 {
 		owner, house = t, false
