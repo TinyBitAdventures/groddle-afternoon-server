@@ -64,7 +64,8 @@ package main
 //
 // Ours: a class the ledger does not carry is not shared (the game drops it as
 // its own, as in solo); stacks do not merge (each drop is its own stack with
-// its own dropper); a street holds at most dropStreetMax shared stacks; a
+// its own dropper); a street holds at most dropStreetMax shared stacks (a house or a Tower
+// floor any number, as Glitch: G1224); a
 // stack nobody picks up for dropKeep goes back to the dropper's ledger and
 // pack (the source kept it forever, but nothing here should grow without
 // end); one drop and one pickup at a time per player; the picker's pack is
@@ -151,15 +152,23 @@ const (
 	dropPlaceNear  = 300.0 // ours: a stack lands within this of the dropper (main.js:2944 required_range)
 	dropLift       = 20.0  // takeable.js:167 pc.y-20
 	dropStreetMax  = 60    // ours
-	dropKeep       = 7 * 24 * time.Hour
-	dropSweepEvery = 10 * time.Minute
-	dropLoadRetry  = 15 * time.Second
-	dropBurst      = 6
-	dropEvery      = time.Second
+	// G1224 (Austin 2026-11-24, "no limit on house and Tower floors, as Glitch": GSJS has no item
+	// limit for a location): a house (with its back yard) or a Tower floor holds any number.
+	// Measured at 300 stacks a house across 58 houses: 5.4 MB in all (309 B a stack), a 45 KB
+	// ground_state on joining, under 1 ms to build.
+	// dropRefreshEvery: how often joining a house or Tower floor asks the site for stacks it holds
+	// there that this server has not heard of (a save's old floor drops moved to the shared floor
+	// on the owner's load, the site's HouseFloors).
+	dropRefreshEvery = time.Minute
+	dropKeep         = 7 * 24 * time.Hour
+	dropSweepEvery   = 10 * time.Minute
+	dropLoadRetry    = 15 * time.Second
+	dropBurst        = 6
+	dropEvery        = time.Second
 
 	dropTextSoulbound = "This item is locked to you and can't be dropped."                                 // takeable.js:118
 	dropTextCant      = "That can't be dropped for others to find."                                        // ours: the ledger does not carry it
-	dropTextPrivate   = "Only a drop on a public street or at someone's home is shared."                    // ours
+	dropTextPrivate   = "Only a drop on a public street or at someone's home is shared."                   // ours
 	dropTextFull      = "This street can't hold any more dropped things."                                  // ours
 	dropTextShort     = "You don't have enough of that item."                                              // inc_trading.js:456
 	dropTextBusy      = "Wait a moment, you are still dropping something."                                 // ours
@@ -189,6 +198,23 @@ func dropHomeOwner(street string) int64 {
 		return id
 	}
 	return towerOwner(street)
+}
+
+// dropFull is whether a place holds all the shared stacks it may: a house or a Tower floor never
+// fills (G1224), any other street (a home street too) at dropStreetMax.
+func (m *drops) dropFull(street string) bool {
+	if dropIndoors(street) {
+		return false
+	}
+	return len(m.byStreet[street]) >= dropStreetMax
+}
+
+// dropIndoors is whether a place is someone's house (with its back yard) or a floor of their Tower.
+func dropIndoors(street string) bool {
+	if id, house := homeOwner(street); id > 0 && house {
+		return true
+	}
+	return towerOwner(street) > 0
 }
 
 // dropSiteStreet is a street as the site is told it.
@@ -290,6 +316,7 @@ type dropSite interface {
 	drop(c dropCall) dropAnswer
 	dropTake(op string, id int64, why string, n, from int) dropAnswer // n > 0: n of the from held (a part)
 	dropsOnGround() ([]dropRow, error)
+	dropsOnStreet(street string) ([]dropRow, error) // G1224: one place's stacks (the site's name for it)
 	dropEat(op string, from int) dropAnswer
 	dropPlace(c dropCall) dropAnswer // G605: a stack the street makes (a Plop, a Piglet), under the player whose act made it
 }
@@ -358,6 +385,17 @@ func (l *httpLedger) dropPlace(c dropCall) dropAnswer {
 	return l.dropAsk(ledgerRouteDropPut, body)
 }
 
+func (l *httpLedger) dropsOnStreet(street string) ([]dropRow, error) {
+	var out struct {
+		Stacks []dropRow `json:"stacks"`
+	}
+	body, _ := json.Marshal(map[string]string{"street": street})
+	if err := l.dropPost(ledgerRouteDrops, body, &out); err != nil {
+		return nil, err
+	}
+	return out.Stacks, nil
+}
+
 func (l *httpLedger) dropsOnGround() ([]dropRow, error) {
 	var out struct {
 		Stacks []dropRow `json:"stacks"`
@@ -382,6 +420,8 @@ type drops struct {
 	picking  map[int64]string // picker -> the stack the site is weighing
 	rates    map[int64]*bucket
 	sweeping bool
+	// G1224: when each house or Tower floor last asked the site for stacks this server has not heard of.
+	refreshed map[string]time.Time
 }
 
 func newDrops(h *Hub) Module {
@@ -428,7 +468,7 @@ func (m *drops) Register(r *Registry) {
 // the owner's game's), so only a public street is asked.
 func (m *drops) place(street string, by int64, name string, x, y float64, it tradeItem) bool {
 	cls, ok := m.table.Items[it.C]
-	if m.site == nil || !m.loaded || followPrivate(street) || !ok || it.N < 1 || it.N > cls.Max || len(m.byStreet[street]) >= dropStreetMax {
+	if m.site == nil || !m.loaded || followPrivate(street) || !ok || it.N < 1 || it.N > cls.Max || m.dropFull(street) {
 		return false
 	}
 	m.table.cleanTag(&it, m.h.Now())
@@ -608,6 +648,50 @@ func (m *drops) sendState(cl *Client) {
 		return
 	}
 	m.h.SendLocked(cl, m.stateMsg(cl.Street()))
+	m.refresh(cl.Street())
+}
+
+// refresh asks the site, at most once a dropRefreshEvery, for the stacks lying in a house or on a
+// Tower floor that this server has not heard of, and shows the street any it finds (ground_added).
+// A save's old floor drops are moved to the shared floor on the owner's load (G1224, the site's
+// HouseFloors), after this server loaded the ground. Only new ids are added: a stack held here
+// already, or one taken or eaten (no longer on the ground at the site), is left as it is.
+func (m *drops) refresh(street string) {
+	if !m.loaded || !dropIndoors(street) {
+		return
+	}
+	now := m.h.Now()
+	if at, ok := m.refreshed[street]; ok && now.Sub(at) < dropRefreshEvery {
+		return
+	}
+	if m.refreshed == nil {
+		m.refreshed = map[string]time.Time{}
+	}
+	m.refreshed[street] = now
+	site := m.site
+	m.spawn(func() {
+		rows, err := site.dropsOnStreet(dropSiteStreet(street))
+		m.h.After(0, func() {
+			if err != nil {
+				log.Printf("drops: refreshing %s: %v", street, err)
+				delete(m.refreshed, street)
+				return
+			}
+			added := 0
+			for _, row := range rows {
+				if dropStreetFromSite(row.Street) != street || m.stacks[row.ID] != nil {
+					continue
+				}
+				if s := m.addRow(row); s != nil {
+					m.h.BroadcastStreetLocked(street, map[string]any{"t": "ground_added", "stack": s.view()}, 0)
+					added++
+				}
+			}
+			if added > 0 {
+				log.Printf("drops: %d stacks found in %s", added, street)
+			}
+		})
+	})
 }
 
 func (m *drops) allow(cl *Client) bool {
@@ -687,7 +771,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		m.refuseDrop(cl, ref, "busy", dropTextBusy)
 		return
 	}
-	if len(m.byStreet[street]) >= dropStreetMax {
+	if m.dropFull(street) {
 		m.refuseDrop(cl, ref, "full", dropTextFull)
 		return
 	}

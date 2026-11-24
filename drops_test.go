@@ -26,6 +26,7 @@ type fakeDropSite struct {
 	lose   bool             // a part settles at the site but its answer never comes back
 	count  map[string]int   // a stack's count at the site, once a part was asked of it
 	parts  map[string]int64 // <op>-t<from> -> who took that part
+	asked  []string         // G1224: places whose stacks were asked for
 }
 
 func (f *fakeDropSite) drop(c dropCall) dropAnswer {
@@ -86,6 +87,17 @@ func (f *fakeDropSite) dropTakePart(op string, id int64, n, from int) dropAnswer
 }
 
 func (f *fakeDropSite) dropsOnGround() ([]dropRow, error) { return f.ground, f.err }
+
+func (f *fakeDropSite) dropsOnStreet(street string) ([]dropRow, error) {
+	f.asked = append(f.asked, street)
+	out := []dropRow{}
+	for _, r := range f.ground {
+		if r.Street == street {
+			out = append(out, r)
+		}
+	}
+	return out, f.err
+}
 
 func (f *fakeDropSite) dropPlace(c dropCall) dropAnswer {
 	f.placed = append(f.placed, c)
@@ -1013,3 +1025,74 @@ func TestTheOwnersHouseStacksStayAndAVisitorsGoHome(t *testing.T) {
 }
 
 func ptrFloat(v float64) *float64 { return &v }
+
+// G1224 (Austin 2026-11-24, "no limit on house and Tower floors, as Glitch"): a house or a Tower
+// floor never fills; a street and a home street keep dropStreetMax.
+func TestAHouseAndATowerFloorNeverFill(t *testing.T) {
+	for street, want := range map[string]bool{"HOUSE_7": true, "TOWER_7_2": true, "HOME_7": false, "LA5PPFP86NF2FOS": false, "HOUSE_07": false} {
+		if got := dropIndoors(street); got != want {
+			t.Fatalf("%s indoors: %v", street, got)
+		}
+	}
+	r := newDropRig(t)
+	ada := r.connect(7, "Ada")
+	r.at(ada, "HOUSE_7", 900, 600)
+	r.settle()
+	drain(ada)
+	for i := 0; i < dropStreetMax+5; i++ {
+		r.do(ada, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 1}, "ox": 750})
+		r.settle()
+		for _, f := range drain(ada) {
+			if f["t"] == "ground_dropped" && f["status"] != "settled" {
+				t.Fatalf("drop %d in a house: %v", i+1, f)
+			}
+		}
+	}
+	if n := len(r.site.drops); n != dropStreetMax+5 || r.m.dropFull("HOUSE_7") {
+		t.Fatalf("the house took %d drops", n)
+	}
+}
+
+// G1224: a save's old floor drops are moved to the shared floor on the owner's load, after this server
+// loaded the ground: joining the house asks the site for its stacks (once a minute) and shows the new ones.
+func TestJoiningAHouseFindsStacksTheSiteMovedThere(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.at(bo, "HOUSE_7", 1500, 600)
+	r.settle()
+	drain(bo)
+	r.site.ground = []dropRow{
+		{ID: "drop-00000000000000a1", Street: "HOUSE-7", C: "apple", N: 5, X: 300, Y: 620, By: 7, Name: "Ada", At: 1_690_000_000},
+		{ID: "drop-00000000000000a2", Street: "HOUSE-8", C: "apple", N: 1, X: 1, Y: 1, By: 8, Name: "Cy", At: 1_690_000_000},
+	}
+	r.now = r.now.Add(2 * time.Minute)
+	r.at(ada, "HOUSE_7", 900, 600)
+	r.settle()
+	if len(r.site.asked) != 2 || r.site.asked[1] != "HOUSE-7" {
+		t.Fatalf("the site is asked for the house: %v", r.site.asked)
+	}
+	got := 0
+	for _, f := range drain(bo) {
+		if f["t"] == "ground_added" && f["stack"].(map[string]any)["id"] == "drop-00000000000000a1" {
+			got++
+		}
+	}
+	if got != 1 || r.m.stacks["drop-00000000000000a2"] != nil {
+		t.Fatalf("the house's moved stack is shown once, and only the house's: %d", got)
+	}
+	// Again within the minute: not asked; after it, asked, and nothing is shown twice.
+	r.at(bo, "HOUSE_7", 1400, 600)
+	r.settle()
+	if len(r.site.asked) != 2 {
+		t.Fatalf("asked again within the minute: %v", r.site.asked)
+	}
+	r.now = r.now.Add(2 * time.Minute)
+	drain(bo)
+	r.at(bo, "HOUSE_7", 1300, 600)
+	r.settle()
+	for _, f := range drain(bo) {
+		if f["t"] == "ground_added" {
+			t.Fatalf("shown twice: %v", f)
+		}
+	}
+}
