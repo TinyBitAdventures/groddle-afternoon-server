@@ -13,14 +13,28 @@ package main
 //
 // Server to client (every game socket; nothing is asked of the player):
 //
-//	{"t":"new_ur","now":…,"midnights":[…ms],"big":…ms}                to new_ur_sync
-//	{"t":"new_ur","now":…,"ev":"midnight","at":…,"index":4,"big":true} at each of the six midnights
+//	{"t":"new_ur","now":…,"midnights":[…ms],"big":…ms,"seen":[4]}                 to new_ur_sync
+//	{"t":"new_ur","now":…,"ev":"midnight","at":…,"index":4,"big":true,"seen":true} at each of the six midnights
+//	{"t":"new_ur_pop","ok":true,"near":2}                                          to the popper (ok false, why "slow")
+//	{"t":"new_ur_popped","id":7,"name":"Ada","x":…,"y":…,"c":"red","near":true}    to everyone else on the street
+//	{"t":"new_ur_toast","ok":true,"with":["Bo"]}                                    to the toaster (ok false, why "alone"|"slow")
+//	{"t":"new_ur_toasted","from":{"id":7,"name":"Ada"}}                             to each player toasted
 //
 // The page keeps now minus its own clock and runs the countdown and the show on it.
 //
+// The keepsake and the badge (G1195 step 4, the game's js/new-ur-party.js): "seen" is this server's
+// word that the character was connected at that midnight. The midnight goes to every game socket
+// connected at that moment, each marked seen, and the eve's seen midnights come back with
+// new_ur_sync, so a page that reloads in the show still gets its keepsake. Kept in memory (an eve's
+// worth); a restart forgets who saw a midnight, but each page has granted its keepsake by then.
+//
 // Client to server:
 //
-//	{"t":"new_ur_sync"}   asks for the eve and the clock (the page sends it as it comes online)
+//	{"t":"new_ur_sync"}               asks for the eve and the clock (the page sends it as it comes online)
+//	{"t":"new_ur_pop","c":"red"}      a Confetti Popper popped (c: mix, red, green, blue, shiny): the
+//	                                  burst for everyone on the street, surprise for those within newUrPopReach
+//	                                  (the popper is a loss from the pack: nothing for the ledger)
+//	{"t":"new_ur_toast"}              a Bubbly raised: the players within newUrToastReach toast with you
 //
 // Global hears newUrNotices before the big midnight (channels.go notice), each once. Nothing is
 // written to disk: after a restart a line whose moment passed more than newUrNoticeLate ago is not
@@ -30,6 +44,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sort"
 	"time"
 )
 
@@ -41,7 +56,16 @@ const (
 	newUrBigHour = 13
 	// A line still posts this long after its moment (a restart), not later.
 	newUrNoticeLate = 2 * time.Minute
+	// The Confetti Popper (js/new-ur-party.js NEW_UR_PARTY): who jumps, how often one pops.
+	newUrPopReach = 600.0
+	newUrPopEvery = time.Second
+	// Bubbly's Toast: who it reaches, how often.
+	newUrToastReach = 400.0
+	newUrToastEvery = 3 * time.Second
 )
+
+// newUrPopColours are the poppers' colours: the Toy Vendor's mix and the four Elements.
+var newUrPopColours = map[string]bool{"mix": true, "red": true, "green": true, "blue": true, "shiny": true}
 
 // newUrNotices are Global's lines before the big midnight (js/new-ur.js NEW_UR_NOTICES, word for word).
 var newUrNotices = []struct {
@@ -101,50 +125,143 @@ func newUrEve(now time.Time) ([]time.Time, int) {
 }
 
 type newUr struct {
-	h     *Hub
-	told  map[string]bool // "<year>:<lead>" lines posted
-	shown map[int64]bool  // midnights (unix s) broadcast
-	timer func() bool
+	h       *Hub
+	told    map[string]bool          // "<year>:<lead>" lines posted
+	shown   map[int64]bool           // midnights (unix s) broadcast
+	seen    map[int64]map[int64]bool // midnight (unix s) -> characters connected when it came
+	popAt   map[int64]time.Time      // each character's last pop
+	toastAt map[int64]time.Time      // each character's last toast
+	timer   func() bool
 }
 
 func init() { modules = append(modules, newNewUr) }
 
 func newNewUr(h *Hub) Module {
-	return &newUr{h: h, told: map[string]bool{}, shown: map[int64]bool{}}
+	return &newUr{h: h, told: map[string]bool{}, shown: map[int64]bool{}, seen: map[int64]map[int64]bool{}, popAt: map[int64]time.Time{}, toastAt: map[int64]time.Time{}}
 }
 
 func (m *newUr) Register(r *Registry) {
 	r.Handle("new_ur_sync", func(cl *Client, _ json.RawMessage) { m.sendState(cl) })
+	r.Handle("new_ur_pop", m.pop)
+	r.Handle("new_ur_toast", m.toast)
 	// The timers start with the first player online and re-arm at each change. The clock itself is
 	// sent when the page asks (new_ur_sync, as it comes online), so a connect sends nothing new.
 	r.OnConnect(func(*Client) { m.wake() })
 }
 
-// state is the eve's midnights and the server's clock.
-func (m *newUr) state() map[string]any {
+// state is the eve's midnights, the server's clock and the midnights (1-6) id was connected for.
+func (m *newUr) state(id int64) map[string]any {
 	ats, big := newUrEve(m.h.Now())
 	ms := make([]int64, len(ats))
+	seen := []int{}
 	for i, t := range ats {
 		ms[i] = t.UnixMilli()
+		if m.seen[t.Unix()][id] {
+			seen = append(seen, i+1)
+		}
 	}
-	return map[string]any{"t": "new_ur", "now": m.h.Now().UnixMilli(), "midnights": ms, "big": ats[big].UnixMilli()}
+	return map[string]any{"t": "new_ur", "now": m.h.Now().UnixMilli(), "midnights": ms, "big": ats[big].UnixMilli(), "seen": seen}
 }
 
 func (m *newUr) sendState(cl *Client) {
 	if cl == nil || cl.web {
 		return
 	}
-	m.h.SendLocked(cl, m.state())
+	m.h.SendLocked(cl, m.state(cl.ID()))
 }
 
-// broadcast sends one message to every game socket.
-func (m *newUr) broadcast(msg map[string]any) {
+// midnight sends the midnight to every game socket connected now, each marked seen (the keepsake's
+// check), and remembers who saw it for new_ur_sync. Older eves' records are dropped.
+func (m *newUr) midnight(msg map[string]any, at time.Time) {
+	for k := range m.seen {
+		if at.Unix()-k > int64(2*24*time.Hour/time.Second) {
+			delete(m.seen, k)
+		}
+	}
+	who := m.seen[at.Unix()]
+	if who == nil {
+		who = map[int64]bool{}
+		m.seen[at.Unix()] = who
+	}
+	msg["seen"] = true
 	b, _ := json.Marshal(msg)
 	for _, cl := range m.h.clients {
 		if !cl.web {
+			who[cl.ID()] = true
 			m.h.pushLocked(cl, b)
 		}
 	}
+}
+
+// near is everyone else on cl's street within reach px of cl, by id.
+func (m *newUr) near(cl *Client, reach float64) (all, close []*Client) {
+	street := cl.Street()
+	if street == "" {
+		return nil, nil
+	}
+	for _, o := range m.h.StreetLocked(street) {
+		if o.ID() == cl.ID() || o.web {
+			continue
+		}
+		all = append(all, o)
+		dx, dy := o.player.X-cl.player.X, o.player.Y-cl.player.Y
+		if dx*dx+dy*dy <= reach*reach {
+			close = append(close, o)
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID() < all[j].ID() })
+	sort.Slice(close, func(i, j int) bool { return close[i].ID() < close[j].ID() })
+	return all, close
+}
+
+// pop is a Confetti Popper popped: the burst for the whole street, surprise for those near.
+func (m *newUr) pop(cl *Client, frame json.RawMessage) {
+	var msg struct {
+		C string `json:"c"`
+	}
+	if cl == nil || cl.web || json.Unmarshal(frame, &msg) != nil || !newUrPopColours[msg.C] {
+		return
+	}
+	now := m.h.Now()
+	if at, ok := m.popAt[cl.ID()]; ok && now.Sub(at) < newUrPopEvery {
+		m.h.SendLocked(cl, map[string]any{"t": "new_ur_pop", "ok": false, "why": "slow"})
+		return
+	}
+	m.popAt[cl.ID()] = now
+	all, close := m.near(cl, newUrPopReach)
+	isNear := map[int64]bool{}
+	for _, o := range close {
+		isNear[o.ID()] = true
+	}
+	for _, o := range all {
+		m.h.SendLocked(o, map[string]any{"t": "new_ur_popped", "id": cl.ID(), "name": cl.Name(), "x": cl.player.X, "y": cl.player.Y, "c": msg.C, "near": isNear[o.ID()]})
+	}
+	m.h.SendLocked(cl, map[string]any{"t": "new_ur_pop", "ok": true, "near": len(close)})
+}
+
+// toast is a Bubbly raised: everyone within reach toasts with the toaster, or nobody is near.
+func (m *newUr) toast(cl *Client, _ json.RawMessage) {
+	if cl == nil || cl.web {
+		return
+	}
+	now := m.h.Now()
+	if at, ok := m.toastAt[cl.ID()]; ok && now.Sub(at) < newUrToastEvery {
+		m.h.SendLocked(cl, map[string]any{"t": "new_ur_toast", "ok": false, "why": "slow"})
+		return
+	}
+	_, close := m.near(cl, newUrToastReach)
+	if len(close) == 0 {
+		m.h.SendLocked(cl, map[string]any{"t": "new_ur_toast", "ok": false, "why": "alone"})
+		return
+	}
+	m.toastAt[cl.ID()] = now
+	with := make([]string, 0, len(close))
+	from := map[string]any{"id": cl.ID(), "name": cl.Name()}
+	for _, o := range close {
+		with = append(with, o.Name())
+		m.h.SendLocked(o, map[string]any{"t": "new_ur_toasted", "from": from})
+	}
+	m.h.SendLocked(cl, map[string]any{"t": "new_ur_toast", "ok": true, "with": with})
 }
 
 // wake posts what is due (a notice, a midnight) and arms the timer for the next thing.
@@ -173,7 +290,7 @@ func (m *newUr) wake() {
 	for i, at := range ats {
 		if !now.Before(at) && now.Sub(at) < time.Minute && !m.shown[at.Unix()] {
 			m.shown[at.Unix()] = true
-			m.broadcast(map[string]any{"t": "new_ur", "now": now.UnixMilli(), "ev": "midnight", "at": at.UnixMilli(), "index": i + 1, "big": i == big})
+			m.midnight(map[string]any{"t": "new_ur", "now": now.UnixMilli(), "ev": "midnight", "at": at.UnixMilli(), "index": i + 1, "big": i == big}, at)
 			log.Printf("new ur: midnight %d of %d (big %v)", i+1, year, i == big)
 		}
 		soonest(at)

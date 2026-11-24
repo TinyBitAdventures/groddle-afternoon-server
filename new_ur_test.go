@@ -167,3 +167,85 @@ func TestNewUrNoticesMatchTheGame(t *testing.T) {
 		t.Fatal("js/new-ur.js BIG_HOUR differs")
 	}
 }
+
+// G1195 step 4: the keepsake's check. A midnight goes to whoever is connected then, marked seen, and
+// new_ur_sync names the eve's midnights the character saw; one who joined after it saw nothing.
+func TestNewUrTellsWhoWasOnlineAtAMidnight(t *testing.T) {
+	ats, big := newUrMidnights(2026)
+	r := newNewUrRig(t, ats[big].Add(-time.Minute))
+	ada := joinAt(r.hub, 1, "Ada", "GTEST1", 0, 0)
+	r.advance(time.Minute)
+	if m := lastOf(t, ada, "new_ur"); m["ev"] != "midnight" || m["seen"] != true {
+		t.Fatalf("the midnight is not marked seen: %v", m)
+	}
+	bo := joinAt(r.hub, 2, "Bo", "GTEST1", 0, 0)
+	send(r.hub, bo, map[string]any{"t": "new_ur_sync"})
+	if s := lastOf(t, bo, "new_ur")["seen"].([]any); len(s) != 0 {
+		t.Fatalf("Bo came after the midnight but saw %v", s)
+	}
+	send(r.hub, ada, map[string]any{"t": "new_ur_sync"})
+	if s := lastOf(t, ada, "new_ur")["seen"].([]any); len(s) != 1 || s[0].(float64) != float64(big+1) {
+		t.Fatalf("Ada saw %v, want [%d]", s, big+1)
+	}
+}
+
+// G1195 step 5: a Confetti Popper's burst reaches the whole street; only those near the bang jump.
+func TestNewUrPopperBurstsForTheStreet(t *testing.T) {
+	r := newNewUrRig(t, time.Date(2026, 12, 28, 12, 0, 0, 0, urZone))
+	ada := joinAt(r.hub, 1, "Ada", "GTEST1", 100, 500)
+	bo := joinAt(r.hub, 2, "Bo", "GTEST1", 300, 500)
+	cy := joinAt(r.hub, 3, "Cy", "GTEST1", 2000, 500)
+	di := joinAt(r.hub, 4, "Di", "GTEST2", 100, 500)
+	frames(ada)
+	frames(bo)
+	frames(cy)
+	frames(di)
+	send(r.hub, ada, map[string]any{"t": "new_ur_pop", "c": "red"})
+	if m := lastOf(t, ada, "new_ur_pop"); m["ok"] != true || m["near"].(float64) != 1 {
+		t.Fatalf("popper %v", m)
+	}
+	if m := lastOf(t, bo, "new_ur_popped"); m["near"] != true || m["c"] != "red" || m["name"] != "Ada" || m["x"].(float64) != 100 {
+		t.Fatalf("Bo %v", m)
+	}
+	if m := lastOf(t, cy, "new_ur_popped"); m["near"] != false {
+		t.Fatalf("Cy is far off but %v", m)
+	}
+	noneOf(t, di, "new_ur_popped")
+	// One a second; an unknown colour is ignored.
+	send(r.hub, ada, map[string]any{"t": "new_ur_pop", "c": "red"})
+	if m := lastOf(t, ada, "new_ur_pop"); m["ok"] != false || m["why"] != "slow" {
+		t.Fatalf("a second pop at once %v", m)
+	}
+	r.advance(2 * time.Second)
+	send(r.hub, ada, map[string]any{"t": "new_ur_pop", "c": "purple"})
+	noneOf(t, ada, "new_ur_pop")
+	noneOf(t, bo, "new_ur_popped")
+}
+
+// G1195 step 6: Toast reaches the players near you, or says nobody is.
+func TestNewUrToastNeedsSomeoneNear(t *testing.T) {
+	r := newNewUrRig(t, time.Date(2026, 12, 31, 12, 0, 0, 0, urZone))
+	ada := joinAt(r.hub, 1, "Ada", "GTEST1", 100, 500)
+	cy := joinAt(r.hub, 3, "Cy", "GTEST1", 2000, 500)
+	frames(cy)
+	send(r.hub, ada, map[string]any{"t": "new_ur_toast"})
+	if m := lastOf(t, ada, "new_ur_toast"); m["ok"] != false || m["why"] != "alone" {
+		t.Fatalf("alone %v", m)
+	}
+	noneOf(t, cy, "new_ur_toasted")
+	bo := joinAt(r.hub, 2, "Bo", "GTEST1", 350, 520)
+	frames(bo)
+	send(r.hub, ada, map[string]any{"t": "new_ur_toast"})
+	m := lastOf(t, ada, "new_ur_toast")
+	if w := m["with"].([]any); m["ok"] != true || len(w) != 1 || w[0] != "Bo" {
+		t.Fatalf("toast %v", m)
+	}
+	if f := lastOf(t, bo, "new_ur_toasted")["from"].(map[string]any); f["name"] != "Ada" {
+		t.Fatalf("Bo heard %v", f)
+	}
+	noneOf(t, cy, "new_ur_toasted")
+	send(r.hub, ada, map[string]any{"t": "new_ur_toast"})
+	if m := lastOf(t, ada, "new_ur_toast"); m["why"] != "slow" {
+		t.Fatalf("a toast at once again %v", m)
+	}
+}
