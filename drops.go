@@ -133,10 +133,11 @@ package main
 // Ours: a stack takes only from its own dropper (Austin 2026-11-24: each keeps its dropper for the return
 // after dropKeep, so nobody's goods change hands or go home to someone else); not
 // on public or home streets (two players' stacks: Austin's call); stacks with wear or words never merge.
-// A class of one per stack (stackmax 1: emblems) piles up on a house or Tower floor with no cap, and a
-// pile of it may be dropped whole there (Austin 2026-11-24, pileMax: "Let them pile up on floors";
-// Glitch's stackmax kept them apart). The site is still told the class's stackmax ("max") and applies
-// the same rule from its own table.
+// A pile on a house or Tower floor has no stack limit for any class (Austin 2026-11-24, pileMax: "Let's
+// remove the pile limits"; Glitch's stackmax capped every pile, emblems 1, moonstones 3): it grows to the
+// most a stack holds anywhere (dropPileMax, 9999), the rest lying beside it, and a pile may be dropped
+// whole there. Never a class whose copies keep their own wear or words. The site is told the pile ("max")
+// and applies the same rule from its own table. The pack keeps Glitch's stackmax.
 //
 // Pick up how many (G560): a pickup may name a part of the stack (main.js
 // 3227-3240 splits the stack, takeable_pickup takes the split part and the
@@ -330,8 +331,8 @@ type dropCall struct {
 	X      int       `json:"x"`
 	Y      int       `json:"y"`
 	Item   tradeItem `json:"item"`
-	Into   string    `json:"into,omitempty"` // a like stack on a house or Tower floor it joins (below its stackmax)
-	Max    int       `json:"max,omitempty"`  // the class's stackmax, with Into
+	Into   string    `json:"into,omitempty"` // a like stack on a house or Tower floor it joins (below its pile)
+	Max    int       `json:"max,omitempty"`  // the class's pile there (pileMax), with Into
 }
 
 // moveCall is the owner's floor-to-floor move as the site is asked it (LedgerDrop::moveStack).
@@ -854,7 +855,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 	// On a house or Tower floor it joins a like stack there (the header, "Merging").
 	into := m.mergeTarget(street, from, it, float64(call.X), float64(call.Y), msg.Into, msg.Merge == nil || *msg.Merge)
 	if into != nil {
-		call.Into, call.Max = into.ID, cls.Max
+		call.Into, call.Max = into.ID, pileMax(cls)
 		into.picking = from // nobody takes from it, or eats it, while the site weighs the merge
 	}
 	m.dropping[from] = call.Op
@@ -904,29 +905,31 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 	})
 }
 
-// dropPileMax is the most one pile of a one-per-stack class holds on a house or Tower floor: the count
-// a stack may hold anywhere (tradeSlotMax, MakingSlot.as:25 MAX_COUNT; the site's ledger takes no more).
+// dropPileMax is the most one pile holds on a house or Tower floor: the count a stack may hold anywhere
+// (tradeSlotMax, MakingSlot.as:25 MAX_COUNT; the site's ledger takes no more).
 const dropPileMax = tradeSlotMax
 
-// pileMax is how many of a class one stack on a house or Tower floor holds: its stackmax (Eleven
-// Location.addItem 475-503), except a class of one per stack, which piles up (dropPileMax).
-// ours: Austin 2026-11-24, one-per-stack things (emblems) pile up on floors, shelves and tables;
-// Glitch's stackmax 1 kept them apart. Never things whose copies keep their own identity: a tool (pts,
-// its wear) or a class whose copies carry words (tag; the game's keepsOwnStack classes, a Still and a
-// Teleportation Script, are tagged). The game (js/world-items.js pileMaxOf) and the site
-// (LedgerDrop::pileCap) apply the same rule.
+// pileMax is how many of a class one pile on a house or Tower floor holds (floors, shelves and tables):
+// dropPileMax for every class, except one whose copies keep their own identity, which never joins (1):
+// a tool (pts, its wear) or a class whose copies carry words (tag; the game's keepsOwnStack classes, a
+// Still and a Teleportation Script, are tagged). A drop that would pass it joins up to it, the rest lying
+// beside it.
+// ours: Austin 2026-11-24, "Let's remove the pile limits": piles at home have no limit for any class;
+// Glitch's stackmax capped every pile (Eleven Location.addItem 475-503: emblems 1, moonstones 3). The pack
+// keeps Glitch's stackmax. The game (js/world-items.js pileMaxOf) and the site (LedgerDrop::pileCap) apply
+// the same rule.
 func pileMax(cls tradeClass) int {
-	if cls.Max != 1 || cls.Pts > 0 || cls.Tag != "" {
-		return cls.Max
+	if cls.Pts > 0 || cls.Tag != "" {
+		return 1
 	}
 	return dropPileMax
 }
 
 // dropMaxN is the most one drop of a class may hold on a street: its stackmax (the trade table's max),
-// or in a house or on a Tower floor its pile (pileMax), so a pile of emblems set down whole stays one.
+// or in a house or on a Tower floor its pile (pileMax), so a pile set down whole stays one.
 func dropMaxN(street string, cls tradeClass) int {
 	if dropIndoors(street) {
-		return pileMax(cls)
+		return max(pileMax(cls), cls.Max)
 	}
 	return cls.Max
 }
@@ -934,7 +937,7 @@ func dropMaxN(street string, cls tradeClass) int {
 // mergeTarget is the like stack a drop of it at (x, y) by `by` joins, or nil: only on a house or Tower
 // floor; `named` when the client set it on one (it must still be like it), else the nearest within
 // dropMergeRadius when `near`. A like stack: the same class, no wear or words on either, below the class's
-// stackmax (a one-per-stack class's pile has no such cap: pileMax), nobody taking from it or eating it, and dropped by `by` (Austin 2026-11-24: only one player's
+// pile (pileMax), nobody taking from it or eating it, and dropped by `by` (Austin 2026-11-24: only one player's
 // own stacks join, so each keeps its dropper's return after dropKeep and nobody's goods change hands).
 func (m *drops) mergeTarget(street string, by int64, it tradeItem, x, y float64, named string, near bool) *groundStack {
 	if !dropIndoors(street) || it.R != nil || len(it.T) > 0 {
@@ -1052,7 +1055,7 @@ func (m *drops) moveFrame(cl *Client, frame json.RawMessage) {
 	if msg.Into != "" && msg.Into != s.ID {
 		into = m.mergeTarget(street, s.By, s.item(), x, y, msg.Into, false)
 		if into != nil {
-			call.Into, call.Max = into.ID, m.table.Items[s.C].Max
+			call.Into, call.Max = into.ID, pileMax(m.table.Items[s.C])
 			into.picking = cl.ID()
 		}
 	}

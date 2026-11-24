@@ -7,7 +7,8 @@ import (
 // Merging on a house or Tower floor (drops.go header, "Merging"; #655): takeable_drop's
 // apiPutItemIntoPosition merged a drop into a like stack below its stackmax (takeable.js 202-207;
 // Eleven Location.addItem 475-503, within 100 px), and the Decoration Mode move merged too (main.js
-// doModifyItem 4852-4890).
+// doModifyItem 4852-4890). Ours: a pile at home has no stack limit (Austin 2026-11-24, "Let's remove the
+// pile limits"), only the most a stack holds anywhere (dropPileMax, 9999).
 
 // houseRig: Ada (7) at home in HOUSE_7 (its left end drawn at x 750), Bo (9) visiting; the site merges.
 func houseRig(t *testing.T) (r *dropRig, ada, bo *Client) {
@@ -37,17 +38,17 @@ func (r *dropRig) houseDrop(cl *Client, c string, n int, x float64, extra map[st
 	return nil
 }
 
-func TestADropOnAHouseFloorJoinsTheLikeStackThereUpToItsStackmax(t *testing.T) {
+func TestADropOnAHouseFloorJoinsTheLikeStackThere(t *testing.T) {
 	r, ada, bo := houseRig(t)
 	first := r.houseDrop(ada, "gem_moonstone", 2, 1000, nil)
 	a := first["stack"].(map[string]any)["id"].(string)
 	drain(bo)
 
-	// One more where it lies: it joins (the site is told which, and the stackmax).
+	// One more where it lies: it joins (the site is told which, and the pile there).
 	got := r.houseDrop(ada, "gem_moonstone", 1, 1010, nil)
 	c := r.site.drops[1]
-	if c.Into != a || c.Max != 3 {
-		t.Fatalf("the drop names the like stack and the stackmax: %+v", c)
+	if c.Into != a || c.Max != dropPileMax {
+		t.Fatalf("the drop names the like stack and the pile: %+v", c)
 	}
 	if got["status"] != "settled" || got["stack"] != nil || got["into"] != a || got["item"].(map[string]any)["n"] != float64(1) {
 		t.Fatalf("the dropper is told what left the pack and where it went: %v", got)
@@ -59,27 +60,57 @@ func TestADropOnAHouseFloorJoinsTheLikeStackThereUpToItsStackmax(t *testing.T) {
 		t.Fatalf("the visitor sees the stack grow: %v", s)
 	}
 
-	// #655: a full stack (a Moonstone's stackmax is 3) takes no fourth; it lies as its own stack.
+	// Austin 2026-11-24 ("Let's remove the pile limits"): a Moonstone's stackmax is 3, but a pile at home
+	// takes a fourth (Glitch's full stack took none, #655).
 	r.houseDrop(ada, "gem_moonstone", 1, 1000, nil)
-	if c := r.site.drops[2]; c.Into != "" {
-		t.Fatalf("a full stack is not named: %+v", c)
+	if c := r.site.drops[2]; c.Into != a {
+		t.Fatalf("the pile of 3 is named: %+v", c)
 	}
-	if len(r.m.byStreet["HOUSE_7"]) != 2 {
-		t.Fatalf("two stacks: %v", r.m.byStreet["HOUSE_7"])
+	if s := r.m.stacks[a]; s == nil || s.N != 4 || len(r.m.byStreet["HOUSE_7"]) != 1 {
+		t.Fatalf("one pile of 4: %+v", r.m.byStreet["HOUSE_7"])
 	}
 	drain(bo)
 
-	// Two onto a stack of 1: one joins, the other lies on its own.
-	d := r.site.drops[2].Op
-	r.houseDrop(ada, "gem_moonstone", 3, 1000, map[string]any{"into": d})
-	if s := r.m.stacks[d]; s == nil || s.N != 3 {
-		t.Fatalf("filled to 3: %+v", s)
+	// Three set on it at once: all join.
+	r.houseDrop(ada, "gem_moonstone", 3, 1000, map[string]any{"into": a})
+	if s := r.m.stacks[a]; s == nil || s.N != 7 || len(r.m.byStreet["HOUSE_7"]) != 1 {
+		t.Fatalf("one pile of 7: %+v", r.m.byStreet["HOUSE_7"])
 	}
-	rest := r.site.drops[3].Op
-	if s := r.m.stacks[rest]; s == nil || s.N != 1 {
-		t.Fatalf("the rest on its own: %+v", s)
+}
+
+// A pile at home holds no more than a stack holds anywhere (9999): a drop that would pass it joins up to
+// it, and the rest lies beside it as its own stack.
+func TestAPileAtHomeStopsAt9999AndTheRestLiesBeside(t *testing.T) {
+	r, ada, _ := houseRig(t)
+	a := r.houseDrop(ada, "gem_moonstone", dropPileMax-1, 1000, nil)["stack"].(map[string]any)["id"].(string)
+	r.m.rates = map[int64]*bucket{}
+	got := r.houseDrop(ada, "gem_moonstone", 3, 1000, map[string]any{"into": a})
+	if got["status"] != "settled" || got["into"] != a {
+		t.Fatalf("it joins the pile: %v", got)
 	}
-	_ = ada
+	rest := r.site.drops[1].Op
+	if s := r.m.stacks[a]; s == nil || s.N != dropPileMax {
+		t.Fatalf("filled to 9999: %+v", s)
+	}
+	if s := r.m.stacks[rest]; s == nil || s.N != 2 {
+		t.Fatalf("the other 2 beside it: %+v", s)
+	}
+	// A full pile is named no more: the next one joins the stack beside it.
+	r.m.rates = map[int64]*bucket{}
+	r.houseDrop(ada, "gem_moonstone", 1, 1000, map[string]any{"into": a})
+	if c := r.site.drops[2]; c.Into != "" {
+		t.Fatalf("a full pile is not named: %+v", c)
+	}
+	r.m.rates = map[int64]*bucket{}
+	r.houseDrop(ada, "gem_moonstone", 1, 1000, nil)
+	if c := r.site.drops[3]; c.Into != rest {
+		t.Fatalf("the nearest pile with room takes it: %+v", c)
+	}
+	// One drop holds no more than 9999.
+	r.m.rates = map[int64]*bucket{}
+	if f := r.houseDrop(ada, "gem_moonstone", dropPileMax+1, 2000, nil); f["status"] != "refused" || f["why"] != "count" {
+		t.Fatalf("10000 in one drop: %v", f)
+	}
 }
 
 func TestOnlyANearbyLikeStackOfTheSameDropperTakesADrop(t *testing.T) {
@@ -165,7 +196,7 @@ func TestTheOwnerMovesAFloorStackAndItStaysShared(t *testing.T) {
 	// Onto the like stack: it joins it and its own record goes.
 	r.do(ada, map[string]any{"t": "ground_move", "id": a, "x": 2000, "y": 600, "ox": 750, "into": b})
 	r.settle()
-	if c := r.site.moves[1]; c.Into != b || c.Max != 100 {
+	if c := r.site.moves[1]; c.Into != b || c.Max != dropPileMax {
 		t.Fatalf("the move names the like stack: %+v", c)
 	}
 	if r.m.stacks[a] != nil || r.m.stacks[b].N != 5 {
@@ -206,11 +237,11 @@ func TestAStackBeingMergedIntoIsTakenByNobody(t *testing.T) {
 	}
 }
 
-// Austin 2026-11-24: "Let them pile up on floors." A one-per-stack class (stackmax 1: an Emblem of Mab)
-// joins a like stack of the same dropper on a house or Tower floor with no cap; a stackmax over 1 keeps
-// its cap; a tool (wear) or a class whose copies carry words (a Teleportation Script, which the game
-// keeps one to a stack) never joins; a street never merges.
-func TestOneToAStackThingsPileUpOnAHouseFloor(t *testing.T) {
+// Austin 2026-11-24: "Let's remove the pile limits." Any class (an Emblem of Mab, stackmax 1; a Moonstone,
+// stackmax 3) joins a like stack of the same dropper on a house or Tower floor with no stack limit; a tool
+// (wear) or a class whose copies carry words (a Teleportation Script, which the game keeps one to a stack)
+// never joins; a street never merges.
+func TestPilesAtHomeHaveNoStackLimit(t *testing.T) {
 	r, ada, _ := houseRig(t)
 	first := r.houseDrop(ada, "emblem_mab", 1, 1000, nil)
 	a := first["stack"].(map[string]any)["id"].(string)
@@ -221,8 +252,8 @@ func TestOneToAStackThingsPileUpOnAHouseFloor(t *testing.T) {
 			t.Fatalf("emblem %d joins the pile: %v", i+2, got)
 		}
 	}
-	if c := r.site.drops[4]; c.Into != a || c.Max != 1 {
-		t.Fatalf("the site is told the stack and the class's stackmax: %+v", c)
+	if c := r.site.drops[4]; c.Into != a || c.Max != dropPileMax {
+		t.Fatalf("the site is told the stack and the pile: %+v", c)
 	}
 	if s := r.m.stacks[a]; s == nil || s.N != 5 || len(r.m.byStreet["HOUSE_7"]) != 1 {
 		t.Fatalf("one pile of 5: %+v", r.m.byStreet["HOUSE_7"])
@@ -235,13 +266,17 @@ func TestOneToAStackThingsPileUpOnAHouseFloor(t *testing.T) {
 	if s := r.m.stacks[a]; s.N != 8 {
 		t.Fatalf("a pile of 8: %+v", s)
 	}
-	// A stackmax over 1 keeps its cap (a Moonstone's 3).
+	// A stackmax over 1 piles past it too: 3 Moonstones and 1 more make one pile of 4.
 	r.m.rates = map[int64]*bucket{}
 	m := r.houseDrop(ada, "gem_moonstone", 3, 1500, nil)["stack"].(map[string]any)["id"].(string)
 	r.m.rates = map[int64]*bucket{}
-	r.houseDrop(ada, "gem_moonstone", 1, 1500, map[string]any{"into": m})
-	if c := r.site.drops[len(r.site.drops)-1]; c.Into != "" {
-		t.Fatalf("a full Moonstone stack is not named: %+v", c)
+	if got := r.houseDrop(ada, "gem_moonstone", 1, 1500, map[string]any{"into": m}); got["into"] != m || r.m.stacks[m].N != 4 {
+		t.Fatalf("a Moonstone pile of 4: %v %+v", got, r.m.stacks[m])
+	}
+	// A pile of 4 Moonstones set down whole at home is one drop.
+	r.m.rates = map[int64]*bucket{}
+	if got := r.houseDrop(ada, "gem_moonstone", 4, 3000, nil); got["status"] != "settled" || got["stack"].(map[string]any)["n"] != float64(4) {
+		t.Fatalf("four Moonstones at once: %v", got)
 	}
 	// A Teleportation Script (stackmax 1, words of its own: the game's keepsOwnStack) never joins, even with no words.
 	r.m.rates = map[int64]*bucket{}
@@ -268,6 +303,15 @@ func TestOneToAStackThingsPileUpOnAHouseFloor(t *testing.T) {
 	r2.settle()
 	if f := only(t, drain(cy), "ground_dropped"); f["status"] != "refused" || f["why"] != "count" {
 		t.Fatalf("two emblems in one street drop: %v", f)
+	}
+	// A public street never merges: two Moonstones dropped side by side lie as two stacks.
+	for i := 0; i < 2; i++ {
+		r2.m.rates = map[int64]*bucket{}
+		r2.do(cy, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "gem_moonstone", "n": 1}, "x": 1000 + float64(i), "y": -120})
+		r2.settle()
+	}
+	if len(r2.site.drops) != 2 || r2.site.drops[1].Into != "" || len(r2.m.byStreet[dropStreet]) != 2 {
+		t.Fatalf("a street never merges: %+v %v", r2.site.drops, r2.m.byStreet[dropStreet])
 	}
 }
 
