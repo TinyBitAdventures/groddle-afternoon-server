@@ -130,8 +130,8 @@ package main
 //	ground_dropped of a merged drop: "stack": null (the rest, if any, comes as ground_added), "item": what
 //	left the pack, "into": the stack it joined; the stack it joined comes again as ground_added, its new count.
 //
-// Ours: a stack takes only from its own dropper or the home's owner (each keeps its dropper for the return
-// after dropKeep: the owner's stacks there never go back, so nobody's goods go home to someone else); not
+// Ours: a stack takes only from its own dropper (Austin 2026-11-24: each keeps its dropper for the return
+// after dropKeep, so nobody's goods change hands or go home to someone else); not
 // on public or home streets (two players' stacks: Austin's call); stacks with wear or words never merge.
 //
 // Pick up how many (G560): a pickup may name a part of the stack (main.js
@@ -903,8 +903,8 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 // mergeTarget is the like stack a drop of it at (x, y) by `by` joins, or nil: only on a house or Tower
 // floor; `named` when the client set it on one (it must still be like it), else the nearest within
 // dropMergeRadius when `near`. A like stack: the same class, no wear or words on either, below the class's
-// stackmax, nobody taking from it or eating it, and dropped by `by` or by the home's owner (each stack
-// keeps its own dropper for the return after dropKeep, so nobody's goods go home to someone else).
+// stackmax, nobody taking from it or eating it, and dropped by `by` (Austin 2026-11-24: only one player's
+// own stacks join, so each keeps its dropper's return after dropKeep and nobody's goods change hands).
 func (m *drops) mergeTarget(street string, by int64, it tradeItem, x, y float64, named string, near bool) *groundStack {
 	if !dropIndoors(street) || it.R != nil || len(it.T) > 0 {
 		return nil
@@ -913,10 +913,9 @@ func (m *drops) mergeTarget(street string, by int64, it tradeItem, x, y float64,
 	if !ok || cls.Max < 2 {
 		return nil
 	}
-	owner := dropHomeOwner(street)
 	like := func(s *groundStack) bool {
 		return s != nil && s.Street == street && s.C == it.C && s.R == nil && len(s.T) == 0 && s.picking == 0 && !s.eating &&
-			s.N < cls.Max && (s.By == by || s.By == owner)
+			s.N < cls.Max && s.By == by
 	}
 	if named != "" {
 		if s := m.stacks[named]; like(s) {

@@ -82,9 +82,9 @@ func TestADropOnAHouseFloorJoinsTheLikeStackThereUpToItsStackmax(t *testing.T) {
 	_ = ada
 }
 
-func TestOnlyANearbyLikeStackOfTheSameDropperOrTheOwnerTakesADrop(t *testing.T) {
+func TestOnlyANearbyLikeStackOfTheSameDropperTakesADrop(t *testing.T) {
 	r, ada, bo := houseRig(t)
-	own := r.houseDrop(ada, "apple", 2, 1000, nil)["stack"].(map[string]any)["id"].(string)
+	r.houseDrop(ada, "apple", 2, 1000, nil)
 	// Far off (over 100 px): on its own.
 	r.houseDrop(ada, "apple", 1, 1200, nil)
 	if r.site.drops[1].Into != "" {
@@ -95,12 +95,13 @@ func TestOnlyANearbyLikeStackOfTheSameDropperOrTheOwnerTakesADrop(t *testing.T) 
 	if r.site.drops[2].Into != "" {
 		t.Fatalf("merge false: %+v", r.site.drops[2])
 	}
-	// The visitor's drop by the owner's stack joins it (the owner's stacks there never go home).
+	// The visitor's drop by the owner's stack lies on its own (Austin 2026-11-24: only one player's own
+	// stacks join, so nobody's goods change hands).
 	r.move(bo, 1000, 600)
 	drain(bo)
 	r.houseDrop(bo, "apple", 1, 1000, nil)
-	if c := r.site.drops[3]; c.Into != own {
-		t.Fatalf("a visitor's drop joins the owner's stack: %+v", c)
+	if c := r.site.drops[3]; c.Into != "" {
+		t.Fatalf("a visitor's drop never joins the owner's stack: %+v", c)
 	}
 	// The owner's drop by only the visitor's stack does not (it would go home with the visitor's).
 	r.houseDrop(bo, "cherry", 1, 1000, nil)
