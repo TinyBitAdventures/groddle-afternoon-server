@@ -63,8 +63,9 @@ package main
 //	Stack: {"id":"drop-…","c":"apple","n":3,"r":40?,"x":1200,"y":-120,"by":{"id":7,"name":"Ada"},"at":1730000000000}
 //
 // Ours: a class the ledger does not carry is not shared (the game drops it as
-// its own, as in solo); stacks do not merge (each drop is its own stack with
-// its own dropper); a street holds at most dropStreetMax shared stacks (a house or a Tower
+// its own, as in solo); on a street stacks do not merge (each drop is its own
+// stack with its own dropper; a house or Tower floor merges, "Merging" below); a
+// street holds at most dropStreetMax shared stacks (a house or a Tower
 // floor any number, as Glitch: G1224); a
 // stack nobody picks up for dropKeep goes back to the dropper's ledger and
 // pack (the source kept it forever, but nothing here should grow without
@@ -113,6 +114,26 @@ package main
 // house); a Tower floor's x is its own (the Tower does not move); the owner's own stacks there
 // stay past dropKeep, as on the home street.
 //
+// Merging (house and Tower floors only, Austin 2026-11-24 for #655: "the house floor is shared, as
+// Glitch"): takeable_drop put a stack in with apiPutItemIntoPosition, which merged it into a like stack
+// there below its stackmax (takeable.js 202-207; Eleven's rebuild, Location.addItem 475-503: within
+// 100 px, while count < stackmax, the rest its own stack), and the Decoration Mode move (main.js
+// doModifyItem 4852-4890) merged too, unless the client sent no_merge (HandOfDecorator.as shouldMerge
+// 1656-1670: only when set directly on a stack). So in a house or on a Tower floor a drop names the like
+// stack it lands on (the site joins as many as it takes in the drop's own transaction, LedgerDrop
+// joins/grow), or none to join the nearest within dropMergeRadius, or "merge": false; and the owner's
+// ground_move moves a stack along their floor, staying shared, onto a like stack too:
+//
+//	{"t":"ground_drop",…,"into":"drop-…"|"merge":false}
+//	{"t":"ground_move","id":"drop-…","x":900,"y":620,"ox":640,"into"?:"drop-…"}
+//	{"t":"ground_moved","id":"drop-…","status":"settled"|"refused","why":"…","text":"…","into"?:"drop-…"}
+//	ground_dropped of a merged drop: "stack": null (the rest, if any, comes as ground_added), "item": what
+//	left the pack, "into": the stack it joined; the stack it joined comes again as ground_added, its new count.
+//
+// Ours: a stack takes only from its own dropper or the home's owner (each keeps its dropper for the return
+// after dropKeep: the owner's stacks there never go back, so nobody's goods go home to someone else); not
+// on public or home streets (two players' stacks: Austin's call); stacks with wear or words never merge.
+//
 // Pick up how many (G560): a pickup may name a part of the stack (main.js
 // 3227-3240 splits the stack, takeable_pickup takes the split part and the
 // rest stays down for everyone). The site records each part once under
@@ -145,6 +166,7 @@ const (
 	ledgerRouteDrops    = "/groddle/v1/ledger/drops"
 	ledgerRouteDropEat  = "/groddle/v1/ledger/drop/eat"
 	ledgerRouteDropPut  = "/groddle/v1/ledger/drop/place"
+	ledgerRouteDropMove = "/groddle/v1/ledger/drop/move"
 
 	dropLockRadius = 100.0 // takeable.js:38 distanceFromPlayer(dropper) < 100, measured across (dropLockHeight)
 	dropLockHeight = 200.0 // ours: the game draws a stack 74 px above the feet (game.js dropPackItem), the source 20
@@ -152,6 +174,9 @@ const (
 	dropPlaceNear  = 300.0 // ours: a stack lands within this of the dropper (main.js:2944 required_range)
 	dropLift       = 20.0  // takeable.js:167 pc.y-20
 	dropStreetMax  = 60    // ours
+	// A drop on a house or Tower floor joins a like stack this near (Eleven Location.addItem 475-503:
+	// dist² < 10000, the rebuild of apiPutItemIntoPosition's default merge; takeable.js 202-207).
+	dropMergeRadius = 100.0
 	// G1224 (Austin 2026-11-24, "no limit on house and Tower floors, as Glitch": GSJS has no item
 	// limit for a location): a house (with its back yard) or a Tower floor holds any number.
 	// Measured at 300 stacks a house across 58 houses: 5.4 MB in all (309 B a stack), a 45 KB
@@ -180,7 +205,10 @@ const (
 	pickTextBusy      = "Someone is already picking that up."                                              // ours
 	pickTextOff       = "You can't pick that up right now."                                                // ours
 	pickTextStale     = "That stack changed. Have another look."                                           // ours: a count no longer there
+	moveTextPlace     = "Only the owner can move things here."                                             // main.js:4853 "You are not at home"
 )
+
+var moveOpRe = regexp.MustCompile(`^move-[0-9a-f]{16}$`)
 
 var dropOpRe = regexp.MustCompile(`^drop-[0-9a-f]{16}$`)
 
@@ -298,6 +326,20 @@ type dropCall struct {
 	X      int       `json:"x"`
 	Y      int       `json:"y"`
 	Item   tradeItem `json:"item"`
+	Into   string    `json:"into,omitempty"` // a like stack on a house or Tower floor it joins (below its stackmax)
+	Max    int       `json:"max,omitempty"`  // the class's stackmax, with Into
+}
+
+// moveCall is the owner's floor-to-floor move as the site is asked it (LedgerDrop::moveStack).
+type moveCall struct {
+	Op     string `json:"op"`
+	ID     int64  `json:"id"`
+	Drop   string `json:"drop"`
+	Street string `json:"street"`
+	X      int    `json:"x"`
+	Y      int    `json:"y"`
+	Into   string `json:"into,omitempty"`
+	Max    int    `json:"max,omitempty"`
 }
 
 // dropAnswer is the site's word on a drop or a take. Status "" means no answer came.
@@ -308,7 +350,12 @@ type dropAnswer struct {
 	Op     string     `json:"op,omitempty"`   // a take: its own op
 	By     int64      `json:"by,omitempty"`   // a take refused as gone: who has it
 	Item   *tradeItem `json:"item,omitempty"` // a take: what it gave
-	N      *int       `json:"n,omitempty"`    // a bite or a part taken (or refused as stale): how many are left
+	N      *int       `json:"n,omitempty"`    // a bite or a part taken (or refused as stale): how many are left; a merged drop or a move: what lies on its own
+	Into   string     `json:"into,omitempty"` // a drop or a move that joined a like stack: which
+	Joined int        `json:"joined,omitempty"`
+	In     *int       `json:"in,omitempty"` // that stack's count now
+	X      *int       `json:"x,omitempty"`  // a move: where the stack lies now
+	Y      *int       `json:"y,omitempty"`
 }
 
 // dropSite is the site's ledger (httpLedger). Calls block; the module makes them off the hub lock.
@@ -319,6 +366,7 @@ type dropSite interface {
 	dropsOnStreet(street string) ([]dropRow, error) // G1224: one place's stacks (the site's name for it)
 	dropEat(op string, from int) dropAnswer
 	dropPlace(c dropCall) dropAnswer // G605: a stack the street makes (a Plop, a Piglet), under the player whose act made it
+	dropMove(c moveCall) dropAnswer  // the owner's floor-to-floor move in their house or Tower
 }
 
 func (l *httpLedger) dropPost(route string, body []byte, out any) error {
@@ -383,6 +431,11 @@ func (l *httpLedger) dropEat(op string, from int) dropAnswer {
 func (l *httpLedger) dropPlace(c dropCall) dropAnswer {
 	body, _ := json.Marshal(c)
 	return l.dropAsk(ledgerRouteDropPut, body)
+}
+
+func (l *httpLedger) dropMove(c moveCall) dropAnswer {
+	body, _ := json.Marshal(c)
+	return l.dropAsk(ledgerRouteDropMove, body)
 }
 
 func (l *httpLedger) dropsOnStreet(street string) ([]dropRow, error) {
@@ -450,6 +503,7 @@ func newDrops(h *Hub) Module {
 func (m *drops) Register(r *Registry) {
 	r.Handle("ground_drop", m.dropFrame)
 	r.Handle("ground_pickup", m.pickupFrame)
+	r.Handle("ground_move", m.moveFrame)
 	r.OnJoin(m.sendState)
 	r.OnDisconnect(func(cl *Client) { delete(m.rates, cl.ID()) })
 	// How many shared stacks lie on a street (for other modules and tests).
@@ -720,11 +774,13 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		return
 	}
 	var msg struct {
-		Ref  string     `json:"ref"`
-		Item *tradeItem `json:"item"`
-		X    *float64   `json:"x"`
-		Y    *float64   `json:"y"`
-		Ox   *float64   `json:"ox"`
+		Ref   string     `json:"ref"`
+		Item  *tradeItem `json:"item"`
+		X     *float64   `json:"x"`
+		Y     *float64   `json:"y"`
+		Ox    *float64   `json:"ox"`
+		Into  string     `json:"into"`  // the like stack it was set on (Decoration Mode); none: the nearest within dropMergeRadius
+		Merge *bool      `json:"merge"` // false: on its own (HandOfDecorator.as shouldMerge 1656-1670 sent no_merge off a stack)
 	}
 	if json.Unmarshal(frame, &msg) != nil || msg.Item == nil {
 		m.refuseDrop(cl, "", "bad", dropTextBad)
@@ -779,15 +835,24 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		return
 	}
 	// Where it lands: where the client put it, near the dropper; else at their feet (takeable.js 166-172).
+	// The owner in their own house or Tower sets it anywhere there (Decoration Mode: takeable_drop takes
+	// msg.drop_x and drop_y as they come, takeable.js 166-172).
 	px, py := cl.Pos()
 	x, y := px, py-dropLift
-	if msg.X != nil && msg.Y != nil && !math.IsNaN(*msg.X) && !math.IsNaN(*msg.Y) && math.Hypot(*msg.X-px, *msg.Y-py) <= dropPlaceNear {
+	anywhere := dropIndoors(street) && dropHomeOwner(street) == cl.ID()
+	if msg.X != nil && msg.Y != nil && !math.IsNaN(*msg.X) && !math.IsNaN(*msg.Y) && math.Abs(*msg.X) <= 1e6 && math.Abs(*msg.Y) <= 1e6 && (anywhere || math.Hypot(*msg.X-px, *msg.Y-py) <= dropPlaceNear) {
 		x, y = *msg.X, *msg.Y
 	}
 	// On a home street the stack is kept from the house (the header, "A home street").
 	x -= dropOrigin(street, msg.Ox)
 	call := dropCall{Op: "drop-" + m.newID(), ID: cl.ID(), Street: dropSiteStreet(street), X: int(math.Round(x)), Y: int(math.Round(y)), Item: it}
 	from, name := cl.ID(), cl.Name()
+	// On a house or Tower floor it joins a like stack there (the header, "Merging").
+	into := m.mergeTarget(street, from, it, float64(call.X), float64(call.Y), msg.Into, msg.Merge == nil || *msg.Merge)
+	if into != nil {
+		call.Into, call.Max = into.ID, cls.Max
+		into.picking = from // nobody takes from it, or eats it, while the site weighs the merge
+	}
 	m.dropping[from] = call.Op
 	site := m.site
 	m.spawn(func() {
@@ -795,6 +860,13 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		m.h.After(0, func() {
 			if m.dropping[from] == call.Op {
 				delete(m.dropping, from)
+			}
+			if into != nil && into.picking == from {
+				into.picking = 0
+			}
+			if a.Status == "settled" && into != nil && a.Into == into.ID && a.Joined > 0 {
+				m.dropMerged(call, ref, a, into, name)
+				return
 			}
 			if a.Status == "" {
 				// No answer: the op is idempotent at the site; a settled one reaches the game on its next connect,
@@ -824,6 +896,193 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 					fn(s.Street, s.ID, s.X, s.Y)
 				}
 			}
+		})
+	})
+}
+
+// mergeTarget is the like stack a drop of it at (x, y) by `by` joins, or nil: only on a house or Tower
+// floor; `named` when the client set it on one (it must still be like it), else the nearest within
+// dropMergeRadius when `near`. A like stack: the same class, no wear or words on either, below the class's
+// stackmax, nobody taking from it or eating it, and dropped by `by` or by the home's owner (each stack
+// keeps its own dropper for the return after dropKeep, so nobody's goods go home to someone else).
+func (m *drops) mergeTarget(street string, by int64, it tradeItem, x, y float64, named string, near bool) *groundStack {
+	if !dropIndoors(street) || it.R != nil || len(it.T) > 0 {
+		return nil
+	}
+	cls, ok := m.table.Items[it.C]
+	if !ok || cls.Max < 2 {
+		return nil
+	}
+	owner := dropHomeOwner(street)
+	like := func(s *groundStack) bool {
+		return s != nil && s.Street == street && s.C == it.C && s.R == nil && len(s.T) == 0 && s.picking == 0 && !s.eating &&
+			s.N < cls.Max && (s.By == by || s.By == owner)
+	}
+	if named != "" {
+		if s := m.stacks[named]; like(s) {
+			return s
+		}
+		return nil
+	}
+	if !near {
+		return nil
+	}
+	var best *groundStack
+	bestD := 0.0
+	for _, s := range m.byStreet[street] {
+		if !like(s) {
+			continue
+		}
+		d := math.Hypot(s.X-x, s.Y-y)
+		if d >= dropMergeRadius {
+			continue
+		}
+		if best == nil || d < bestD || (d == bestD && s.ID < best.ID) {
+			best, bestD = s, d
+		}
+	}
+	return best
+}
+
+// dropMerged tells the dropper and the place a drop that joined the like stack `into` (all or part of it,
+// the rest lying on its own as its own stack). The dropper's message carries what left the pack ("item")
+// and no stack of its own, so a game from before merges applies its own count.
+func (m *drops) dropMerged(call dropCall, ref string, a dropAnswer, into *groundStack, name string) {
+	from := call.ID
+	rest := call.Item.N - a.Joined
+	if a.N != nil {
+		rest = *a.N
+	}
+	if m.stacks[into.ID] == into && a.In != nil && *a.In > 0 {
+		into.N = *a.In
+		m.h.BroadcastStreetLocked(into.Street, map[string]any{"t": "ground_added", "stack": into.view()}, 0)
+	}
+	var s *groundStack
+	if rest > 0 {
+		street := dropStreetFromSite(call.Street)
+		s = m.addRow(dropRow{ID: call.Op, By: from, Name: name, Street: street, X: float64(call.X), Y: float64(call.Y), C: call.Item.C, N: rest, R: call.Item.R, T: call.Item.T, At: m.h.Now().Unix()})
+	}
+	out := map[string]any{"t": "ground_dropped", "op": call.Op, "ref": ref, "status": "settled", "why": "", "text": "", "stack": nil,
+		"item": call.Item, "into": into.ID}
+	if c := m.h.ClientLocked(from); c != nil {
+		m.h.SendLocked(c, out)
+	}
+	log.Printf("drops: %d dropped %d %s onto %s (%d joined, %d on its own)", from, call.Item.N, call.Item.C, into.ID, a.Joined, max(0, rest))
+	if s != nil {
+		m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_added", "stack": s.view()}, 0)
+		m.sweepSoon()
+	}
+}
+
+func (m *drops) refuseMove(cl *Client, id, why, text string) {
+	m.h.SendLocked(cl, map[string]any{"t": "ground_moved", "id": id, "status": "refused", "why": why, "text": text})
+}
+
+// moveFrame is the owner's Decoration Mode move of a stack on their own house or Tower floor (main.js
+// doModifyItem 4852-4890: at home only, any stack in the house, merged into a like stack it is set on).
+// It stays on the floor for everyone, with its own dropper; the site moves it once per move op.
+func (m *drops) moveFrame(cl *Client, frame json.RawMessage) {
+	if !m.allow(cl) {
+		return
+	}
+	var msg struct {
+		ID   string   `json:"id"`
+		X    *float64 `json:"x"`
+		Y    *float64 `json:"y"`
+		Ox   *float64 `json:"ox"`
+		Into string   `json:"into"`
+	}
+	if json.Unmarshal(frame, &msg) != nil || !dropOpRe.MatchString(msg.ID) || msg.X == nil || msg.Y == nil || math.IsNaN(*msg.X) || math.IsNaN(*msg.Y) || math.Abs(*msg.X) > 1e6 || math.Abs(*msg.Y) > 1e6 {
+		m.refuseMove(cl, msg.ID, "bad", pickTextGone)
+		return
+	}
+	street := cl.Street()
+	if !dropIndoors(street) || dropHomeOwner(street) != cl.ID() {
+		m.refuseMove(cl, msg.ID, "place", moveTextPlace)
+		return
+	}
+	s := m.stacks[msg.ID]
+	if s == nil || s.Street != street {
+		m.refuseMove(cl, msg.ID, "gone", pickTextGone)
+		return
+	}
+	if m.site == nil {
+		m.refuseMove(cl, s.ID, "off", pickTextOff)
+		return
+	}
+	if s.picking != 0 || s.eating {
+		m.refuseMove(cl, s.ID, "busy", pickTextBusy)
+		return
+	}
+	x := math.Round(*msg.X - dropOrigin(street, msg.Ox))
+	y := math.Round(*msg.Y)
+	call := moveCall{Op: "move-" + m.newID(), ID: cl.ID(), Drop: s.ID, Street: dropSiteStreet(street), X: int(x), Y: int(y)}
+	var into *groundStack
+	if msg.Into != "" && msg.Into != s.ID {
+		into = m.mergeTarget(street, s.By, s.item(), x, y, msg.Into, false)
+		if into != nil {
+			call.Into, call.Max = into.ID, m.table.Items[s.C].Max
+			into.picking = cl.ID()
+		}
+	}
+	s.picking = cl.ID()
+	site := m.site
+	by := cl.ID()
+	m.spawn(func() {
+		a := site.dropMove(call)
+		m.h.After(0, func() {
+			if s.picking == by {
+				s.picking = 0
+			}
+			if into != nil && into.picking == by {
+				into.picking = 0
+			}
+			if a.Status == "" {
+				a.Status, a.Why, a.Text = "refused", "off", pickTextOff
+			}
+			out := map[string]any{"t": "ground_moved", "id": s.ID, "status": a.Status, "why": a.Why, "text": a.Text}
+			if a.Status != "settled" {
+				if a.Text == "" {
+					out["text"] = pickTextGone
+					if a.Why == "place" {
+						out["text"] = moveTextPlace
+					}
+				}
+				if c := m.h.ClientLocked(by); c != nil {
+					m.h.SendLocked(c, out)
+				}
+				return
+			}
+			if a.Into != "" && into != nil && a.Into == into.ID {
+				out["into"] = into.ID
+				if m.stacks[into.ID] == into && a.In != nil && *a.In > 0 {
+					into.N = *a.In
+					m.h.BroadcastStreetLocked(into.Street, map[string]any{"t": "ground_added", "stack": into.view()}, 0)
+				}
+			}
+			if c := m.h.ClientLocked(by); c != nil {
+				m.h.SendLocked(c, out)
+			}
+			if m.stacks[s.ID] != s {
+				return
+			}
+			left := s.N
+			if a.N != nil {
+				left = *a.N
+			}
+			if left <= 0 {
+				m.remove(s)
+				m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_gone", "id": s.ID, "by": nil, "why": "merged"}, 0)
+				return
+			}
+			s.N = left
+			if a.X != nil && a.Y != nil {
+				s.X, s.Y = float64(*a.X), float64(*a.Y)
+			} else {
+				s.X, s.Y = x, y
+			}
+			log.Printf("drops: %d moved %s on %s to %.0f,%.0f", by, s.ID, s.Street, s.X, s.Y)
+			m.h.BroadcastStreetLocked(s.Street, map[string]any{"t": "ground_added", "stack": s.view()}, 0)
 		})
 	})
 }

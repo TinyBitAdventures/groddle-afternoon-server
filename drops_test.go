@@ -27,6 +27,9 @@ type fakeDropSite struct {
 	count  map[string]int   // a stack's count at the site, once a part was asked of it
 	parts  map[string]int64 // <op>-t<from> -> who took that part
 	asked  []string         // G1224: places whose stacks were asked for
+	merges bool             // a drop or move naming a like stack joins it (LedgerDrop joins), counts in `held`
+	held   map[string]int   // with merges: each stack's count at the site
+	moves  []moveCall
 }
 
 func (f *fakeDropSite) drop(c dropCall) dropAnswer {
@@ -34,7 +37,49 @@ func (f *fakeDropSite) drop(c dropCall) dropAnswer {
 	if f.silent {
 		return dropAnswer{}
 	}
-	return f.answer
+	if !f.merges {
+		return f.answer
+	}
+	if f.held == nil {
+		f.held = map[string]int{}
+	}
+	joined := 0
+	if c.Into != "" {
+		joined = min(c.Item.N, c.Max-f.held[c.Into])
+	}
+	rest := c.Item.N - joined
+	f.held[c.Op] = rest
+	if joined <= 0 {
+		return dropAnswer{Status: "settled"}
+	}
+	f.held[c.Into] += joined
+	in := f.held[c.Into]
+	return dropAnswer{Status: "settled", Into: c.Into, Joined: joined, In: &in, N: &rest}
+}
+
+func (f *fakeDropSite) dropMove(c moveCall) dropAnswer {
+	f.moves = append(f.moves, c)
+	if f.silent {
+		return dropAnswer{}
+	}
+	if f.held == nil {
+		f.held = map[string]int{}
+	}
+	n := f.held[c.Drop]
+	joined := 0
+	if c.Into != "" {
+		joined = min(n, c.Max-f.held[c.Into])
+	}
+	left := n - joined
+	f.held[c.Drop] = left
+	x, y := c.X, c.Y
+	out := dropAnswer{Status: "settled", N: &left, X: &x, Y: &y}
+	if joined > 0 {
+		f.held[c.Into] += joined
+		in := f.held[c.Into]
+		out.Into, out.Joined, out.In = c.Into, joined, &in
+	}
+	return out
 }
 
 func (f *fakeDropSite) dropTake(op string, id int64, why string, n, from int) dropAnswer {
