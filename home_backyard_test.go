@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -163,9 +164,20 @@ func TestAGuestDigsTheBackYardsDirtPile(t *testing.T) {
 	if got := drain(dan); len(got) != 0 {
 		t.Fatalf("someone on the street hears nothing of the back yard: %v", got)
 	}
-	// The key-holder too, the owner offline.
+	// The owner logs out: houses_logout 6-31 sends everyone without a key to the entrance outside
+	// (pols_get_entrance_outside), and house_auth goes with her; Bo is out and acts there no more.
 	r.hub.Disconnect(ada)
-	drain(bo)
+	if f := drain(bo); !strings.Contains(buddyKinds(f), "home_out") || bo.Street() != "" {
+		t.Fatalf("Bo is walked out: %v", f)
+	}
+	r.do(bo, map[string]any{"t": "home_yard", "req": 9, "owner": 7, "kind": "node", "id": "b:node:dirt_pile:0", "verb": "dig"})
+	if f := only(t, drain(bo), "home_yard_done"); f["why"] != "away" {
+		t.Fatalf("out of the house, no back yard: %v", f)
+	}
+	if cy.Street() != house(7) {
+		t.Fatalf("the key-holder stays: %q", cy.Street())
+	}
+	// The key-holder acts on, the owner offline.
 	drain(cy)
 	r.do(cy, map[string]any{"t": "home_yard", "req": 2, "owner": 7, "kind": "rock", "id": "b:rock:0", "verb": "mine"})
 	r.settle()
