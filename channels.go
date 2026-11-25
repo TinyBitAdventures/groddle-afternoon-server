@@ -33,6 +33,7 @@ package main
 //	{"t":"channel_note","channel":"group:12","text":"Ada has joined"}                              the source's lines from "God"
 //	{"t":"channel_note","channel":"global","text":"…","at":…}                                      a server notice (notice: the featured street project, projects_featured.go);
 //	        kept in the chat's history as {"note":true,"text":"…","at":…} (id 0, no name)
+//	{"t":"group_renamed","group":12,"name":"Zebra Club"}                                           the site renamed a group of yours (group_rename.go, with a note in its chat)
 //	{"t":"error","code":"channels","message":"…"}
 //
 // The watch token is base64url(JSON) "." base64url(HMAC-SHA256(secret, the
