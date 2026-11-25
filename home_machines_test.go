@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -404,5 +405,75 @@ func TestMachinesStandInTheCommunityMachineRooms(t *testing.T) {
 	}
 	if len(r.site.calls) != 3 {
 		t.Fatalf("the refusal never reaches the site: %d", len(r.site.calls))
+	}
+}
+
+// G1303 (#669): a place carries where the player stands, as this server last saw them move, read
+// against the game's x 0 and walk line for the place (Glitch's canDrop measured the 200 px from the
+// player, machine_stand.js 775-783 and players/player.js 1152-1186). The game's own word for where
+// it stands is never read.
+func TestAPlaceCarriesWhereThePlayerStands(t *testing.T) {
+	r := newMachineRig(t)
+	ada, _, _ := r.onHerStreet()
+	r.do(ada, map[string]any{"t": "move", "x": 1000.4, "y": 450, "dir": 1, "anim": "stand"})
+	r.do(ada, map[string]any{"t": "home_machine", "req": 1, "owner": 7, "verb": "place", "class": "fuelmaker", "rx": 120, "ox": 640, "oy": 570,
+		"from": map[string]any{"rx": 9999, "dy": 9999}})
+	r.settle()
+	if len(r.site.calls) != 1 {
+		t.Fatalf("one call: %v", r.site.calls)
+	}
+	c := r.site.calls[0]
+	if c.From == nil || c.From.Rx != 360 || c.From.Dy != -120 || c.Rx == nil || *c.Rx != 120 {
+		t.Fatalf("from is the server's position less the game's origin, the machine where it was let go: %+v %+v", c, c.From)
+	}
+	body, _ := json.Marshal(c)
+	if !strings.Contains(string(body), `"rx":120,"from":{"rx":360,"dy":-120}`) {
+		t.Fatalf("the site reads it as from {rx, dy}: %s", body)
+	}
+	drain(ada)
+
+	// Without the game's origin (an older game) no from goes: the site measures from where it goes.
+	r.do(ada, map[string]any{"t": "home_machine", "req": 2, "owner": 7, "verb": "place", "class": "fuelmaker", "rx": 120, "ox": 640})
+	r.settle()
+	if c := r.site.calls[1]; c.From != nil {
+		t.Fatalf("half an origin is none: %+v", c.From)
+	}
+	drain(ada)
+	r.do(ada, map[string]any{"t": "home_machine", "req": 3, "owner": 7, "verb": "place", "class": "fuelmaker", "rx": 120, "ox": 2e6, "oy": 570})
+	r.settle()
+	if c := r.site.calls[2]; c.From != nil {
+		t.Fatalf("an origin out of reach is none: %+v", c.From)
+	}
+	drain(ada)
+
+	// Only a place carries it.
+	r.do(ada, map[string]any{"t": "home_machine", "req": 4, "owner": 7, "verb": "refuel", "id": "hm-00000000000000aa", "ox": 640, "oy": 570})
+	r.settle()
+	if c := r.site.calls[3]; c.From != nil || c.Rx != nil {
+		t.Fatalf("a refuel carries no place: %+v", c)
+	}
+}
+
+func TestMachineFromPos(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	nan := math.NaN()
+	cases := []struct {
+		px, py float64
+		ox, oy *float64
+		want   *machineFrom
+	}{
+		{700, 570, f(700), f(570), &machineFrom{0, 0}},
+		{940.5, 420, f(700), f(570), &machineFrom{241, -150}},
+		{0, 0, nil, f(0), nil},
+		{0, 0, f(0), nil, nil},
+		{0, 0, f(nan), f(0), nil},
+		{0, 0, f(0), f(math.Inf(1)), nil},
+		{1e6, 1e6, f(-1e6), f(-1e6), &machineFrom{2000000, 2000000}},
+	}
+	for i, c := range cases {
+		got := machineFromPos(c.px, c.py, c.ox, c.oy)
+		if (got == nil) != (c.want == nil) || (got != nil && *got != *c.want) {
+			t.Fatalf("case %d: %+v, want %+v", i, got, c.want)
+		}
 	}
 }

@@ -38,7 +38,7 @@ package main
 //
 // Client to server:
 //
-//	{"t":"home_machine","req":3,"owner":7,"verb":"place","class":"fuelmaker","rx":120,"fuel":50}
+//	{"t":"home_machine","req":3,"owner":7,"verb":"place","class":"fuelmaker","rx":120,"fuel":50,"ox":640,"oy":570}
 //	{"t":"home_machine","req":4,"owner":7,"verb":"use","id":"hm-…","key":"fuel_cell","qty":2}
 //	{"t":"home_machine","req":5,"owner":7,"verb":"refuel|collect|take|music|check","id":"hm-…","all":true,"force":true,"on":false}
 //
@@ -46,6 +46,17 @@ package main
 //
 //	{"t":"home_machine_done","req":3,"owner":7,"verb":"use","op":"hm-…","status":"settled|refused","why":"…","text":"…","machine":{…},"gone":"hm-…","receipt":{…},"taken":{…},"now":ms}
 //	{"t":"home_machine_changed","owner":7,"verb":"use","by":{"id":9,"name":"Bo"},"machine":{…},"gone":"hm-…","paid":[…],"now":ms}
+//
+// Where the one setting it down stands (G1303, report #669; Austin 2026-11-25: machines drop at the
+// pointer in Decoration Mode, as Glitch, the 200 px rule kept). Glitch's canDrop measured the 200 px
+// from the player (machine_stand.js 775-783 pc.findCloseStack; players/player.js 1152-1186 takes the
+// distance from this.x / this.y), while a stack dragged in Decoration Mode landed at the pointer
+// (takeable.js 164-170 drop_x / drop_y). So a place carries "from" to the site: where the player
+// stands, in the place's x and above or below its walk line. It is this server's own position for
+// the player (the last move), never the game's word for it; the game sends only where its place's
+// x 0 and walk line are as it draws them ("ox", "oy": the house's x moves with the home's yards, as
+// drops.go's "ox"; a room's left end; a floor's line), and the player's position is read against
+// them. Without them no "from" goes, and the site measures from where the machine goes.
 //
 // Ours: an act the site has not answered in time is refused to the actor;
 // the site settles each op once, so asking again never counts twice.
@@ -58,6 +69,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -102,20 +114,37 @@ type machineAnswer struct {
 }
 
 type machineAct struct {
-	Op    string `json:"op"`
-	Owner int64  `json:"owner"`
-	Actor int64  `json:"actor"`
-	Place string `json:"place"`
-	Verb  string `json:"verb"`
-	ID    string `json:"id,omitempty"`
-	Class string `json:"class,omitempty"`
-	Rx    *int   `json:"rx,omitempty"`
-	Fuel  *int   `json:"fuel,omitempty"`
-	Key   string `json:"key,omitempty"`
-	Qty   int    `json:"qty,omitempty"`
-	All   bool   `json:"all,omitempty"`
-	Force bool   `json:"force,omitempty"`
-	On    *bool  `json:"on,omitempty"`
+	Op    string       `json:"op"`
+	Owner int64        `json:"owner"`
+	Actor int64        `json:"actor"`
+	Place string       `json:"place"`
+	Verb  string       `json:"verb"`
+	ID    string       `json:"id,omitempty"`
+	Class string       `json:"class,omitempty"`
+	Rx    *int         `json:"rx,omitempty"`
+	From  *machineFrom `json:"from,omitempty"`
+	Fuel  *int         `json:"fuel,omitempty"`
+	Key   string       `json:"key,omitempty"`
+	Qty   int          `json:"qty,omitempty"`
+	All   bool         `json:"all,omitempty"`
+	Force bool         `json:"force,omitempty"`
+	On    *bool        `json:"on,omitempty"`
+}
+
+// machineFrom is where the player stands for a place: x in the place's x, dy from its walk line.
+type machineFrom struct {
+	Rx int `json:"rx"`
+	Dy int `json:"dy"`
+}
+
+// machineFromPos is the player's position (this server's) read against the game's origin for the
+// place, or nil when the game sent none fit to read.
+func machineFromPos(px, py float64, ox, oy *float64) *machineFrom {
+	fit := func(v *float64) bool { return v != nil && !math.IsNaN(*v) && !math.IsInf(*v, 0) && math.Abs(*v) <= 1e6 }
+	if !fit(ox) || !fit(oy) {
+		return nil
+	}
+	return &machineFrom{Rx: int(math.Round(px - *ox)), Dy: int(math.Round(py - *oy))}
 }
 
 // machineSite is the site's machines (httpLedger). Calls block; the module makes them off the hub lock.
@@ -211,18 +240,20 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 		return
 	}
 	var msg struct {
-		Req   any    `json:"req"`
-		Owner int64  `json:"owner"`
-		Verb  string `json:"verb"`
-		ID    string `json:"id"`
-		Class string `json:"class"`
-		Rx    *int   `json:"rx"`
-		Fuel  *int   `json:"fuel"`
-		Key   string `json:"key"`
-		Qty   int    `json:"qty"`
-		All   bool   `json:"all"`
-		Force bool   `json:"force"`
-		On    *bool  `json:"on"`
+		Req   any      `json:"req"`
+		Owner int64    `json:"owner"`
+		Verb  string   `json:"verb"`
+		ID    string   `json:"id"`
+		Class string   `json:"class"`
+		Rx    *int     `json:"rx"`
+		Ox    *float64 `json:"ox"`
+		Oy    *float64 `json:"oy"`
+		Fuel  *int     `json:"fuel"`
+		Key   string   `json:"key"`
+		Qty   int      `json:"qty"`
+		All   bool     `json:"all"`
+		Force bool     `json:"force"`
+		On    *bool    `json:"on"`
 	}
 	_ = json.Unmarshal(frame, &msg)
 	owner, actor := msg.Owner, cl.ID()
@@ -262,7 +293,10 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 	}
 	a := machineAct{Op: "hm-" + m.newID(), Owner: owner, Actor: actor, Place: place, Verb: msg.Verb, ID: msg.ID, Class: msg.Class, Rx: msg.Rx, Fuel: msg.Fuel, Key: msg.Key, Qty: msg.Qty, All: msg.All, Force: msg.Force, On: msg.On}
 	// Each verb carries only what it needs.
-	if msg.Verb != "place" {
+	if msg.Verb == "place" {
+		px, py := cl.Pos()
+		a.From = machineFromPos(px, py, msg.Ox, msg.Oy)
+	} else {
 		a.Class, a.Rx, a.Fuel = "", nil, nil
 	}
 	if msg.Verb != "use" {
