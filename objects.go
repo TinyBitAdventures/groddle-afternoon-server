@@ -328,6 +328,7 @@ type objSpot struct {
 	fly      bool    // a flying Butterfly (objects_creatures.go)
 	index    int     // pig: its spawn index (the seed its stops are rolled from, pigpath.go)
 	rng      float64 // pig: how far it walks each way of its spot (animalPatrolRange)
+	worldW   float64 // batterfly: its street's width, the span it flies over (flierpath.go)
 }
 
 type objWorld struct {
@@ -366,6 +367,7 @@ type objRow struct {
 	Drag     [][]any           `json:"dragons"`
 	Trunk    []float64         `json:"trunks"`
 	Sad      bool              `json:"sad"`
+	W        float64           `json:"w"` // the street's width, with Batterflies (their flight, flierpath.go)
 	Upgrades map[string]objRow `json:"upgrades"`
 }
 
@@ -506,6 +508,9 @@ func (w *objWorld) parseRow(tsid string, row objRow) (map[string]*objSpot, error
 				class = "npc_fire_dragon"
 			}
 			spots[id] = &objSpot{id: id, kind: kind, class: class, x: x, y: y, fly: fly, index: int(i)}
+			if kind == "batterfly" {
+				spots[id].worldW = row.W
+			}
 		}
 	}
 	return spots, nil
@@ -620,7 +625,9 @@ type liveObj struct {
 	incStop func() bool
 	costume string // chicken: its Pot Luck Day costume, everyone's (objects_costumes.go)
 	food    int
-	guano   int // batterfly: the hourly Guano lying under it (objects_guano.go)
+	guano   int // batterfly: its hourly Guano lying on the street (objects_guano.go)
+
+	guanoPiles []guanoPile // batterfly: where that Guano lies, x and count (objects_guano.go dropGuano)
 
 	// rock: who is mining it now, in the order they started, and each miner's helpers with how
 	// many times each helped (mining.js addMiner 68-91, removeMiner 93-122). A Dirt Pile keeps its
@@ -1101,6 +1108,7 @@ type objAct struct {
 	C     string   `json:"c"`    // feed: the food's class (G335 slice 5)
 	N     int      `json:"n"`    // feed: how many of it, one stack at most
 	At    int64    `json:"at"`   // wait: the path's clock (server ms minus lag) where the player's screen stopped the animal
+	X     *float64 `json:"x"`    // pickup on a Batterfly: the x of the Guano pile (objects_guano.go)
 	Name  string   `json:"name"` // name: what the player typed for a street animal (objects_pigs.go nameAnimal)
 	K     *int     `json:"k"`    // youth: the bottle poured, its place among the player's bottles (objects_uses.go copyOf)
 }
@@ -1209,8 +1217,14 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 		reachX, reachY = creatureReach(spot)
 		farText = objTextFarWalker
 		if spot.kind == "batterfly" && m.Verb == "pickup" {
-			// The Guano pile lies at the Batterfly's spot (objects_guano.go), wherever it flies.
-			reachX, reachY = creatureReachX, creatureReachY
+			// Measured from the Guano pile asked for, where it fell (objects_guano.go dropGuano); the
+			// floor it lies on is the page's, so up and down as a flyer's.
+			reachX, reachY = creatureReachX, math.Inf(1)
+			if ob := o.streets[street][spot.id]; ob != nil {
+				if i := guanoPileNear(ob, guanoPickX(cl, m)); i >= 0 {
+					fromX = ob.guanoPiles[i].x
+				}
+			}
 		}
 	}
 	if x, y := cl.Pos(); !anyDistance(spot.kind, m.Verb) && (math.Abs(x-fromX) > reachX || math.Abs(y-spot.y) > reachY) {

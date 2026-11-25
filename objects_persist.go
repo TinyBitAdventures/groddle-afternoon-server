@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"flag"
 	"log"
+	"math"
 	"sort"
 	"time"
 )
@@ -85,8 +86,9 @@ type objRec struct {
 	// G982: a Chicken's Pot Luck Day costume (objects_costumes.go).
 	Costume string `json:"cos,omitempty"`
 	Food    int    `json:"food,omitempty"`
-	// The hourly Guano under a Batterfly (objects_guano.go).
-	Guano int `json:"guano,omitempty"`
+	// The hourly Guano a Batterfly dropped (objects_guano.go), and where: [x, count, path clock].
+	Guano int          `json:"guano,omitempty"`
+	Piles [][3]float64 `json:"piles,omitempty"`
 	// A street Piggy on its way to food (objects_pigs.go pigTrip), on its path's clock.
 	Trip *pigTrip `json:"trip,omitempty"`
 	// A street animal's name, who gave it and when (objects_pigs.go nameAnimal).
@@ -132,7 +134,7 @@ func (o *objects) record(ob *liveObj) *objRec {
 		Maturity: ob.maturity, Day: ob.day, WoodCount: ob.woodCount, PoisonEnd: msOf(ob.poisonEnd), PoisonBy: ob.poisonBy,
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
 		TickAt: msOf(ob.tickAt), Due: msOf(ob.due), UsesDay: ob.usesDay, Lag: ob.lag, HoldEnd: msOf(ob.holdEnd),
-		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Costume: ob.costume, Food: ob.food, Guano: ob.guano,
+		IncEgg: ob.incEgg, IncBy: ob.incBy, IncEnd: msOf(ob.incEnd), Costume: ob.costume, Food: ob.food, Guano: ob.guano, Piles: pilesRecord(ob),
 		Name: ob.userName, Namer: ob.namer, NamedAt: msOf(ob.namedAt), GoneDay: ob.goneDay, GoneWhy: ob.goneWhy,
 		Crops: ob.crops, Plops: ob.plops}
 	if ob.trip != nil {
@@ -244,6 +246,7 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 		ob.food = max(0, r.Food)
 		if spot.kind == "batterfly" {
 			ob.guano = clamp(r.Guano, 0, guanoCap)
+			ob.guanoPiles = pilesFromRecord(r.Piles, ob.guano, spot.x)
 		}
 		if name := sanitizeAnimalName(r.Name); animalNameOK(name) && nameSingle[spot.kind] != "" {
 			ob.userName, ob.namer, ob.namedAt = name, r.Namer, timeOf(r.NamedAt)
@@ -537,6 +540,37 @@ func copyClocks(m map[int64]int64) map[int64]int64 {
 	for id, at := range m {
 		if id != 0 && at > 0 {
 			out[id] = at
+		}
+	}
+	return out
+}
+
+// pilesRecord is a Batterfly's Guano piles for the state file (nil with none).
+func pilesRecord(ob *liveObj) [][3]float64 {
+	if len(ob.guanoPiles) == 0 {
+		return nil
+	}
+	return guanoPilesState(ob)
+}
+
+// pilesFromRecord reads a Batterfly's piles back, each whole and in bounds, so they hold its total
+// Guano (guano): a state file from before the piles (one pile under its spot) lays the total at the
+// spot, and piles that do not add up to it are laid there the same way.
+func pilesFromRecord(rows [][3]float64, guano int, spotX float64) []guanoPile {
+	var out []guanoPile
+	sum := 0
+	for _, r := range rows {
+		n := int(r[1])
+		if n <= 0 || math.IsNaN(r[0]) || math.IsInf(r[0], 0) || sum+n > guano {
+			continue
+		}
+		out = append(out, guanoPile{x: r[0], n: n, c: max(0, int64(r[2]))})
+		sum += n
+	}
+	if sum != guano {
+		out = nil
+		if guano > 0 {
+			out = []guanoPile{{x: spotX, n: guano}}
 		}
 	}
 	return out

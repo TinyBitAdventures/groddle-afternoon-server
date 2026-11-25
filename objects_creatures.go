@@ -399,7 +399,8 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 	case "batterfly":
 		m["food"] = ob.food
 		if ob.guano > 0 {
-			m["guano"] = ob.guano // the pile under it (objects_guano.go)
+			m["guano"] = ob.guano            // its Guano on the street (objects_guano.go)
+			m["piles"] = guanoPilesState(ob) // where: [x, n, path clock]
 		}
 	}
 	if ob.userName != "" {
@@ -420,8 +421,8 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 //
 // A Batterfly the same (lane flyk, 2026-11-24): every page now flies it at random over the whole
 // street in the 400 px over the floor (npc_batterfly.js flyAround 1039-1052, the game's
-// js/street-creatures.js flierAt), so a player under it may be a street's width from its spot. Its
-// Guano pile stays at the spot (objects_guano.go), so a pickup keeps the spot's reach (handleAct).
+// js/street-creatures.js flierAt), so a player under it may be a street's width from its spot. A
+// pickup is measured from the Guano pile asked for, where it fell (objects_guano.go, handleAct).
 func creatureReach(spot *objSpot) (float64, float64) {
 	if spot.fly || spot.kind == "batterfly" {
 		return math.Inf(1), math.Inf(1)

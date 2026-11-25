@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,30 @@ func guanoOf(msg map[string]any) (map[string]int, int) {
 		}
 	}
 	return piles, total
+}
+
+// pilesOf is one Batterfly's piles in a frame: [x, count, path clock].
+func pilesOf(msg map[string]any, id string) [][3]float64 {
+	var out [][3]float64
+	o := objOf(msg, id)
+	if o == nil {
+		return nil
+	}
+	list, _ := o["piles"].([]any)
+	for _, raw := range list {
+		row, _ := raw.([]any)
+		if len(row) == 3 {
+			out = append(out, [3]float64{num(row[0]), num(row[1]), num(row[2])})
+		}
+	}
+	return out
+}
+
+// pickAt puts cl at a pile at x (joining there again, as a walk that far is refused) and picks it up.
+func pickAt(r *objRig, cl *Client, req int, id string, x, y float64) {
+	r.send(cl, map[string]any{"t": "join", "street": cl.Street(), "x": x, "y": y})
+	r.drain(cl)
+	r.act(cl, req, id, "pickup", map[string]any{"x": x})
 }
 
 func guanoSync(r *objRig, cl *Client) map[string]any {
@@ -91,28 +116,39 @@ func TestGuanoGrowsByTheClockOnAnEmptyStreetAndEveryoneSeesTheSamePile(t *testin
 	if p, n := guanoOf(guanoSync(r, b)); n != 6 || p["batterfly:0"] != 3 {
 		t.Fatalf("Bo sees %v", p)
 	}
+	// Each Guano fell where its Batterfly was flying (lane flyk): the piles add up to its Guano.
+	p0, p1 := pilesOf(snap, "batterfly:0"), pilesOf(snap, "batterfly:1")
+	for id, ps := range map[string][][3]float64{"batterfly:0": p0, "batterfly:1": p1} {
+		sum := 0
+		for _, p := range ps {
+			sum += int(p[1])
+		}
+		if sum != 3 || len(ps) == 0 {
+			t.Fatalf("%s's piles %v", id, ps)
+		}
+	}
 	r.drain(a)
-	// Ada picks up the pile under the first Batterfly: hers, credited, and gone for Bo too.
-	r.act(a, 1, "batterfly:0", "pickup", nil)
+	// Ada picks up the first pile of the first Batterfly: hers, credited, and gone for Bo too.
+	pickAt(r, a, 1, "batterfly:0", p0[0][0], spot.y)
 	ok := r.only(a, "obj_ok")
-	if num(ok["take"]) != 3 || num(ok["before"].(map[string]any)["guano"]) != 3 || objOf(ok, "batterfly:0")["guano"] != nil || strings.Join(*got, ",") != "1:take:guanox3" {
+	took0 := int(p0[0][1])
+	left0 := 3 - took0
+	if num(ok["take"]) != float64(took0) || num(ok["before"].(map[string]any)["guano"]) != 3 || int(num(objOf(ok, "batterfly:0")["guano"])) != left0 || strings.Join(*got, ",") != fmt.Sprintf("1:take:guanox%d", took0) {
 		t.Fatalf("Ada's pickup answered %v, credited %v", ok, *got)
 	}
 	heard := r.only(b, "objs")
-	if o := objOf(heard, "batterfly:0"); o == nil || o["guano"] != nil {
+	if o := objOf(heard, "batterfly:0"); o == nil || int(num(o["guano"])) != left0 || len(pilesOf(heard, "batterfly:0")) != len(p0)-1 {
 		t.Fatalf("Bo heard %v", heard)
 	}
-	// Bo was a moment late for that pile, and takes the other.
-	r.act(b, 1, "batterfly:0", "pickup", nil)
+	// Bo was a moment late for that pile.
+	pickAt(r, b, 1, "batterfly:0", p0[0][0], spot.y)
 	if no := r.only(b, "obj_no"); no["code"] != "gone" || no["message"] != guanoGone {
 		t.Fatalf("Bo's late pickup answered %v", no)
 	}
-	// Bo walks to the second Batterfly (wherever the planner lays it) for its pile.
-	second := sharedWorld.streets[street]["batterfly:1"]
-	r.send(b, map[string]any{"t": "move", "x": second.x, "y": second.y})
-	r.drain(b)
-	r.act(b, 2, "batterfly:1", "pickup", nil)
-	if ok := r.only(b, "obj_ok"); num(ok["take"]) != 3 || strings.Join(*got, ",") != "1:take:guanox3,2:take:guanox3" {
+	// Bo walks to a pile of the second Batterfly, where it fell.
+	pickAt(r, b, 2, "batterfly:1", p1[0][0], spot.y)
+	took1 := int(p1[0][1])
+	if ok := r.only(b, "obj_ok"); num(ok["take"]) != float64(took1) || strings.Join(*got, ",") != fmt.Sprintf("1:take:guanox%d,2:take:guanox%d", took0, took1) {
 		t.Fatalf("Bo's pickup answered %v, credited %v", ok, *got)
 	}
 	// With both standing there the next hour's two Guano arrive in front of them, each at its minute.
@@ -129,7 +165,7 @@ func TestGuanoGrowsByTheClockOnAnEmptyStreetAndEveryoneSeesTheSamePile(t *testin
 				}
 			}
 		}
-		if last["batterfly:0"] != 1 || last["batterfly:1"] != 1 {
+		if last["batterfly:0"] != left0+1 || last["batterfly:1"] != 3-took1+1 {
 			t.Fatalf("after an hour a player standing there saw %v", last)
 		}
 	}
@@ -148,8 +184,10 @@ func TestGuanoGrowsByTheClockOnAnEmptyStreetAndEveryoneSeesTheSamePile(t *testin
 			t.Fatalf("picking up a rock answered %v", no)
 		}
 	}
-	far := r.player(4, "Di", street, spot.x+pigReachX+500, spot.y)
-	r.act(far, 1, "batterfly:0", "pickup", nil)
+	// A pile is reached from where it lies, not from the Batterfly's spot.
+	pile := pilesOf(guanoSync(r, a), "batterfly:0")[0]
+	far := r.player(4, "Di", street, pile[0]+creatureReachX+500, spot.y)
+	r.act(far, 1, "batterfly:0", "pickup", map[string]any{"x": pile[0]})
 	if no := r.only(far, "obj_no"); no["code"] != "far" {
 		t.Fatalf("a far pickup answered %v", no)
 	}
@@ -182,9 +220,9 @@ func TestAStreetHoldsTenGuanoAndATickWhileFullIsLost(t *testing.T) {
 	}
 	// Ada takes one pile. The hours the street stood full made nothing: the next Guano comes at a
 	// Batterfly's next tick, not at once.
-	piles, _ := guanoOf(guanoSync(r, a))
-	took := piles["batterfly:0"]
-	r.act(a, 1, "batterfly:0", "pickup", nil)
+	first := pilesOf(guanoSync(r, a), "batterfly:0")[0]
+	took := int(first[1])
+	pickAt(r, a, 1, "batterfly:0", first[0], spot.y)
 	if ok := r.only(a, "obj_ok"); int(num(ok["take"])) != took || took < 1 {
 		t.Fatalf("Ada's pickup answered %v", ok)
 	}
@@ -254,15 +292,23 @@ func TestAStateFileFromBeforeStartsEveryPileEmptyAndARestartKeepsThem(t *testing
 		t.Fatalf("the old file reads as %v", snap)
 	}
 	r.advance(2 * time.Hour)
-	if _, n := guanoOf(guanoSync(r, a)); n != 4 {
+	two := guanoSync(r, a)
+	if _, n := guanoOf(two); n != 4 {
 		t.Fatalf("two hours made %d", n)
 	}
-	r.act(a, 1, "batterfly:0", "pickup", nil)
-	if ok := r.only(a, "obj_ok"); num(ok["take"]) != 2 {
-		t.Fatalf("the pickup answered %v", ok)
+	// Ada picks up all of the first Batterfly's Guano, pile by pile where it fell.
+	taken := 0
+	for i, p := range pilesOf(two, "batterfly:0") {
+		pickAt(r, a, i+1, "batterfly:0", p[0], spot.y)
+		ok := r.only(a, "obj_ok")
+		taken += int(num(ok["take"]))
 	}
-	// The server restarts and is down three hours: the pile left is kept, the clocks' start too,
-	// and the hours it was down count.
+	if taken != 2 {
+		t.Fatalf("the pickups took %d", taken)
+	}
+	// The server restarts and is down three hours: the piles left are kept where they lie, the
+	// clocks' start too, and the hours it was down count.
+	kept := pilesOf(guanoSync(r, a), "batterfly:1")
 	stopped := r.now
 	r = r.restart(path, stopped.Add(3*time.Hour))
 	got := r.credited()
@@ -277,6 +323,18 @@ func TestAStateFileFromBeforeStartsEveryPileEmptyAndARestartKeepsThem(t *testing
 	}
 	if len(*got) != 0 {
 		t.Fatalf("a restart credited %v", *got)
+	}
+	after := pilesOf(snap, "batterfly:1")
+	for _, k := range kept {
+		ok := false
+		for _, p := range after {
+			if p[0] == k[0] && p[1] >= k[1] && p[2] == k[2] {
+				ok = true
+			}
+		}
+		if !ok {
+			t.Fatalf("the pile %v was not kept: %v", k, after)
+		}
 	}
 	// A file that says more than the street may hold is held to the cap per pile.
 	bad := fmt.Sprintf(`{"v":1,"guanoStart":%d,"guanoAt":{%q:%d,"NOSUCHSTREET":5},"streets":{%q:{"batterfly:0":{"k":"batterfly","guano":999}}}}`,
@@ -307,5 +365,73 @@ func TestTheGuanoClockSkipIsForQAOnly(t *testing.T) {
 	}
 	if _, n := guanoOf(guanoSync(r, a)); n != 4 {
 		t.Fatalf("after the skip the street holds %d", n)
+	}
+}
+
+// Lane flyk (Austin 2026-11-24): each hourly Guano falls where its Batterfly is flying when it comes
+// due, as the source's onInterval (npc_batterfly.js 1064-1072: createItemStackFromSource('guano',
+// 1, this.x, this.y, this)), not under its spot: the server takes the x from the Batterfly's shared
+// flight (flierpath.go, the game's flierAt) at the tick's moment, so it lies under the Batterfly
+// every page drew then. One within guanoMergePx of a pile of its own joins it. The cap and the
+// hourly rate are as they were.
+func TestGuanoFallsWhereTheBatterflyIsFlying(t *testing.T) {
+	r := newObjRig(t)
+	street, spot := guanoStreet(t, 2)
+	start := r.now
+	r.advance(3 * time.Hour)
+	a := r.player(1, "Ada", street, spot.x, spot.y)
+	snap := guanoSync(r, a)
+	seed := flierSeed("batterfly", spot.index, spot.x)
+	var want []guanoPile
+	tick := start
+	for k := 0; k < 3; k++ {
+		tick = r.mod.guanoTickAfter(street, "batterfly:0", tick)
+		x := math.Round(flierX("batterfly", seed, spot.worldW, float64(tick.UnixMilli()-gameEpochMs))*10) / 10
+		merged := false
+		for i := range want {
+			if math.Abs(want[i].x-x) < guanoMergePx {
+				want[i].n++
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			want = append(want, guanoPile{x: x, n: 1, c: tick.UnixMilli()})
+		}
+	}
+	got := pilesOf(snap, "batterfly:0")
+	if len(got) != len(want) {
+		t.Fatalf("piles %v, want %+v", got, want)
+	}
+	moved := false
+	for i, p := range got {
+		if p[0] != want[i].x || int(p[1]) != want[i].n || int64(p[2]) != want[i].c {
+			t.Fatalf("pile %d: %v, want %+v", i, p, want[i])
+		}
+		if math.Abs(p[0]-spot.x) > guanoMergePx {
+			moved = true
+		}
+	}
+	if !moved {
+		t.Fatalf("three hours of Guano lie in %v, the spot at %v", got, spot.x)
+	}
+	// Held by a player at the moment it comes due, it drops where it stopped: the path's clock
+	// stands at the wait's moment.
+	next := r.mod.guanoTickAfter(street, "batterfly:0", r.now)
+	r.advance(next.Sub(r.now) - 500*time.Millisecond)
+	held := r.now
+	r.drain(a)
+	r.act(a, 1, "batterfly:0", "wait", nil)
+	r.advance(time.Second)
+	last := pilesOf(guanoSync(r, a), "batterfly:0")
+	x := math.Round(flierX("batterfly", seed, spot.worldW, float64(held.UnixMilli()-gameEpochMs))*10) / 10
+	found := false
+	for _, p := range last {
+		if p[0] == x || math.Abs(p[0]-x) < guanoMergePx {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a held Batterfly's Guano: %v, it stood at %v", last, x)
 	}
 }

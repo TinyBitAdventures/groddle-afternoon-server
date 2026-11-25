@@ -13,8 +13,13 @@ package main
 // (onPlayerExit 1841-1843), and timers do run on a street with nobody on it (npc_piggy.js onRooting
 // 1131-1164 asks getNumActivePlayers() inside one).
 //
-// Here (Austin's rulings, 2026-11-10):
-//   - One pile per Batterfly, under its spot, the same for everyone; a street's piles hold at most
+// Here (Austin's rulings, 2026-11-10, and lane flyk 2026-11-24):
+//   - Each Guano lands where its Batterfly is flying when it comes due, as the source's
+//     createItemStackFromSource at this.x (lane flyk, Austin 2026-11-24; before, one pile under its
+//     spot): the server works out that x from the Batterfly's shared flight (flierpath.go, the
+//     game's flierAt) at the tick's moment, and each page drops it to the floor under the
+//     Batterfly there. One lying within guanoMergePx of a pile of the same Batterfly joins it (the
+//     game's dropGuano), so a Batterfly has a few piles, the same for everyone; a street's piles hold at most
 //     guanoCap Guano between them: a tick adds one only while they hold fewer (the source's test,
 //     counted in Guano as the game's own clock always counted it, js/animal-husbandry.js
 //     passiveGuano; the source counted stacks, location.js countItemClass 1948-1953).
@@ -34,19 +39,22 @@ package main
 //   - A rooked Batterfly makes no Guano in the source (onInterval 1065); the Rook here never rooks
 //     one (rookCreatureKey), so there is nothing to skip.
 //
-// Pick up (obj_act verb "pickup" on the Batterfly's id): the server settles the street, gives the
-// asker the whole pile and credits it to the site's ledger (credits.go "take", as a feed's Guano
+// Pick up (obj_act verb "pickup" on the Batterfly's id, "x" the pile's x): the server settles the
+// street, gives the asker the whole pile nearest that x and credits it to the site's ledger (credits.go "take", as a feed's Guano
 // is), and the street hears the pile is gone ("objs"). A second asker finds nothing there.
 //
 // Client to server:
 //
-//	{"t":"obj_act","req":7,"id":"batterfly:0","verb":"pickup"}
+//	{"t":"obj_act","req":7,"id":"batterfly:0","verb":"pickup","x":2210.5}
 //
 // Server to client:
 //
-//	{"t":"objs","street":"GA9…","snap":true,"guano":1731300000000,…,"objs":[{"id":"batterfly:0","guano":3,…}]}
+//	{"t":"objs","street":"GA9…","snap":true,"guano":1731300000000,…,"objs":[{"id":"batterfly:0","guano":3,"piles":[[2210.5,2,1731300400000],[480,1,1731304000000]],…}]}
 //	     "guano": this server shares the hourly Guano, its clocks running since that Unix ms (a
-//	     server from before has no such word, and the game keeps each player's own clock as it did)
+//	     server from before has no such word, and the game keeps each player's own clock as it did);
+//	     on a Batterfly "guano" is its Guano lying on the street and "piles" where: [x, count, the
+//	     path's clock (server ms minus lag) when the pile's first Guano fell, 0 when unknown], so a
+//	     page knows how high the Batterfly flew there and drops it to the floor under it
 //	{"t":"obj_ok","req":7,"id":"batterfly:0","verb":"pickup","take":3,"before":{…,"guano":3},"obj":{…}}
 //	{"t":"obj_no","req":7,"id":"batterfly:0","verb":"pickup","code":"gone","message":"…","obj":{…}}
 //
@@ -56,6 +64,7 @@ package main
 import (
 	"encoding/json"
 	"hash/fnv"
+	"math"
 	"sort"
 	"time"
 )
@@ -69,7 +78,68 @@ const (
 	guanoGone = "Someone else picked that Guano up first."
 	// guanoDevSkipMax bounds one QA skip.
 	guanoDevSkipMax = 30 * 24 * time.Hour
+	// guanoMergePx: a Guano this close to a pile of its Batterfly joins it (the game's
+	// animal-husbandry-feature dropGuano, which merges within 40 px).
+	guanoMergePx = 40
 )
+
+// guanoPile is Guano lying where a Batterfly dropped it: x, how many, and the path's clock (server
+// ms minus lag) when its first one fell (0: unknown, a pile from a state file of before).
+type guanoPile struct {
+	x float64
+	n int
+	c int64
+}
+
+// batterflyAt is where a Batterfly is flying at t: its x on its shared flight (flierpath.go) and
+// the path's clock then. A spot with no street width (data from before) stays at its spot.
+func (o *objects) batterflyAt(ob *liveObj, t time.Time) (float64, int64) {
+	at := t
+	if ob.holdEnd.After(at) {
+		at = ob.holdEnd
+	}
+	c := at.UnixMilli() - ob.lag
+	spot := ob.spot
+	if spot.worldW <= 0 {
+		return spot.x, c
+	}
+	return flierX("batterfly", flierSeed("batterfly", spot.index, spot.x), spot.worldW, float64(c-gameEpochMs)), c
+}
+
+// dropGuano lays one Guano where the Batterfly is flying at t: on a pile of its within
+// guanoMergePx, else a new one.
+func (o *objects) dropGuano(ob *liveObj, t time.Time) {
+	x, c := o.batterflyAt(ob, t)
+	x = math.Round(x*10) / 10
+	ob.guano++
+	for i := range ob.guanoPiles {
+		if math.Abs(ob.guanoPiles[i].x-x) < guanoMergePx {
+			ob.guanoPiles[i].n++
+			return
+		}
+	}
+	ob.guanoPiles = append(ob.guanoPiles, guanoPile{x: x, n: 1, c: c})
+}
+
+// guanoPileNear is the index of a Batterfly's pile nearest x, or -1 with none.
+func guanoPileNear(ob *liveObj, x float64) int {
+	best := -1
+	for i, p := range ob.guanoPiles {
+		if best < 0 || math.Abs(p.x-x) < math.Abs(ob.guanoPiles[best].x-x) {
+			best = i
+		}
+	}
+	return best
+}
+
+// guanoPilesState is a Batterfly's piles as a page reads them: [[x, n, c], ...].
+func guanoPilesState(ob *liveObj) [][3]float64 {
+	out := make([][3]float64, 0, len(ob.guanoPiles))
+	for _, p := range ob.guanoPiles {
+		out = append(out, [3]float64{p.x, float64(p.n), float64(p.c)})
+	}
+	return out
+}
 
 // guanoSpots is a street's Batterflies, by id.
 func (o *objects) guanoSpots(street string) []*objSpot {
@@ -110,8 +180,9 @@ func (o *objects) guanoSettled(street string) time.Time {
 	return o.guanoStart
 }
 
-// settleGuano brings a street's piles up to now: every tick since they were last settled adds one
-// Guano under its Batterfly while the street's piles hold fewer than guanoCap; the rest are lost.
+// settleGuano brings a street's piles up to now: every tick since they were last settled drops one
+// Guano where its Batterfly was flying then (dropGuano) while the street's piles hold fewer than
+// guanoCap; the rest are lost.
 // Returns the Batterflies whose pile grew.
 func (o *objects) settleGuano(street string) []*liveObj {
 	spots := o.guanoSpots(street)
@@ -142,7 +213,7 @@ func (o *objects) settleGuano(street string) []*liveObj {
 		if first < 0 {
 			break
 		}
-		obs[first].guano++
+		o.dropGuano(obs[first], next[first])
 		total++
 		grew[first] = true
 		next[first] = next[first].Add(guanoEvery)
@@ -209,7 +280,17 @@ func (o *objects) guanoGrew(street string, except int64) {
 	}
 }
 
-// pickGuano is "pick up" on the pile under a Batterfly: the whole pile to the asker, credited.
+// guanoPickX is the x a pickup asks for: the pile's ("x"), else (a page from before) the asker's own.
+func guanoPickX(cl *Client, m objAct) float64 {
+	if m.X != nil {
+		return *m.X
+	}
+	x, _ := cl.Pos()
+	return x
+}
+
+// pickGuano is "pick up" on one of a Batterfly's piles (the one at "x"): the whole pile to the
+// asker, credited. A pile someone else took first is gone, even with another of its piles elsewhere.
 func (o *objects) pickGuano(cl *Client, m objAct, street string, spot *objSpot) {
 	grew := o.settleGuano(street)
 	ob := o.get(street, spot)
@@ -220,11 +301,13 @@ func (o *objects) pickGuano(cl *Client, m objAct, street string, spot *objSpot) 
 		}
 	}
 	before := o.state(ob)
-	n := ob.guano
 	v := refuse("gone", guanoGone)
-	if n > 0 {
-		ob.guano = 0
-		v = verdict{ok: true, got: creditItem("guano", n), extra: map[string]any{"take": n}}
+	x := guanoPickX(cl, m)
+	if i := guanoPileNear(ob, x); i >= 0 && (m.X == nil || math.Abs(ob.guanoPiles[i].x-x) < guanoMergePx) {
+		n := ob.guanoPiles[i].n
+		ob.guanoPiles = append(ob.guanoPiles[:i], ob.guanoPiles[i+1:]...)
+		ob.guano = max(0, ob.guano-n)
+		v = verdict{ok: true, got: creditItem("guano", n), extra: map[string]any{"take": n, "x": x}}
 	}
 	if len(also) > 0 {
 		// A refusal answers the asker only (finishAct): the piles that grew go to the whole street here.
