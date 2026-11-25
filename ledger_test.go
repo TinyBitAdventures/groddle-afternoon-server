@@ -128,6 +128,46 @@ func TestLedgerRefusalCancelsWithTheSourceWords(t *testing.T) {
 	}
 }
 
+// #691: what the short side gives is in their pack but waits past today's limit: they hear the site's
+// words for it (the item, when it clears), not "too many"; the other side still hears nothing changed hands.
+func TestLedgerRefusalForAWaitingItemSaysWhenItClears(t *testing.T) {
+	words := "This Emblem of Mab is past today's limit, so it isn't counted yet. You can trade it after midnight UTC (in about 3 hours)."
+	r, _ := ledgerRig(t, "", func(string, string) ledgerAnswer {
+		return ledgerAnswer{Status: "refused", Short: &ledgerShort{ID: 1, C: "emblem_mab"}, Waiting: &ledgerWaiting{Why: "waiting", Text: words, C: "emblem_mab", Clears: 1795651200}}
+	})
+	a, b := r.two()
+	accepted(r, a, b)
+	drain(a)
+	drain(b)
+	r.fire(0)
+	ga, gb := drain(a), drain(b)
+	if e := errorsOf(ga); len(e) != 1 || e[0] != words {
+		t.Fatalf("the short side hears the site's words: %q", e)
+	}
+	if e := errorsOf(gb); len(e) != 1 || e[0] != tradeTextNotFinished {
+		t.Fatalf("the other side hears nothing changed hands: %q", e)
+	}
+}
+
+func TestRefusedTextKeepsTheFallbackUnlessTheSiteSaysWaiting(t *testing.T) {
+	if got := refusedText(nil, "x"); got != "x" {
+		t.Fatalf("no answer: %q", got)
+	}
+	if got := refusedText(&ledgerAnswer{Status: "refused", Short: &ledgerShort{ID: 1}}, "x"); got != "x" {
+		t.Fatalf("a plain short: %q", got)
+	}
+	if got := refusedText(&ledgerAnswer{Waiting: &ledgerWaiting{Why: "other", Text: "y"}}, "x"); got != "x" {
+		t.Fatalf("another why: %q", got)
+	}
+	if got := refusedText(&ledgerAnswer{Waiting: &ledgerWaiting{Why: "waiting", Text: "  "}}, "x"); got != "x" {
+		t.Fatalf("blank words: %q", got)
+	}
+	long := strings.Repeat("e", waitingTextMax+50)
+	if got := refusedText(&ledgerAnswer{Waiting: &ledgerWaiting{Why: "waiting", Text: long}}, "x"); len([]rune(got)) != waitingTextMax {
+		t.Fatalf("the site's words are bounded: %d", len([]rune(got)))
+	}
+}
+
 func TestLedgerSilenceVoidsAndAVoidCanFindItSettled(t *testing.T) {
 	calls := 0
 	r, f := ledgerRig(t, "", func(kind, _ string) ledgerAnswer {

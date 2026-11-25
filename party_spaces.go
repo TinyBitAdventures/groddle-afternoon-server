@@ -494,7 +494,7 @@ func (m *parties) startSpace(cl *Client, frame json.RawMessage) {
 		case "settled":
 		case "refused":
 			log.Printf("party space: %s (%d) has no %s in the ledger: refused", name, id, pack)
-			m.refuseSpace(id, "pack", partyTextNoPack)
+			m.refuseSpace(id, "pack", refusedText(&a, partyTextNoPack))
 			return
 		default:
 			m.refund(op, id, "party_pack") // it may have settled unheard; the refund voids it if not
@@ -733,7 +733,7 @@ func (m *parties) extendSpace(cl *Client, frame json.RawMessage) {
 		switch a.Status {
 		case "settled":
 		case "refused":
-			m.refuseSpace(id, "currants", partyTextAtmBroke)
+			m.refuseSpace(id, "currants", refusedText(&a, partyTextAtmBroke))
 			return
 		default:
 			m.refund(op, id, "party_atm")

@@ -89,12 +89,40 @@ type ledgerShort struct {
 	Currants bool   `json:"currants"`
 }
 
+// ledgerWaiting: what the giver lacked is in their pack but waits past today's limit outside the
+// ledger (site Ledger::waitingFor, report #691); Text is the site's words for it (the item, when it clears).
+type ledgerWaiting struct {
+	Why    string `json:"why"`
+	Text   string `json:"text"`
+	C      string `json:"c"`
+	Clears int64  `json:"clears"`
+}
+
+// waitingTextMax bounds the site's words before they reach a player.
+const waitingTextMax = 300
+
+// refusedText: the site's words when what was short only waits past today's limit (#691), else fallback.
+func refusedText(a *ledgerAnswer, fallback string) string {
+	if a == nil || a.Waiting == nil || a.Waiting.Why != "waiting" {
+		return fallback
+	}
+	text := strings.TrimSpace(a.Waiting.Text)
+	if text == "" {
+		return fallback
+	}
+	if r := []rune(text); len(r) > waitingTextMax {
+		text = string(r[:waitingTextMax])
+	}
+	return text
+}
+
 // ledgerAnswer is the site's word on a trade. Status "" means no answer came.
 type ledgerAnswer struct {
-	Status string       `json:"status"` // settled | refused | void
-	Short  *ledgerShort `json:"short,omitempty"`
-	IDs    []int64      `json:"ids,omitempty"`
-	Gave   []tradeGoods `json:"gave,omitempty"`
+	Status  string         `json:"status"` // settled | refused | void
+	Short   *ledgerShort   `json:"short,omitempty"`
+	Waiting *ledgerWaiting `json:"waiting,omitempty"`
+	IDs     []int64        `json:"ids,omitempty"`
+	Gave    []tradeGoods   `json:"gave,omitempty"`
 	// ledger/use (objects_uses.go): the charges left in the open jar or bottle, and whether this use emptied it.
 	Left  *int `json:"left,omitempty"`
 	Spent bool `json:"spent,omitempty"`

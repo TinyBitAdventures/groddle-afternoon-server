@@ -916,7 +916,7 @@ func (m *trades) answered(st *settleWait, a ledgerAnswer, void bool) {
 	case "settled":
 		m.settled(st)
 	case "refused":
-		m.unsettle(st, a.Short)
+		m.unsettle(st, &a)
 	case "void":
 		m.unsettle(st, nil)
 	default:
@@ -955,8 +955,12 @@ func (m *trades) settled(st *settleWait) {
 }
 
 // unsettle: the site refused it (a giver's ledger lacks what it gives) or voided it: nothing changed hands.
-func (m *trades) unsettle(st *settleWait, short *ledgerShort) {
+func (m *trades) unsettle(st *settleWait, a *ledgerAnswer) {
 	r := st.rec
+	var short *ledgerShort
+	if a != nil {
+		short = a.Short
+	}
 	delete(m.settling, r.Trade)
 	if m.journal != nil {
 		if err := m.journal.write(tradeEntry{Unsettle: r.Trade}); err != nil {
@@ -979,6 +983,8 @@ func (m *trades) unsettle(st *settleWait, short *ledgerShort) {
 			if short.Currants {
 				text = tradeTextCurrants
 			}
+			// #691: it is in their pack but waits past today's limit: the site's words say when it clears.
+			text = refusedText(a, text)
 		}
 		if cl := m.h.ClientLocked(id); cl != nil {
 			m.refuse(cl, text)
