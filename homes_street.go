@@ -283,7 +283,8 @@ func (m *homeStreet) refresh(cl *Client, frame json.RawMessage) {
 	}
 	id := strconv.FormatInt(cl.ID(), 10)
 	out := map[string]any{"t": "home_refresh", "owner": cl.ID(), "what": msg.What}
-	streets := []string{homeStreetPrefix + id, houseStreetPrefix + id}
+	// R5 (G1313): every floor of the house, where its visitors may stand now.
+	streets := append([]string{homeStreetPrefix + id}, houseStreets(cl.ID())...)
 	if msg.What == "home" {
 		// The Tower's furniture is part of the home's look (Neighbours.php homesSlice towerDecor).
 		for f := 0; f <= towerFloorsMax; f++ {

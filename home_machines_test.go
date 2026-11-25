@@ -174,7 +174,7 @@ func TestMachinesStandInTheHouseAndTheTower(t *testing.T) {
 
 // G1249 (#669): a machine on an upper floor of the house. Glitch's house was one location (every
 // floor of it), so a machine stood and ran on any floor; here the floor is HOUSE_<owner>_<floor>,
-// the owner's own room, and the site hears "house:<floor>".
+// which whoever may enter the house reaches (R5, G1313), and the site hears "house:<floor>".
 func TestMachinesStandOnAnUpperFloorOfTheHouse(t *testing.T) {
 	r := newMachineRig(t)
 	for street, place := range map[string]string{"HOUSE_7_1": "house:1", "HOUSE_7_2": "house:2", "HOUSE_7": "house"} {
@@ -220,6 +220,18 @@ func TestMachinesStandOnAnUpperFloorOfTheHouse(t *testing.T) {
 	r.settle()
 	if c := r.site.calls[len(r.site.calls)-1]; c.Place != "house" {
 		t.Fatalf("an act from the ground floor names the ground floor: %+v", c)
+	}
+	// R5 (G1313): the key-holder walks upstairs and uses it there, as on the ground floor.
+	drain(bo)
+	r.now = r.now.Add(time.Minute)
+	r.join(bo, "HOUSE_7_1")
+	if f := drain(bo); f[0]["t"] != "street" {
+		t.Fatalf("Bo goes upstairs: %v", f)
+	}
+	r.do(bo, map[string]any{"t": "home_machine", "req": 10, "owner": 7, "verb": "refuel", "id": "hm-00000000000000aa"})
+	r.settle()
+	if c := r.site.calls[len(r.site.calls)-1]; c.Place != "house:1" || c.Actor != 9 {
+		t.Fatalf("the site hears Bo on the second floor: %+v", c)
 	}
 }
 

@@ -569,7 +569,8 @@ func (m *homeHelp) iconTell(cl *Client, frame json.RawMessage) {
 		told[c.O] = true
 	}
 	id := strconv.FormatInt(c.O, 10)
-	streets := []string{homeStreetPrefix + id, houseStreetPrefix + id}
+	// R5 (G1313): an Icon may stand on any floor of the house.
+	streets := append([]string{homeStreetPrefix + id}, houseStreets(c.O)...)
 	for f := 0; f <= towerFloorsMax; f++ {
 		streets = append(streets, towerStreetPrefix+id+"_"+strconv.Itoa(f))
 	}

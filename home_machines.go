@@ -12,7 +12,7 @@ package main
 //
 // This module checks what the site cannot see: that the actor stands in the
 // owner's home, on HOME_<owner>, in HOUSE_<owner> (an upper floor of the house is
-// HOUSE_<owner>_<floor>, the owner's alone; G1249) or on a floor of their
+// HOUSE_<owner>_<floor>, G1249, which homes.go opens as it opens the house: R5, G1313) or on a floor of their
 // Tower, TOWER_<owner>_<floor> (the verbs' ok_states "in_location"; homes.go
 // lets only the owner, holders of the site's pass and, in the house, a
 // key-holder or someone let in), that only the owner sets one down, and that
@@ -344,7 +344,7 @@ func machinePlace(street string, owner int64) (string, string) {
 	// G1249 (#669): an upper floor of the house, HOUSE_<owner>_<floor> ("house:<floor>"). Glitch's
 	// house was one location, so a machine stood on any floor of it (machine_stand.js canDrop
 	// 770-794 refuses only near another, near the ends and in an instance).
-	if o, f := houseFloorOwner(street); o > 0 {
+	if o, f := houseFloorOwner(street); o > 0 && f > 0 {
 		if o != owner {
 			return "", ""
 		}

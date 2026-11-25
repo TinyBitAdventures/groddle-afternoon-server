@@ -106,6 +106,9 @@ func TestHomeOwnerReadsOnlyHomeStreets(t *testing.T) {
 	if _, inside := homeOwner("HOUSE_3"); !inside {
 		t.Fatal("HOUSE_ is the house")
 	}
+	if _, inside := homeOwner("HOME_3"); inside {
+		t.Fatal("HOME_ is the street")
+	}
 }
 
 func TestOnlyAPassLetsAVisitorOntoAHomeStreet(t *testing.T) {
@@ -442,31 +445,143 @@ func TestTowerFloorsAreOpenLikeTheHomeStreet(t *testing.T) {
 	}
 }
 
-// G1249 (#669): an upper floor of the house is HOUSE_<owner>_<floor>, the owner's own room (G153):
-// a pass, a key or being let in opens the ground floor, never an upper one.
-func TestAnUpperHouseFloorIsTheOwnersAlone(t *testing.T) {
-	for street, want := range map[string][2]int64{"HOUSE_7_1": {7, 1}, "HOUSE_7_2": {7, 2}, "HOUSE_7_0": {0, 0}, "HOUSE_7_3": {0, 0}, "HOUSE_7_01": {0, 0}, "HOUSE_07_1": {0, 0}, "HOUSE_7": {0, 0}, "TOWER_7_1": {0, 0}, "HOME_7_1": {0, 0}} {
+// R5 (G1313, Austin 2026-11-25: "as Glitch: key holders and let-in visitors go upstairs"): an upper
+// floor of the house is HOUSE_<owner>_<floor> (G1249), and every floor of it is the house. Glitch's
+// house was one location (inc_homes.js homes_add_floor_at 189-219), its floors joined by Doors no
+// verb guards (items/furniture_door.js), so whoever pols_canEnter let in stood on every floor.
+func TestEveryFloorOfTheHouseIsTheHouse(t *testing.T) {
+	for street, want := range map[string][2]int64{"HOUSE_7_1": {7, 1}, "HOUSE_7_2": {7, 2}, "HOUSE_7": {7, 0}, "HOUSE_7_0": {0, 0}, "HOUSE_7_3": {0, 0}, "HOUSE_7_01": {0, 0}, "HOUSE_07_1": {0, 0}, "HOUSE_7_": {0, 0}, "TOWER_7_1": {0, 0}, "HOME_7_1": {0, 0}} {
 		if o, f := houseFloorOwner(street); o != want[0] || int64(f) != want[1] {
 			t.Errorf("%s: %d %d, want %v", street, o, f, want)
 		}
 	}
-	if o, inside := homeOwner("HOUSE_7_1"); o != 0 || inside {
-		t.Fatal("homeOwner reads no upper floor: the modules that key on the house leave it alone")
+	for _, street := range []string{"HOUSE_7_1", "HOUSE_7_2"} {
+		if o, inside := homeOwner(street); o != 7 || !inside {
+			t.Fatalf("%s is Ada's house: %d %v", street, o, inside)
+		}
+	}
+	if got := strings.Join(houseStreets(7), ","); got != "HOUSE_7,HOUSE_7_1,HOUSE_7_2" {
+		t.Fatalf("every floor: %s", got)
 	}
 	r := newHomesRig(t)
-	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	ada, bo, cy, di := r.connect(7, "Ada"), r.connect(9, "Bo"), r.connect(11, "Cy"), r.connect(13, "Di")
 	r.join(ada, "HOUSE_7_1")
 	if f := drain(ada); f[0]["t"] != "street" {
 		t.Fatalf("the owner goes up to her second floor: %v", f)
 	}
+	// Cy has a pass but no key and was never let in: no floor of the house opens.
+	r.pass(cy, 7, "Ada", false)
+	drain(cy)
+	for _, street := range []string{"HOUSE_7_1", "HOUSE_7_2", house(7)} {
+		r.join(cy, street)
+		if got := buddyKinds(drain(cy)); got != "error:home_locked" {
+			t.Fatalf("Cy onto %s: %s", street, got)
+		}
+	}
+	// No pass at all: private, as the ground floor.
+	r.join(di, "HOUSE_7_1")
+	if got := buddyKinds(drain(di)); got != "error:home_private" {
+		t.Fatalf("Di with no pass: %s", got)
+	}
+	// A key-holder comes in and goes upstairs; Ada hears her come in once, not each floor.
 	r.pass(bo, 7, "Ada", true)
 	drain(bo)
 	r.join(bo, house(7))
 	if f := drain(bo); f[0]["t"] != "street" {
 		t.Fatalf("a key-holder comes into the house: %v", f)
 	}
+	if got := buddyKinds(drain(ada)); got != "home_entered" {
+		t.Fatalf("Ada upstairs hears Bo come in: %s", got)
+	}
 	r.join(bo, "HOUSE_7_1")
-	if got := buddyKinds(drain(bo)); got != "error:home_locked" {
-		t.Fatalf("but never upstairs: %s", got)
+	if f := drain(bo); f[0]["t"] != "street" || len(f[0]["players"].([]any)) != 1 {
+		t.Fatalf("and goes upstairs to Ada: %v", f)
+	}
+	if got := buddyKinds(drain(ada)); got != "joined" {
+		t.Fatalf("walking upstairs is no coming in: %s", got)
+	}
+	r.join(bo, house(7))
+	drain(bo)
+	if got := buddyKinds(drain(ada)); got != "left" {
+		t.Fatalf("nor walking down: %s", got)
+	}
+	// A block made since the pass keeps her out upstairs too.
+	r.ign.ign[[2]int64{7, 9}] = true
+	r.join(bo, "HOUSE_7_2")
+	if got := buddyKinds(drain(bo)); got != "error:home_blocked" {
+		t.Fatalf("a blocked key-holder: %s", got)
+	}
+}
+
+// R5 (G1313): a visitor the owner let in (house_auth) goes upstairs as she came in; one summoned in
+// (G668, one arrival) walks between the floors while she is inside.
+func TestLetInAndSummonedVisitorsGoUpstairs(t *testing.T) {
+	r := newHomesRig(t)
+	ada, bo, cy := r.connect(7, "Ada"), r.connect(9, "Bo"), r.connect(11, "Cy")
+	r.join(ada, house(7))
+	r.pass(bo, 7, "Ada", false)
+	r.pass(cy, 7, "Ada", false)
+	drain(bo)
+	drain(cy)
+	r.do(bo, map[string]any{"t": "home_knock", "owner": 7})
+	r.do(ada, map[string]any{"t": "home_answer", "id": 9, "allow": true})
+	drain(bo)
+	r.join(bo, "HOUSE_7_2")
+	if f := drain(bo); f[0]["t"] != "street" {
+		t.Fatalf("let in, Bo goes straight up: %v", f)
+	}
+	// Cy summoned in: the one arrival, then the stairs.
+	summoned := r.hub.ProvidedLocked("homes.summoned").(func(visitor, owner int64))
+	summoned(11, 7)
+	drain(cy)
+	r.join(cy, house(7))
+	if f := drain(cy); f[0]["t"] != "street" {
+		t.Fatalf("Cy summoned in: %v", f)
+	}
+	r.join(cy, "HOUSE_7_1")
+	if f := drain(cy); f[0]["t"] != "street" {
+		t.Fatalf("Cy goes upstairs: %v", f)
+	}
+	r.join(cy, house(7))
+	if f := drain(cy); f[0]["t"] != "street" {
+		t.Fatalf("and down again: %v", f)
+	}
+	// Out of the house, the summons is spent: no way back to any floor.
+	r.join(cy, home(7))
+	drain(cy)
+	r.now = r.now.Add(time.Minute) // past the join rate (hub.go joinBurst)
+	r.join(cy, "HOUSE_7_1")
+	if got := buddyKinds(drain(cy)); got != "error:home_locked" {
+		t.Fatalf("Cy back from the street: %s", got)
+	}
+}
+
+// R5 (G1313): houses_logout and acl_keys_remove walk visitors out of every floor of the house.
+func TestWalkOutsReachEveryFloor(t *testing.T) {
+	r := newHomesRig(t)
+	ada, bo, cy := r.connect(7, "Ada"), r.connect(9, "Bo"), r.connect(11, "Cy")
+	r.join(ada, house(7))
+	r.pass(bo, 7, "Ada", false)
+	r.pass(cy, 7, "Ada", true)
+	drain(bo)
+	r.do(bo, map[string]any{"t": "home_knock", "owner": 7})
+	r.do(ada, map[string]any{"t": "home_answer", "id": 9, "allow": true})
+	r.join(bo, "HOUSE_7_1")
+	r.join(cy, "HOUSE_7_2")
+	drain(bo)
+	drain(cy)
+	r.hub.Disconnect(ada)
+	if f := only(t, drain(bo), "home_out"); f["why"] != "owner_left" || bo.Street() != "" {
+		t.Fatalf("Bo upstairs goes out: %v (%q)", f, bo.Street())
+	}
+	if cy.Street() != "HOUSE_7_2" {
+		t.Fatalf("Cy has a key and stays upstairs: %q", cy.Street())
+	}
+	ada = r.connect(7, "Ada")
+	drain(cy)
+	r.do(ada, map[string]any{"t": "home_key_tell", "token": r.keyProof(7, 11, false)})
+	frames := drain(cy)
+	if got := buddyKinds(frames); got != "home_key,home_out" || frames[1]["why"] != "revoked" || cy.Street() != "" {
+		t.Fatalf("Cy's key taken back upstairs: %v (%q)", frames, cy.Street())
 	}
 }

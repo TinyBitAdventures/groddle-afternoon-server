@@ -18,7 +18,9 @@ package main
 // houses_visit (blocked, tutorial, no house) and signs a pass the game hands
 // over here. Nobody but the owner joins HOME_<owner> (the home street) or
 // HOUSE_<owner> (the house) without one (GateJoin), so the server never
-// takes a client's word for whose home it may stand in.
+// takes a client's word for whose home it may stand in. Every floor of the
+// house is the house (R5, G1313; houseFloorOwner): HOUSE_<owner>_<floor> opens
+// to whoever the ground floor opens to.
 //
 // Client to server:
 //
@@ -125,6 +127,7 @@ type homes struct {
 	authed map[int64]map[int64]bool        // owner -> visitors let in (house_auth), while the owner is online
 	asked  map[int64]map[int64]func() bool // owner -> visitors knocking now (house_auth_req) -> stop the wait
 	called map[int64]map[int64]time.Time   // visitor -> owner -> until: summoned into the owner's house, one arrival (G668)
+	left   map[int64]string                // a player's last street, while it was a floor of a house (joined: a walk between floors)
 	spent  *proofJournal                   // proofs used until they expire (proofs.go: kept across a restart)
 	rates  map[string]*bucket
 }
@@ -140,7 +143,7 @@ func newHomes(h *Hub) Module {
 		secret, _ = readSecret(path)
 	}
 	return &homes{h: h, secret: secret, passes: map[int64]map[int64]*homePass{}, authed: map[int64]map[int64]bool{},
-		asked: map[int64]map[int64]func() bool{}, called: map[int64]map[int64]time.Time{}, spent: sharedProofs(), rates: map[string]*bucket{}}
+		asked: map[int64]map[int64]func() bool{}, called: map[int64]map[int64]time.Time{}, left: map[int64]string{}, spent: sharedProofs(), rates: map[string]*bucket{}}
 }
 
 func (m *homes) Register(r *Registry) {
@@ -171,6 +174,7 @@ func (m *homes) Register(r *Registry) {
 		return ""
 	})
 	r.OnJoin(m.joined)
+	r.OnLeave(m.leftStreet)
 	r.OnDisconnect(m.disconnected)
 }
 
@@ -197,43 +201,71 @@ func towerOwner(street string) int64 {
 	return n
 }
 
-// houseFloorOwner reads the owner's id and floor from a HOUSE_<id>_<floor> street: an upper floor
-// of their house (1 is the second floor, up to houseFloorsMax-1), or 0. Glitch's house was one
-// location, every floor of it (locations/inc_homes.js homes_add_floor_at 189-219 stacks the floors);
-// the remake's floors are rooms of their own (G153), and an upper floor is the owner's own room: no
-// pass, key or knock lets anyone else in. Its own street lets the owner's acts there (home_machines.go)
-// be the server's word for where they stand (G1249, #669). homeOwner reads none of these.
+// houseFloorOwner reads the owner's id and floor from a house street: HOUSE_<id> is the ground floor
+// (0), HOUSE_<id>_<floor> an upper floor (1 is the second floor, up to houseFloorsMax-1); 0, 0 for any
+// other street. The remake's floors are rooms of their own (G153), so each upper floor is a street of
+// its own, which lets acts there (home_machines.go "house:<floor>") be the server's word for where the
+// player stands (G1249, #669).
+//
+// R5, the house is every floor of it (G1313, Austin 2026-11-25: "as Glitch: key holders and let-in
+// visitors go upstairs; upper floors shared like the ground floor"). Glitch's house was one location,
+// every floor of it (locations/inc_homes.js homes_add_floor_at 189-219 stacks the floors in it and
+// joins them with Doors, items/furniture_door.js, which no verb guards), so whoever pols_canEnter
+// let into the house stood on every floor. homeOwner therefore answers "the house" for every floor,
+// and everything keyed on the house (who may enter, walk-outs, drops, machines, summons) holds on
+// each floor alike. houseStreets lists them.
 func houseFloorOwner(street string) (int64, int) {
 	rest, ok := strings.CutPrefix(street, houseStreetPrefix)
 	if !ok {
 		return 0, 0
 	}
-	id, floor, ok := strings.Cut(rest, "_")
-	if !ok {
+	id, floor, upper := strings.Cut(rest, "_")
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || n <= 0 || strconv.FormatInt(n, 10) != id {
 		return 0, 0
 	}
-	n, err := strconv.ParseInt(id, 10, 64)
+	if !upper {
+		return n, 0
+	}
 	f, ferr := strconv.Atoi(floor)
-	if err != nil || ferr != nil || n <= 0 || strconv.FormatInt(n, 10) != id || f < 1 || f >= houseFloorsMax || strconv.Itoa(f) != floor {
+	if ferr != nil || f < 1 || f >= houseFloorsMax || strconv.Itoa(f) != floor {
 		return 0, 0
 	}
 	return n, f
 }
 
-// homeOwner reads the owner's id from a HOME_<id> or HOUSE_<id> street; 0 for any other street.
+// houseStreet is the street of floor `floor` of owner's house: HOUSE_<owner> (0), HOUSE_<owner>_<floor>.
+func houseStreet(owner int64, floor int) string {
+	if floor <= 0 {
+		return houseStreetPrefix + strconv.FormatInt(owner, 10)
+	}
+	return houseStreetPrefix + strconv.FormatInt(owner, 10) + "_" + strconv.Itoa(floor)
+}
+
+// houseStreets is every floor of owner's house (R5): the ground floor first.
+func houseStreets(owner int64) []string {
+	out := make([]string, 0, houseFloorsMax)
+	for f := 0; f < houseFloorsMax; f++ {
+		out = append(out, houseStreet(owner, f))
+	}
+	return out
+}
+
+// homeOwner reads the owner's id from a HOME_<id> street (the home street) or any floor of their
+// house (HOUSE_<id>, HOUSE_<id>_<floor>: R5, houseFloorOwner); 0 for any other street.
 func homeOwner(street string) (owner int64, house bool) {
+	if o, _ := houseFloorOwner(street); o > 0 {
+		return o, true
+	}
 	rest, ok := strings.CutPrefix(street, homeStreetPrefix)
 	if !ok {
-		if rest, ok = strings.CutPrefix(street, houseStreetPrefix); !ok {
-			return 0, false
-		}
-		house = true
+		return 0, false
 	}
 	id, err := strconv.ParseInt(rest, 10, 64)
 	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != rest {
 		return 0, false
 	}
-	return id, house
+	return id, false
 }
 
 // —— Tokens ——
@@ -360,13 +392,7 @@ func (m *homes) send(id int64, msg any) {
 // —— Who may stand where (pols_canEnter) ——
 
 func (m *homes) gate(cl *Client, street string) (bool, string, string) {
-	// An upper house floor is the owner's own room (G153): nobody else joins it.
-	if o, _ := houseFloorOwner(street); o > 0 {
-		if o == cl.ID() {
-			return true, "", ""
-		}
-		return false, "home_locked", homeTextLocked
-	}
+	// R5 (G1313): every floor of the house is the house (homeOwner), so the same rule opens each.
 	owner, house := homeOwner(street)
 	if t := towerOwner(street); t > 0 {
 		owner, house = t, false
@@ -385,6 +411,11 @@ func (m *homes) gate(cl *Client, street string) (bool, string, string) {
 	if !house || p.key || m.letIn(owner, cl.ID()) {
 		return true, "", ""
 	}
+	// R5: from one floor of the house to another (Glitch's floors were one location joined by Doors,
+	// items/furniture_door.js, which no verb guards): someone the owner summoned in stays in.
+	if o, in := homeOwner(cl.Street()); in && o == owner && m.h.ClientLocked(owner) != nil {
+		return true, "", ""
+	}
 	// G668: summoned in by the owner (online): this one arrival, never a key.
 	if until, ok := m.called[cl.ID()][owner]; ok {
 		delete(m.called[cl.ID()], owner)
@@ -398,10 +429,25 @@ func (m *homes) gate(cl *Client, street string) (bool, string, string) {
 	return false, "home_locked", homeTextLocked
 }
 
-// joined: a key-holder coming into the house is told to the owner (inc_pols.js:463-473).
+// leftStreet notes the street a player just left, so joined can tell a walk upstairs from coming in.
+func (m *homes) leftStreet(cl *Client, street string) {
+	if _, house := homeOwner(street); house {
+		m.left[cl.ID()] = street
+		return
+	}
+	delete(m.left, cl.ID())
+}
+
+// joined: a key-holder coming into the house is told to the owner (inc_pols.js:463-473); going from
+// one floor to another is no coming in (R5: one location in Glitch, so onPlayerEnter never ran).
 func (m *homes) joined(cl *Client) {
+	from := m.left[cl.ID()]
+	delete(m.left, cl.ID())
 	owner, house := homeOwner(cl.Street())
 	if !house || owner == cl.ID() {
+		return
+	}
+	if o, in := homeOwner(from); in && o == owner {
 		return
 	}
 	if p := m.pass(cl.ID(), owner); p != nil && p.key {
@@ -428,11 +474,15 @@ func (m *homes) disconnected(cl *Client) {
 		}
 	}
 	delete(m.authed, id)
-	for _, o := range m.h.StreetLocked(houseStreetPrefix + strconv.FormatInt(id, 10)) {
-		if p := m.pass(o.ID(), id); p != nil && p.key {
-			continue
+	delete(m.left, id)
+	// R5: every floor of the house ("<name> went offline, so you are outside again" upstairs too).
+	for _, street := range houseStreets(id) {
+		for _, o := range m.h.StreetLocked(street) {
+			if p := m.pass(o.ID(), id); p != nil && p.key {
+				continue
+			}
+			m.out(o, id, "owner_left")
 		}
-		m.out(o, id, "owner_left")
 	}
 }
 

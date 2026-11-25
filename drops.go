@@ -112,7 +112,9 @@ package main
 // see it through the site's visit, Neighbours.php stackRows); in the house a stack's x is kept
 // from the house's left end, as on the street (the back yard grows to the left and moves the
 // house); a Tower floor's x is its own (the Tower does not move); the owner's own stacks there
-// stay past dropKeep, as on the home street.
+// stay past dropKeep, as on the home street. Every floor of the house is the house (R5, G1313,
+// homes.go houseFloorOwner): an upper floor, HOUSE_<owner>_<floor> (site HOUSE-<owner>-<floor>), is
+// shared as the ground floor is, its x its own (an upper floor starts at 0 and never moves).
 //
 // Merging (house and Tower floors only, Austin 2026-11-24 for #655: "the house floor is shared, as
 // Glitch"): takeable_drop put a stack in with apiPutItemIntoPosition, which merged it into a like stack
@@ -222,6 +224,8 @@ var dropOpRe = regexp.MustCompile(`^drop-[0-9a-f]{16}$`)
 var (
 	dropHomeSiteRe  = regexp.MustCompile(`^(HOME|HOUSE)-([1-9][0-9]{0,17})$`)
 	dropTowerSiteRe = regexp.MustCompile(`^TOWER-([1-9][0-9]{0,17})-([0-9])$`)
+	// R5 (G1313): an upper floor of the house, HOUSE_<owner>_<floor> (homes.go houseFloorOwner).
+	dropFloorSiteRe = regexp.MustCompile(`^HOUSE-([1-9][0-9]{0,17})-([12])$`)
 )
 
 // dropHomeOwner is whose home this place is (their home street, house or a Tower floor), or 0 for
@@ -260,15 +264,19 @@ func dropSiteStreet(street string) string {
 
 // dropStreetFromSite is a street the site names, as players join it.
 func dropStreetFromSite(street string) string {
-	if dropHomeSiteRe.MatchString(street) || dropTowerSiteRe.MatchString(street) {
+	if dropHomeSiteRe.MatchString(street) || dropTowerSiteRe.MatchString(street) || dropFloorSiteRe.MatchString(street) {
 		return strings.ReplaceAll(street, "-", "_")
 	}
 	return street
 }
 
 // dropOrigin is the x a game says its positions on this street start from: the house's x on a
-// home street and in the house, nothing anywhere else (a Tower floor does not move).
+// home street and on the house's ground floor, nothing anywhere else (an upper floor of the house
+// and a Tower floor start at x 0 and never move).
 func dropOrigin(street string, ox *float64) float64 {
+	if _, f := houseFloorOwner(street); f > 0 {
+		return 0
+	}
 	if id, _ := homeOwner(street); ox == nil || id == 0 || math.IsNaN(*ox) || math.Abs(*ox) > 1e6 {
 		return 0
 	}

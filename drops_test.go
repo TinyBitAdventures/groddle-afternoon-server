@@ -1021,9 +1021,43 @@ func TestAHousesAndATowerFloorsDropsAreShared(t *testing.T) {
 	}
 }
 
+// R5 (G1313): an upper floor of the house is the house: a drop there is everyone's on that floor
+// (the site hears HOUSE-<owner>-<floor>, x the floor's own), and joining it lists its stacks.
+func TestAnUpperHouseFloorsDropsAreShared(t *testing.T) {
+	r := newDropRig(t)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.at(ada, "HOUSE_7_1", 500, 600)
+	r.at(bo, "HOUSE_7_1", 1500, 600)
+	for _, cl := range []*Client{ada, bo} {
+		if st := pick(t, drain(cl), "ground_state"); st["street"] != "HOUSE_7_1" {
+			t.Fatalf("the floor's stacks are listed: %v", st)
+		}
+	}
+	r.do(bo, map[string]any{"t": "ground_drop", "item": map[string]any{"c": "apple", "n": 2}, "x": 1510, "y": 600, "ox": 900})
+	r.settle()
+	if len(r.site.drops) != 1 {
+		t.Fatalf("the site is asked: %v", r.site.drops)
+	}
+	c := r.site.drops[0]
+	if c.ID != 9 || c.Street != "HOUSE-7-1" || c.X != 1510 {
+		t.Fatalf("the site hears the second floor its way, x its own: %+v", c)
+	}
+	if s := pick(t, drain(ada), "ground_added")["stack"].(map[string]any); s["id"] != c.Op || s["x"] != float64(1510) {
+		t.Fatalf("the owner sees the visitor's drop on her second floor: %v", s)
+	}
+	drain(bo)
+	r.move(bo, 3000, 600)
+	r.move(ada, 1400, 600)
+	r.do(ada, map[string]any{"t": "ground_pickup", "id": c.Op})
+	r.settle()
+	if len(r.site.takes) != 1 || r.site.takes[0] != c.Op+":7:pickup" {
+		t.Fatalf("the owner picks up the visitor's drop: %v", r.site.takes)
+	}
+}
+
 // The site's names come back as the places players join, and nothing else is a home.
 func TestHomePlacesAsTheSiteKeepsThem(t *testing.T) {
-	for street, site := range map[string]string{"HOME_7": "HOME-7", "HOUSE_7": "HOUSE-7", "TOWER_7_0": "TOWER-7-0", "TOWER_12_8": "TOWER-12-8", dropStreet: dropStreet} {
+	for street, site := range map[string]string{"HOME_7": "HOME-7", "HOUSE_7": "HOUSE-7", "HOUSE_7_1": "HOUSE-7-1", "HOUSE_12_2": "HOUSE-12-2", "TOWER_7_0": "TOWER-7-0", "TOWER_12_8": "TOWER-12-8", dropStreet: dropStreet} {
 		if got := dropSiteStreet(street); got != site {
 			t.Fatalf("%s goes to the site as %s, not %s", street, got, site)
 		}
@@ -1034,18 +1068,18 @@ func TestHomePlacesAsTheSiteKeepsThem(t *testing.T) {
 			t.Fatalf("%s is shared", street)
 		}
 	}
-	for _, s := range []string{"HOUSE_07", "HOUSE_", "TOWER_7", "TOWER_7_10", "TOWER_0_1", "PARTY_7", "RACE_7", "HOME_7_x"} {
+	for _, s := range []string{"HOUSE_07", "HOUSE_", "HOUSE_7_0", "HOUSE_7_3", "TOWER_7", "TOWER_7_10", "TOWER_0_1", "PARTY_7", "RACE_7", "HOME_7_x"} {
 		if dropShared(s) || dropHomeOwner(s) != 0 {
 			t.Fatalf("%s is no home place", s)
 		}
 	}
-	for _, s := range []string{"HOUSE-07", "TOWER-7-10", "TOWER-7", "PARTY-7"} {
+	for _, s := range []string{"HOUSE-07", "HOUSE-7-3", "HOUSE-7-0", "TOWER-7-10", "TOWER-7", "PARTY-7"} {
 		if dropStreetFromSite(s) != s {
 			t.Fatalf("%s is left as the site names it", s)
 		}
 	}
-	if dropOrigin("TOWER_7_1", ptrFloat(640)) != 0 || dropOrigin("HOUSE_7", ptrFloat(640)) != 640 {
-		t.Fatal("the house keeps x from its left end, a Tower floor its own")
+	if dropOrigin("TOWER_7_1", ptrFloat(640)) != 0 || dropOrigin("HOUSE_7", ptrFloat(640)) != 640 || dropOrigin("HOUSE_7_1", ptrFloat(640)) != 0 {
+		t.Fatal("the house keeps x from its left end, an upper floor and a Tower floor their own")
 	}
 }
 
