@@ -1208,6 +1208,10 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	if isCreature(spot.kind) {
 		reachX, reachY = creatureReach(spot)
 		farText = objTextFarWalker
+		if spot.kind == "batterfly" && m.Verb == "pickup" {
+			// The Guano pile lies at the Batterfly's spot (objects_guano.go), wherever it flies.
+			reachX, reachY = creatureReachX, creatureReachY
+		}
 	}
 	if x, y := cl.Pos(); !anyDistance(spot.kind, m.Verb) && (math.Abs(x-fromX) > reachX || math.Abs(y-spot.y) > reachY) {
 		no("far", farText, nil)
@@ -1225,7 +1229,7 @@ func (o *objects) handleAct(cl *Client, frame json.RawMessage) {
 	}
 	if m.Verb == "wait" {
 		// A player at a street animal (its menu open, a verb on it): it stands for everyone, no answer.
-		if (!isCreature(spot.kind) && spot.kind != "pig") || spot.kind == "batterfly" {
+		if !isCreature(spot.kind) && spot.kind != "pig" {
 			no("bad_verb", "That is not something here.", nil)
 			return
 		}

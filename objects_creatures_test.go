@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -342,7 +344,8 @@ func TestAChickenWaitsForEveryoneWhileAPlayerIsAtIt(t *testing.T) {
 		t.Fatalf("a second wait: %v", c)
 	}
 	r.drain(a)
-	// A Batterfly keeps its loop (its page never stopped it for a menu); a far player is refused.
+	// A Batterfly waits for everyone too (npc_batterfly.js onWaitStart 1074-1081), now that it flies
+	// the whole street (lane flyk); a far player is refused a Chicken.
 	var bfStreet string
 	var bf *objSpot
 	for tsid, spots := range sharedWorld.streets {
@@ -352,8 +355,8 @@ func TestAChickenWaitsForEveryoneWhileAPlayerIsAtIt(t *testing.T) {
 	}
 	cy := r.player(3, "Cy", bfStreet, bf.x, bf.y)
 	r.act(cy, 1, "batterfly:0", "wait", nil)
-	if no := r.only(cy, "obj_no"); no["code"] != "bad_verb" {
-		t.Fatalf("a Batterfly's wait answered %v", no)
+	if c := objOf(r.only(cy, "objs"), "batterfly:0"); num(c["hold"]) != 1200 {
+		t.Fatalf("a Batterfly's wait: %v", c)
 	}
 	far := r.player(4, "Di", defaultStreet, ch.x+creatureReachX+10, ch.y)
 	r.act(far, 1, "chicken:0", "wait", nil)
@@ -541,5 +544,60 @@ func TestStreetAnimalCost(t *testing.T) {
 		n, touch, float64(after.HeapAlloc-before.HeapAlloc)/1024, snap, float64(st.Size())/1024, saveT)
 	if n < 3000 || snap > 50*time.Millisecond {
 		t.Fatalf("%d animals, snapshot %v", n, snap)
+	}
+}
+
+// Lane flyk (2026-11-24, "street butterflies and batterflies seeming to loop spawn"): every page
+// flies a Batterfly at random over the whole street in the 400 px over the floor (npc_batterfly.js
+// flyAround 1039-1052, the game's js/street-creatures.js flierAt; tests/flier-wander.test.js keeps
+// every path inside the street). The server keeps no flyer's place, so a verb on any Batterfly is
+// taken from anywhere on its street, up and down too, as a Butterfly's (G755): a player under it a
+// street's width from its spot holds it. Its Guano pile stays at its spot, and so does pickup's reach.
+func TestABatterflyIsReachedAnywhereItFliesOnItsStreet(t *testing.T) {
+	r := newObjRig(t)
+	id := int64(10)
+	n := 0
+	streets := make([]string, 0, len(sharedWorld.streets))
+	for tsid := range sharedWorld.streets {
+		streets = append(streets, tsid)
+	}
+	sort.Strings(streets)
+	for _, tsid := range streets {
+		for sid, spot := range sharedWorld.streets[tsid] {
+			if spot.kind != "batterfly" {
+				continue
+			}
+			if rx, ry := creatureReach(spot); !math.IsInf(rx, 1) || !math.IsInf(ry, 1) {
+				t.Fatalf("%s %s reach %v, %v", tsid, sid, rx, ry)
+			}
+			for _, d := range [][2]float64{{-20000, 0}, {20000, 0}, {-9000, -3000}, {9000, 3000}} {
+				id++
+				cl := r.player(id, "Ada", tsid, spot.x+d[0], spot.y+d[1])
+				r.act(cl, 1, sid, "wait", nil)
+				for _, m := range r.drain(cl) {
+					if m["t"] == "obj_no" {
+						t.Fatalf("%s %s from %v: %v", tsid, sid, d, m)
+					}
+				}
+			}
+			n++
+		}
+	}
+	if n < 100 {
+		t.Fatalf("only %d Batterflies checked", n)
+	}
+	// Its pile is where it always was: a pickup from across the street is too far.
+	var street string
+	var spot *objSpot
+	for _, tsid := range streets {
+		if s := sharedWorld.streets[tsid]["batterfly:0"]; s != nil {
+			street, spot = tsid, s
+			break
+		}
+	}
+	far := r.player(id+1, "Bo", street, spot.x+creatureReachX+10, spot.y)
+	r.act(far, 1, "batterfly:0", "pickup", nil)
+	if no := r.only(far, "obj_no"); no["code"] != "far" {
+		t.Fatalf("a far pickup answered %v", no)
 	}
 }

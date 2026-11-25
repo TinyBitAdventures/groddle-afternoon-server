@@ -24,8 +24,8 @@ package main
 //
 // Where they are (the remake's own paths, shared): every client draws each animal on the same path
 // from the same clock, so the server never moves them and an animal nobody touched costs nothing.
-// A Chicken walks to and fro across its spot, a Butterfly rests or flies across the street, a
-// Batterfly loops low over its spot (the game's js/street-creatures.js has the paths). What the
+// A Chicken walks to and fro across its spot, a Butterfly or Batterfly flies at random over the
+// whole street (the game's js/street-creatures.js has the paths). What the
 // server keeps is when the path stood still: "lag", the ms the animal has spent held, and "hold",
 // the ms it holds still from now, so path time is (now - lag), frozen while held. A verb that lands
 // holds the animal for everyone, as the source stops it for the player at it (npc_chicken.js
@@ -36,10 +36,10 @@ package main
 // them and sets its clock.
 //
 // Departures from the source, on purpose: the source's Chicken walks edge to edge at 45 px/s
-// (onCreate 1008-1023, onPathing 1168-1214) and a Butterfly or Batterfly flies anywhere in a band
-// over the whole street (flyAround 886-969; npc_batterfly.js 1039-1052); the remake keeps the
-// paths its solo game always drew (a Chicken's 100 px patrol, the drifting flyers), now on a
-// shared clock. Its pauses (onPause 1216-1277: every 6-14 s it stands or pecks 2-4 s and turns
+// (onCreate 1008-1023, onPathing 1168-1214); the remake keeps the 100 px patrol its solo game
+// always drew, now on a shared clock. A Butterfly or Batterfly flies at random over the whole
+// street in its band over the floor, as the source (flyAround 886-969; npc_batterfly.js
+// 1039-1052), on a seeded path every page draws alike (lane flyk, 2026-11-24). Its pauses (onPause 1216-1277: every 6-14 s it stands or pecks 2-4 s and turns
 // round half the time) are on that shared path too, rolled from a seed every page shares (the
 // game's chickenWalkAt, lane CHICKWALK); its kicks into the air (onPlayerCollision 1299-1343) are
 // each player's own decoration, not shared.
@@ -240,8 +240,9 @@ func (o *objects) hold(ob *liveObj, d time.Duration) {
 // waitCreature is npc.js onInteractionStarting 1981-1990 and checkWaiting 1878-1900 for a shared
 // Chicken, Butterfly or Piggy: while any player has it open (its menu, a verb on it) it stands still for
 // everyone (npc_chicken.js onWaitStart 1630-1639 apiStopMoving; npc_butterfly.js onWaitStart
-// 1513-1531), not only on that player's screen. Each "wait" holds it creatureWait from now and the
-// street hears the new hold. A Batterfly does not stop for a menu (its page never held it).
+// 1513-1531; npc_batterfly.js onWaitStart 1074-1081), not only on that player's screen. Each "wait"
+// holds it creatureWait from now and the street hears the new hold. A Batterfly too since it flies
+// the whole street (lane flyk): before, its page never held it, and it flew on and jumped back.
 //
 // The source's Chicken stopped where it stood and walked on from there (npc_chicken.js onWaitStart
 // 1635-1643, onWaitEnd 1626-1633 startMoving). The player's screen stopped it a trip earlier than
@@ -416,8 +417,13 @@ func (o *objects) creatureState(ob *liveObj) map[string]any {
 // it jumped. The source measured from where the animal
 // was (npc_butterfly.js checkWaiting 1588, distanceFromPlayer within config.verb_radius); the server
 // keeps no flyer's place, so it takes the player's page for it, as it does sideways.
+//
+// A Batterfly the same (lane flyk, 2026-11-24): every page now flies it at random over the whole
+// street in the 400 px over the floor (npc_batterfly.js flyAround 1039-1052, the game's
+// js/street-creatures.js flierAt), so a player under it may be a street's width from its spot. Its
+// Guano pile stays at the spot (objects_guano.go), so a pickup keeps the spot's reach (handleAct).
 func creatureReach(spot *objSpot) (float64, float64) {
-	if spot.fly {
+	if spot.fly || spot.kind == "batterfly" {
 		return math.Inf(1), math.Inf(1)
 	}
 	if walker(spot.kind) {
