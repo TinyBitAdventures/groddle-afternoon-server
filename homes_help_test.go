@@ -517,3 +517,48 @@ func TestAButlerParcelAndGiftCarryTheCopy(t *testing.T) {
 		t.Fatalf("the visitor gets the named Cubimal: %v", gift)
 	}
 }
+
+func (r *helpRig) iconToken(actor, owner int64, n string, exp time.Duration) string {
+	return signBuddy(homesTestSecret, map[string]any{"k": "home_icon", "sub": actor, "o": owner, "act": map[string]any{"id": "icon-0123456789abcdef", "i": "icon3", "pl": "street", "a": "tithe", "n": 15, "t": actor, "at": 5, "x": "dropped"}, "iat": r.now.Unix(), "exp": r.now.Add(exp).Unix(), "n": n})
+}
+
+// #697: a use of a Giant Icon placed in a home (the site's HomeIcons) reaches its owner and everyone there once.
+func TestAnIconUseReachesTheOwnerAndEveryoneThereOnce(t *testing.T) {
+	r := newHelpRig(t)
+	ada, bo := r.visiting()
+	cy := r.connect(11, "Cy")
+	r.pass(cy, 7, "Ada", false)
+	r.join(cy, home(7))
+	drain(cy)
+	drain(ada)
+	drain(bo)
+	for i, tok := range []string{r.iconToken(11, 7, "a", time.Minute), r.iconToken(9, 7, "b", -time.Minute), r.tendToken(9, 7, "c", time.Minute),
+		signBuddy([]byte("another-secret-another-secret-another"), map[string]any{"k": "home_icon", "sub": 9, "o": 7, "act": map[string]any{"a": "tithe"}, "exp": r.now.Add(time.Minute).Unix(), "n": "z"})} {
+		r.do(bo, map[string]any{"t": "home_icon_tell", "token": tok})
+		if got := buddyKinds(drain(bo)); got != "error:homes" {
+			t.Fatalf("token %d: %s", i, got)
+		}
+	}
+	tok := r.iconToken(9, 7, "n1", time.Minute)
+	r.do(bo, map[string]any{"t": "home_icon_tell", "token": tok})
+	if got := drain(bo); len(got) != 0 {
+		t.Fatalf("the one who used it is not told: %v", got)
+	}
+	a := only(t, drain(ada), "home_iconed")
+	act := a["act"].(map[string]any)
+	if a["owner"] != float64(7) || a["from"].(map[string]any)["name"] != "Bo" || act["i"] != "icon3" || act["n"] != float64(15) || act["t"] != float64(9) || act["x"] != nil {
+		t.Fatalf("Ada: %v", a)
+	}
+	only(t, drain(cy), "home_iconed")
+	r.do(bo, map[string]any{"t": "home_icon_tell", "token": tok})
+	if got := drain(ada); len(got) != 0 {
+		t.Fatalf("a proof works once: %v", got)
+	}
+	// The owner's own use reaches the visitors there, not the owner twice.
+	r.do(ada, map[string]any{"t": "home_icon_tell", "token": r.iconToken(7, 7, "n2", time.Minute)})
+	if got := drain(ada); len(got) != 0 {
+		t.Fatalf("the owner is not told their own use: %v", got)
+	}
+	only(t, drain(bo), "home_iconed")
+	only(t, drain(cy), "home_iconed")
+}

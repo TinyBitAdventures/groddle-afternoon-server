@@ -28,6 +28,11 @@ package main
 //   - A key-holder's tending of the owner's gardens is the site's to check
 //     and keep (src/HomeTending.php); its signed proof brings the owner and
 //     everyone else on that street the change at once (home_tend_tell).
+//   - A use of a Giant Icon placed in a home (#697: ruminate, revere,
+//     reflect, a tithe, a tither's bestowment) is the site's to check and keep
+//     (src/HomeIcons.php: one action counter and one last tither on the Icon
+//     for everyone, items/include/icon.js); its signed proof brings the owner
+//     and everyone in that home the Icon's new count at once (home_icon_tell).
 //   - Hosting (locations/home.js:55-66): whenever someone comes into a house
 //     while its owner is in it, four or more players there counts the owner
 //     a hosted party of three guests (crowded_house), eighteen or more one of
@@ -39,6 +44,7 @@ package main
 //	        a copy of its own (G974): "item":{"c":"npc_cubimal_butler","n":1,"t":"Rufus"} or {"c":"pick","n":1,"r":40}
 //	        a wrapped Gift Box: "item":{"c":"bag_gift_box_wrapped","n":1,"box":[{"c":"apple","n":3}],"ref":"w2"}
 //	{"t":"home_tend_tell","token":"…"}                                    the site's proof of tending done
+//	{"t":"home_icon_tell","token":"…"}                                    the site's proof of a use of a home's Icon
 //
 // Server to client:
 //
@@ -47,6 +53,7 @@ package main
 //	{"t":"butler_gift","owner":7,"op":"bvisit-…","item":{"c":"apple","n":1}}       to a visitor the Butler gave the owner's gift (r, t: its copy's own)
 //	{"t":"butler_visit","from":{"id":9,"name":"Bo"},"gift":true}                   to the owner, online: a visit noted
 //	{"t":"home_tended","owner":7,"from":{"id":9,"name":"Bo"},"acts":[{"y":"street","g":"…","p":"1-2","a":"water","s":"","at":…}]}
+//	{"t":"home_iconed","owner":7,"from":{"id":9,"name":"Bo"},"act":{"id":"icon-…","i":"icon3","pl":"street","a":"tithe","n":15,"t":9,"at":…}}
 //	{"t":"home_hosted","guests":3}                                        to the owner in the house
 //
 // A tend proof is base64url(JSON) "." base64url(HMAC-SHA256(secret, the first
@@ -102,6 +109,8 @@ const (
 	tendBurst         = 20
 	tendEvery         = 2 * time.Second
 	homeTendLife      = 2 * time.Minute
+	iconBurst         = 20
+	iconEvery         = 2 * time.Second
 	hostedThree       = 4  // locations/home.js:59 activePlayers.length >= 4
 	hostedSeventeen   = 18 // locations/home.js:63 activePlayers.length >= 18
 
@@ -269,6 +278,7 @@ func newHomeHelp(h *Hub) Module {
 func (m *homeHelp) Register(r *Registry) {
 	r.Handle("butler_leave", m.leave)
 	r.Handle("home_tend_tell", m.tendTell)
+	r.Handle("home_icon_tell", m.iconTell)
 	r.OnJoin(m.joined)
 	r.OnDisconnect(m.disconnected)
 }
@@ -488,6 +498,82 @@ func (m *homeHelp) tendTell(cl *Client, frame json.RawMessage) {
 	}
 	id := strconv.FormatInt(c.O, 10)
 	for _, street := range []string{homeStreetPrefix + id, houseStreetPrefix + id} {
+		for _, o := range m.h.StreetLocked(street) {
+			if !told[o.ID()] {
+				told[o.ID()] = true
+				m.h.SendLocked(o, out)
+			}
+		}
+	}
+}
+
+// —— Giant Icons at home (#697) ——
+
+type iconClaims struct {
+	K   string         `json:"k"`
+	Sub int64          `json:"sub"`
+	O   int64          `json:"o"`
+	Act map[string]any `json:"act"`
+	N   string         `json:"n"`
+	Exp int64          `json:"exp"`
+}
+
+// iconTell passes the site's word that someone used a Giant Icon placed in a home (src/HomeIcons.php)
+// to its owner and everyone in that home (the home street, the house, the Tower floors), but not to
+// the one who used it: their game has the site's answer.
+func (m *homeHelp) iconTell(cl *Client, frame json.RawMessage) {
+	if !m.allow("icon", cl, iconBurst, iconEvery) {
+		return
+	}
+	var msg struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(frame, &msg)
+	var c iconClaims
+	err := errBuddyOff
+	if len(m.secret) > 0 {
+		err = errBuddyToken
+		if raw, e := signedBody(m.secret, msg.Token); e == nil && json.Unmarshal(raw, &c) == nil && c.K == "home_icon" && c.O > 0 && c.N != "" && c.Act != nil {
+			switch {
+			case c.Sub != cl.ID():
+				err = errBuddyOwner
+			case c.Exp < m.h.Now().Unix():
+				err = errBuddyExpired
+			default:
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		m.h.ErrorLocked(cl, "homes", err.Error())
+		return
+	}
+	now := m.h.Now().Unix()
+	exp := c.Exp
+	if most := now + int64(homeTendLife.Seconds()); exp > most {
+		exp = most
+	}
+	if !m.spent.spend("home_icon", c.N, exp, now) {
+		return
+	}
+	act := map[string]any{}
+	for _, k := range []string{"id", "i", "pl", "a", "n", "t", "at"} {
+		if v, ok := c.Act[k]; ok {
+			act[k] = v
+		}
+	}
+	out := map[string]any{"t": "home_iconed", "owner": c.O, "from": map[string]any{"id": cl.ID(), "name": cl.Name()}, "act": act}
+	told := map[int64]bool{cl.ID(): true}
+	if o := m.h.ClientLocked(c.O); o != nil && !told[c.O] {
+		m.h.SendLocked(o, out)
+		told[c.O] = true
+	}
+	id := strconv.FormatInt(c.O, 10)
+	streets := []string{homeStreetPrefix + id, houseStreetPrefix + id}
+	for f := 0; f <= towerFloorsMax; f++ {
+		streets = append(streets, towerStreetPrefix+id+"_"+strconv.Itoa(f))
+	}
+	for _, street := range streets {
 		for _, o := range m.h.StreetLocked(street) {
 			if !told[o.ID()] {
 				told[o.ID()] = true
