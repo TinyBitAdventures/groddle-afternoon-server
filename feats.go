@@ -1157,8 +1157,31 @@ func (m *feats) progressSoon() {
 		if r == nil {
 			return
 		}
-		m.toAll(map[string]any{"t": "feat_progress", "run": r.Run, "feat": r.Feat, "total": r.Total, "tier": r.Tier, "count": len(r.Players), "top": topRows(ranked(r))})
+		m.progressToEach(r)
 	})
+}
+
+// progressToEach is feat_progress with each player's own amount and place (#683: a place told only on a
+// contribution or a sync went stale as others passed you). Players with nothing in share one frame.
+func (m *feats) progressToEach(r *featRun) {
+	sorted := ranked(r)
+	place := make(map[int64]int, len(sorted))
+	mine := make(map[int64]int64, len(sorted))
+	for i, e := range sorted {
+		place[e.ID], mine[e.ID] = i+1, e.N
+	}
+	msg := map[string]any{"t": "feat_progress", "run": r.Run, "feat": r.Feat, "total": r.Total, "tier": r.Tier, "count": len(sorted), "top": topRows(sorted), "mine": int64(0), "place": 0}
+	none, _ := json.Marshal(msg)
+	for _, cl := range m.h.clients {
+		at := place[cl.ID()]
+		if at == 0 {
+			m.h.pushLocked(cl, none)
+			continue
+		}
+		msg["mine"], msg["place"] = mine[cl.ID()], at
+		b, _ := json.Marshal(msg)
+		m.h.pushLocked(cl, b)
+	}
 }
 
 // —— The end of a Feat's day ——

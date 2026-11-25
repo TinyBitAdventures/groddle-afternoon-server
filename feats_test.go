@@ -564,3 +564,39 @@ func TestFeatDevBringsTheEndNear(t *testing.T) {
 		t.Fatal("feat_dev is QA only")
 	}
 }
+
+// #683: the once-a-second progress carries each player's own amount and place, so a place goes on
+// changing as others pass you, not only on your own contribution or a sync.
+func TestFeatProgressTellsEachPlayerTheirPlace(t *testing.T) {
+	table := featTableForTest(t)
+	start := featRunStart(t, table, "animal_love")
+	r := newFeatRig(t, "", newFakeFeatLedger(), start.Add(10*time.Minute), nil)
+	a := r.player(1, "Ada")
+	b := r.player(2, "Bo")
+	c := r.player(3, "Cy")
+	drain(a)
+	drain(b)
+	drain(c)
+	if got := r.add(a, "animal_love", 3); num(got["place"]) != 1 {
+		t.Fatalf("Ada leads: %v", got)
+	}
+	r.fire(time.Second)
+	drain(a)
+	drain(b)
+	drain(c)
+	r.now = r.now.Add(time.Minute)
+	if got := r.add(b, "animal_love", 8); num(got["place"]) != 1 {
+		t.Fatalf("Bo passes her: %v", got)
+	}
+	r.fire(time.Second)
+	pa, pb, pc := kinds(drain(a), "feat_progress"), kinds(drain(b), "feat_progress"), kinds(drain(c), "feat_progress")
+	if len(pa) != 1 || num(pa[0]["place"]) != 2 || num(pa[0]["mine"]) != 3 {
+		t.Fatalf("Ada hears she is second: %v", pa)
+	}
+	if len(pb) != 1 || num(pb[0]["place"]) != 1 || num(pb[0]["mine"]) != 8 {
+		t.Fatalf("Bo hears he is first: %v", pb)
+	}
+	if len(pc) != 1 || num(pc[0]["place"]) != 0 || num(pc[0]["mine"]) != 0 || num(pc[0]["total"]) != 11 || num(pc[0]["count"]) != 2 {
+		t.Fatalf("Cy, with nothing in, has no place: %v", pc)
+	}
+}
