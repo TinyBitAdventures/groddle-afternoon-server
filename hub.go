@@ -93,6 +93,11 @@ const (
 	// asked for last. Every "left" broadcast follows a join, so this bounds those too.
 	joinBurst = 4
 	joinEvery = 500 * time.Millisecond
+
+	// Bubble words (bubbleWordRe) a socket may send: four a second with a burst of eight (a verb
+	// started, cancelled and started again), apart from chat's allowance.
+	bubbleBurst = 8
+	bubbleEvery = 250 * time.Millisecond
 )
 
 // joinAsk is a join frame's street and pose.
@@ -107,6 +112,9 @@ type joinAsk struct {
 var (
 	streetRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 	wordRe   = regexp.MustCompile(`^[a-z0-9_]{1,24}$`)
+	// The game's bubble words (js/realtime-client.js SKILL_BUBBLE_WORD, js/skill-bubbles.js):
+	// sp_<overlay>_<s>, sp_i_<item>_<s> or sp_im_<item>_<s> (an item's art, mirrored), sp_off_0.
+	bubbleWordRe = regexp.MustCompile(`^sp_[a-z_]{1,19}_\d{1,2}$`)
 )
 
 // Player is one character as the others on a street see them.
@@ -137,6 +145,7 @@ type Client struct {
 	moveWindow time.Time
 	moveCount  int
 	joinRate   bucket      // joinBurst, joinEvery
+	bubbleRate bucket      // bubbleBurst, bubbleEvery
 	joinNext   *joinAsk    // a join waiting for joinRate
 	joinWait   func() bool // its timer
 	chatTokens float64
@@ -409,7 +418,18 @@ func (h *Hub) Handle(cl *Client, frame []byte) {
 		}
 	case "emote":
 		e := word(m.E, "")
-		if cl.street == "" || e == "" || !h.allowChatLocked(cl) {
+		if cl.street == "" || e == "" {
+			return
+		}
+		// An item's or a skill package's bubble over the player (a musicblock, a tool at work) is a
+		// fixed word, never text: it has its own allowance, so chatting (or a chat silence) never
+		// keeps it from the street, as Glitch's announcements had no chat gate (musicblock_*.js 153,
+		// inc_skill_packages.js 294-314). Any other word stays on the chat allowance.
+		if bubbleWordRe.MatchString(e) {
+			if !cl.bubbleRate.take(h.now(), bubbleBurst, bubbleEvery) {
+				return
+			}
+		} else if !h.allowChatLocked(cl) {
 			return
 		}
 		h.broadcastLocked(cl, map[string]any{"t": "emoted", "id": cl.id, "e": e})
