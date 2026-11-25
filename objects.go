@@ -722,6 +722,7 @@ func (o *objects) Register(r *Registry) {
 	r.Provide("objects.pigFood", o.pigFood)
 	r.Provide("objects.withTool", o.withGardenTool)
 	r.Provide("objects.dropStreet", o.dropStreet) // party_spaces.go: a Party Space's objects end with it
+	r.Provide("objects.self", o)                  // the site's street counts (streetcounts.go)
 }
 
 // treeClass is the class of the tree an id names on a street ("" when it names no tree there, or a

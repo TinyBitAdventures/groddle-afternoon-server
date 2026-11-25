@@ -22,6 +22,7 @@ package main
 //	health  {"since":…,"until":…,"points":1000}       200 {"status":"ok","bucket":60,"machine":{…},"now":{…},"fields":[…],"rows":[[…]]}   server health a minute, bucketed (health.go)
 //	rooks   {}                                        200 {"status":"ok","attacks":[…]}   every Rook over a street now (rook_admin.go)
 //	rook_end {"street":"GA5…"}                        200 {"status":"ended"} | {"status":"ending"} | {"status":"none"}   the Rook flies off, nothing paid (rook_admin.go)
+//	street_counts {}                                  200 {"status":"ok","at":ms,"streets":{…}}   each street's trees standing and gone, its shared Patches (streetcounts.go; the Encyclopedia's street pages)
 //	any:    401 {"status":"refused"} unsigned, a bad, old or replayed signature; 400 {"status":"bad"} not a call this server can make
 //
 // Server to the player:

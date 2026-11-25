@@ -565,6 +565,7 @@ func (g *patches) Register(r *Registry) {
 	r.Provide("patches.dustSpot", g.dustSpot)
 	r.Provide("patches.dust", g.dust)
 	r.Provide("patches.revive", g.revive)
+	r.Provide("patches.self", g) // the site's street counts (streetcounts.go)
 }
 
 func (g *patches) nowMs() int64 { return g.h.Now().UnixMilli() }
