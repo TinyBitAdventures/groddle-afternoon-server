@@ -29,11 +29,12 @@ package main
 //
 // Server to client:
 //
-//	{"t":"home_pass_ok","owner":7,"key":true}
+//	{"t":"home_pass_ok","owner":7,"key":true,"inside":"…"}            (inside: while let in, the proof below, fresh)
 //	{"t":"home_knocked","id":9,"name":"Bo","text":"Bo is knocking on your door and would like to enter your house..."}   to the owner, for knockWait
 //	{"t":"home_knock_sent","owner":7,"text":"Ok! We'll let you know if they answer the door"}
-//	{"t":"home_open","owner":7,"why":"key|let_in|owner"}            the door is open to you: go in
-//	{"t":"home_let_in","owner":{"id":7,"name":"Ada"},"text":"Ada has let you into their house."}
+//	{"t":"home_open","owner":7,"why":"key|let_in|owner","inside":"…"}            the door is open to you: go in
+//	{"t":"home_let_in","owner":{"id":7,"name":"Ada"},"text":"Ada has let you into their house.","inside":"…"}
+//	{"t":"home_inside","owner":7,"inside":"…"}                      summoned into the house (G668): the proof for this arrival
 //	{"t":"home_answered","owner":7,"allow":false}                   no answer, or no (the source says nothing)
 //	{"t":"home_refused","owner":7,"why":"offline|away|asked|blocked|private","text":"…"}
 //	{"t":"home_entered","id":9,"name":"Bo","text":"Bo just entered your house."}   to the owner, a key-holder came in
@@ -46,6 +47,18 @@ package main
 // "key":0|1,"iat","exp"}; a key proof {"k":"house_key","sub":owner,
 // "to":holder,"on":0|1,"iat","exp","n"} is good once (n). Neither has a
 // jti, so neither opens a socket as a realtime ticket does.
+//
+// G1018 (Austin 2026-11-25: "Only key holders should be able to see
+// inside/backyard. Well and also visitors who knock and are let in."): the
+// site sends the house and the back yard only to the owner, a key-holder, or
+// someone this server has let in. Being let in lives here (house_auth), so the
+// one let in (or summoned in) is handed a proof signed with the same secret,
+// {"k":"house_in","sub":visitor,"o":owner,"iat","exp"} (homeInLife), which
+// the game hands the site when it reads the home (groddle/v1/homes/<id>?in=).
+// The site signs no "house_in" and this server signs nothing else, so neither
+// side's tokens pass for the other's. A fresh one comes with each pass taken
+// while the visitor is still let in, so it lasts as long as being let in does
+// (to within homeInLife).
 //
 // Ours: a pass is good for homePassLife at most whatever it says; a knock
 // nobody answers in knockWait is told to the knocker (the source said
@@ -75,6 +88,7 @@ const (
 	homePassLife      = time.Hour        // ours: the longest a pass is honoured, whatever it says
 	homeSummonLife    = 2 * time.Minute  // ours: how long a summons into the owner's house waits for its arrival
 	homeTellLife      = 2 * time.Minute  // the longest a key proof is honoured
+	homeInLife        = 10 * time.Minute // G1018: how long the site honours a let-in proof (renewed with each pass)
 	homePassBurst     = 12
 	homePassEvery     = 2 * time.Second
 	homeKnockBurst    = 4
@@ -141,6 +155,10 @@ func (m *homes) Register(r *Registry) {
 			m.called[visitor] = map[int64]time.Time{}
 		}
 		m.called[visitor][owner] = m.h.Now().Add(homeSummonLife)
+		// G1018: the site shows the house to someone the owner summoned into it.
+		if proof := m.insideProof(visitor, owner); proof != "" {
+			m.send(visitor, map[string]any{"t": "home_inside", "owner": owner, "inside": proof})
+		}
 	})
 	// summon.go door: whose house the summoner stands in, by the site's word (their pass) or the owner's socket.
 	r.Provide("homes.ownerName", func(visitor, owner int64) string {
@@ -292,6 +310,24 @@ func (m *homes) ownerName(owner int64, p *homePass) string {
 	return "The owner"
 }
 
+// insideProof is the let-in proof for the site (G1018), or "" with no secret.
+func (m *homes) insideProof(visitor, owner int64) string {
+	if len(m.secret) == 0 {
+		return ""
+	}
+	now := m.h.Now()
+	raw, _ := json.Marshal(map[string]any{"k": "house_in", "sub": visitor, "o": owner, "iat": now.Unix(), "exp": now.Add(homeInLife).Unix()})
+	body := base64.RawURLEncoding.EncodeToString(raw)
+	mac := hmac.New(sha256.New, m.secret)
+	mac.Write([]byte(body))
+	return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// letIn: the owner, online, let visitor in this session (house_auth).
+func (m *homes) letIn(owner, visitor int64) bool {
+	return m.authed[owner][visitor] && m.h.ClientLocked(owner) != nil
+}
+
 // atHome is houses_is_at_home: on their home street or in their house.
 func atHome(cl *Client) bool {
 	if cl == nil {
@@ -346,7 +382,7 @@ func (m *homes) gate(cl *Client, street string) (bool, string, string) {
 	if m.blocked(owner, cl.ID()) {
 		return false, "home_blocked", homeTextBlocked
 	}
-	if !house || p.key || (m.authed[owner][cl.ID()] && m.h.ClientLocked(owner) != nil) {
+	if !house || p.key || m.letIn(owner, cl.ID()) {
 		return true, "", ""
 	}
 	// G668: summoned in by the owner (online): this one arrival, never a key.
@@ -432,7 +468,11 @@ func (m *homes) passMsg(cl *Client, frame json.RawMessage) {
 		m.passes[cl.ID()] = map[int64]*homePass{}
 	}
 	m.passes[cl.ID()][c.O] = &homePass{name: cleanName(c.Nm), key: c.Key == 1, exp: exp}
-	m.h.SendLocked(cl, map[string]any{"t": "home_pass_ok", "owner": c.O, "key": c.Key == 1})
+	ok := map[string]any{"t": "home_pass_ok", "owner": c.O, "key": c.Key == 1}
+	if c.Key != 1 && m.letIn(c.O, cl.ID()) {
+		ok["inside"] = m.insideProof(cl.ID(), c.O)
+	}
+	m.h.SendLocked(cl, ok)
 }
 
 func (m *homes) refuse(cl *Client, owner int64, why, text string) {
@@ -465,11 +505,12 @@ func (m *homes) knock(cl *Client, frame json.RawMessage) {
 	}
 	owner := m.h.ClientLocked(o)
 	if p.key || (owner != nil && m.authed[o][cl.ID()]) {
-		why := "key"
+		open := map[string]any{"t": "home_open", "owner": o, "why": "key"}
 		if !p.key {
-			why = "let_in"
+			open["why"] = "let_in"
+			open["inside"] = m.insideProof(cl.ID(), o)
 		}
-		m.h.SendLocked(cl, map[string]any{"t": "home_open", "owner": o, "why": why})
+		m.h.SendLocked(cl, open)
 		return
 	}
 	if owner == nil {
@@ -528,7 +569,7 @@ func (m *homes) answer(cl *Client, frame json.RawMessage) {
 		m.authed[cl.ID()] = map[int64]bool{}
 	}
 	m.authed[cl.ID()][msg.ID] = true
-	m.send(msg.ID, map[string]any{"t": "home_let_in", "owner": map[string]any{"id": cl.ID(), "name": cl.Name()}, "text": cl.Name() + homeTextLetIn})
+	m.send(msg.ID, map[string]any{"t": "home_let_in", "owner": map[string]any{"id": cl.ID(), "name": cl.Name()}, "text": cl.Name() + homeTextLetIn, "inside": m.insideProof(msg.ID, cl.ID())})
 }
 
 // keyTell is acl_keys_grant_receive 44-65 (a key given) and acl_keys_remove 67-81 (taken back).

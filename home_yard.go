@@ -45,6 +45,14 @@ package main
 // and keeps the rock's chunks, the node's stock and each cultivation's wear,
 // so they are the same for every visitor and for the owner, online or not.
 //
+// G1018 (M28): the back yard is the house's (Austin 2026-11-25: only key holders
+// and visitors let in see inside), and whoever homes.go lets into HOUSE_<owner>
+// may use the same verbs there: ids "b:rock:<n>", "b:node:<class>:<n>",
+// "b:patch:<n>" (the back yard's own cultivations, homes.backYard, keyed as the
+// street's are), checked as standing in the house, answered by the same site
+// route, and told only to the owner and those in the house. Wine of the Dead's
+// pour (dirt_pile.js 67, pour_wine: container.owner == pc) is no visitor verb.
+//
 // Ours: an act the site has not answered in time is refused to the visitor,
 // and its op is idempotent at the site, so nothing counts twice.
 
@@ -59,6 +67,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,19 +77,22 @@ const (
 	yardBurst           = 12
 	yardEvery           = time.Second
 
-	yardTextAway = "You need to be on their home street to do that."
-	yardTextOff  = "That can't be done right now."
-	yardTextBad  = "Nothing to do here."
+	yardTextAway      = "You need to be on their home street to do that."
+	yardTextAwayHouse = "You need to be in their house to do that." // ours: the back yard is the house's (G1018)
+	// yardBackPrefix names a thing in the owner's back yard (G1018): "b:rock:0", "b:node:dirt_pile:0", "b:patch:1".
+	yardBackPrefix = "b:"
+	yardTextOff    = "That can't be done right now."
+	yardTextBad    = "Nothing to do here."
 )
 
 var (
 	yardAnimalRe = regexp.MustCompile(`^a[0-9]{1,6}$`)
-	yardPlotRe   = regexp.MustCompile(`^patch(_dark)?:[0-9]{1,2}$`)
+	yardPlotRe   = regexp.MustCompile(`^(b:)?patch(_dark)?:[0-9]{1,2}$`)
 	yardVerbRe   = regexp.MustCompile(`^(pet|nibble|massage|milk|squeeze|dig|tend|water|harvest|mine|scrape|scoop|plant|open)$`)
 	// HOMES2: a planting names the visitor's Seasoned Bean (patch.js verbs.plant 216-310).
 	yardBeanRe = regexp.MustCompile(`^bean_[a-z]{2,12}$`)
-	yardRockRe = regexp.MustCompile(`^rock:[0-9]{1,2}$`)
-	yardNodeRe = regexp.MustCompile(`^node:[a-z][a-z0-9_]{2,19}:[0-9]{1,2}$`)
+	yardRockRe = regexp.MustCompile(`^(b:)?rock:[0-9]{1,2}$`)
+	yardNodeRe = regexp.MustCompile(`^(b:)?node:[a-z][a-z0-9_]{2,19}:[0-9]{1,2}$`)
 )
 
 func init() { modules = append(modules, newHomeYard) }
@@ -235,7 +247,12 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, req, owner, "bad", yardTextBad)
 		return
 	}
-	if cl.Street() != homeStreetPrefix+strconv.FormatInt(owner, 10) {
+	// G1018 (M28): the back yard is the house's (homes.go lets only the owner, a key-holder or someone
+	// let in or summoned in onto HOUSE_<owner>), and in it anyone inside may use the same verbs.
+	if back := strings.HasPrefix(msg.ID, yardBackPrefix); back && cl.Street() != houseStreetPrefix+strconv.FormatInt(owner, 10) {
+		m.refuse(cl, req, owner, "away", yardTextAwayHouse)
+		return
+	} else if !back && cl.Street() != homeStreetPrefix+strconv.FormatInt(owner, 10) {
 		m.refuse(cl, req, owner, "away", yardTextAway)
 		return
 	}
@@ -298,7 +315,12 @@ func (m *homeYard) act(cl *Client, frame json.RawMessage) {
 				m.h.SendLocked(o, out)
 			}
 			id := strconv.FormatInt(owner, 10)
-			for _, street := range []string{homeStreetPrefix + id, houseStreetPrefix + id} {
+			streets := []string{homeStreetPrefix + id, houseStreetPrefix + id}
+			if strings.HasPrefix(a.ID, yardBackPrefix) {
+				// G1018: what happens in the back yard is for those inside, not the street.
+				streets = streets[1:]
+			}
+			for _, street := range streets {
 				for _, o := range m.h.StreetLocked(street) {
 					if !told[o.ID()] {
 						told[o.ID()] = true
