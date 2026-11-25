@@ -500,6 +500,9 @@ func (m *projects) Register(r *Registry) {
 	r.Handle("project_home_drop", m.homeDrop)
 	// objects_upgrades.go: a street's built upgrade picks its layout.
 	r.Provide("projects.upgrade", m.upgradeOn)
+	// group_hall_streets.go (G1312): a finished hall's street lets in its group's members only.
+	r.GateJoin(m.hallGate)
+	r.Provide("projects.hallRecheck", m.hallRecheck)
 	m.registerCrew(r)     // projects_crew.go: project_work_start, project_work_stop
 	m.registerFeatured(r) // projects_featured.go: the featured project on connect, project_featured_dev
 	r.OnConnect(m.connected)

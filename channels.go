@@ -169,6 +169,14 @@ func (m *channels) Register(r *Registry) {
 	r.Provide("channels.audience", m.audience)
 	r.Provide("channels.self", m) // webchat.go, chatdelete.go
 	r.Provide("channels.notice", m.notice)
+	// group_hall_streets.go (G1312): whether the site's signed list has a player in a group.
+	r.Provide("channels.inGroup", m.inGroup)
+}
+
+// inGroup: player id's live groups list (signed by the site, not run out) has group.
+func (m *channels) inGroup(id, group int64) bool {
+	w := m.watch[id]
+	return w != nil && !w.exp.Before(m.h.Now()) && w.groups[group]
 }
 
 // notice posts the server's own line in a channel room (ours: Glitch's Global had no server lines):
@@ -461,6 +469,10 @@ func (m *channels) watchMsg(cl *Client, frame json.RawMessage) {
 	id := cl.ID()
 	w := &chanWatch{groups: groups, rooms: rooms, silence: silence, exp: time.Unix(c.Exp, 0)}
 	m.watch[id] = w
+	// group_hall_streets.go (G1312): out of a group hall whose group this list no longer has.
+	if fn, ok := m.h.ProvidedLocked("projects.hallRecheck").(func(*Client)); ok {
+		fn(cl)
+	}
 	// Local chat's cone stands on the newest word from the site (hub.go, G480).
 	if m.h.setConeLocked(id, silence["chat"], c.Iat) {
 		m.h.SendLocked(cl, map[string]any{"t": "cone", "on": silence["chat"]})
