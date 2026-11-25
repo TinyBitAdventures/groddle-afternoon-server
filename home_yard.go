@@ -78,7 +78,7 @@ const (
 	yardEvery           = time.Second
 
 	yardTextAway      = "You need to be on their home street to do that."
-	yardTextAwayHouse = "You need to be in their house to do that." // ours: the back yard is the house's (G1018)
+	yardTextAwayHouse = "You need to be in their house to do that." // the remake's line: the back yard is the house's (G1018)
 	// yardBackPrefix names a thing in the owner's back yard (G1018): "b:rock:0", "b:node:dirt_pile:0", "b:patch:1".
 	yardBackPrefix = "b:"
 	yardTextOff    = "That can't be done right now."
