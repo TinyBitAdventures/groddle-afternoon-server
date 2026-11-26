@@ -14,6 +14,9 @@ package main
 //	{"t":"obj_mine","id":"rock:2","do":"start"}         a mining swing begins (or "stop": cancelled)
 //	{"t":"obj_dig","id":"node:dirt_pile:0","do":"start"} a dig at a Dirt Pile begins (or "stop")
 //	{"t":"obj_act","req":8,"id":"tree:1","verb":"poison"}  a Tree Poison pour landed ("antidote" too)
+//	{"t":"obj_act","req":14,"id":"node:dust_trap:0","verb":"trigger"}  the player walked into a Dust
+//	                                                       Trap: sprung for everyone if it was ready
+//	                                                       (objects_dust_trap.go, G946)
 //	{"t":"obj_dust","req":10}                            Fertilidust used: every living tree on the street
 //	{"t":"obj_dust","req":11,"id":"tree:2"}              Fertilidust Lite used on that tree (near you)
 //	{"t":"obj_dust","req":11,"id":"patch:0"}             …or on the tree in that shared Patch (G564: a plot
@@ -211,7 +214,7 @@ var (
 	objIDRe  = regexp.MustCompile(`^(?:(rock|tree|pig|chicken|butterfly|batterfly|kitty|crab|dragon):(\d{1,2})|node:([a-z0-9_]{1,24}):(\d{1,2}))$`)
 	objVerbs = map[string]bool{"mine": true, "harvest": true, "pet": true, "water": true, "scrape": true, "scoop": true, "dig": true,
 		"poison": true, "antidote": true, "nibble": true, "feed": true, "eat": true, "squeeze": true, "massage": true, "milk": true, "incubate": true,
-		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true, "pickup": true, "dress": true}
+		"wait": true, "food": true, "pocket": true, "flatter": true, "hug": true, "insult": true, "pinch": true, "name": true, "capture": true, "youth": true, "pickup": true, "dress": true, "trigger": true}
 	objPerks = map[string]bool{"luck": true, "expert": true, "whisperer": true, "paper8": true, "ak6": true, "sate": true, "guano1": true, "guano2": true, "ak5": true, "herd": true, "rube": true}
 )
 
@@ -225,6 +228,7 @@ var notReady = map[string]string{
 	"peat_1":          "No more peat here!",                             // peat_1.js:143
 	"paper_tree":      "There's nothing to pick, cowboy!",               // paper_tree.js:252
 	"npc_salmon":      "The Salmon is gone. Another will turn up soon.", // js/resource-nodes.js (apiDelete on pocket)
+	"dust_trap":       "The Dust Trap is resetting.",                    // js/resource-nodes.js (the source's collision did nothing)
 	"rock":            "This is not the rock you are looking for.",      // include/mining.js:216
 	"tree":            "There's nothing to pick, cowboy.",               // include/trants.js:235
 }
@@ -258,6 +262,7 @@ type nodeRule struct {
 	After   *int     `json:"after"`
 	Consume int      `json:"consume"`
 	Regrow  []int64  `json:"regrow"` // min ms, max ms, step ms
+	Reset   []int64  `json:"reset"`  // a Dust Trap: min ms, max ms, full reset ms (objects_dust_trap.go)
 	Tend    *struct {
 		Refill  int   `json:"refill"`
 		ResetMs int64 `json:"resetMs"`
@@ -570,10 +575,12 @@ func init() {
 type liveObj struct {
 	spot *objSpot
 
-	chunks   int  // rock
-	mega     bool // rock: came back at 150
-	nextMega bool // rock: will come back at 150
-	units    int  // node
+	chunks   int       // rock
+	mega     bool      // rock: came back at 150
+	nextMega bool      // rock: will come back at 150
+	units    int       // node
+	readyAt  time.Time // dust trap: its ready_time, when it last became ready (objects_dust_trap.go)
+	sprungAt time.Time // dust trap: when it went down
 	// treeCore (trees.go): a tree's fruit, capacity, health, maturity, tending flags and the game
 	// day they belong to (wood: its harvesters' day); petted and watered are a Paper Tree's too, petted
 	// a Piggy's.
@@ -859,7 +866,7 @@ func (o *objects) isFresh(ob *liveObj) bool {
 	case "rock":
 		return ob.chunks == o.w.rules.Rocks[s.class].Chunks && !ob.mega && ob.stop == nil && len(ob.miners) == 0
 	case "node":
-		return ob.units == o.w.rules.Nodes[s.class].Initial && !ob.petted && !ob.watered && ob.stop == nil && ob.resetStop == nil && len(ob.miners) == 0
+		return ob.units == o.w.rules.Nodes[s.class].Initial && !ob.petted && !ob.watered && ob.stop == nil && ob.resetStop == nil && len(ob.miners) == 0 && ob.readyAt.IsZero() && ob.sprungAt.IsZero()
 	case "tree":
 		return ob.fruit == ob.cap && ob.maturity == s.maturity && ob.health == s.health && !ob.petted && !ob.watered && !ob.dead && ob.poisonEnd.IsZero()
 	case "wood":
@@ -956,6 +963,9 @@ func (o *objects) state(ob *liveObj) map[string]any {
 		}
 		if len(ob.miners) > 0 {
 			m["diggers"] = append([]int64(nil), ob.miners...)
+		}
+		if !ob.sprungAt.IsZero() {
+			m["sprung"] = max(1, now.Sub(ob.sprungAt).Milliseconds()) // a Dust Trap down this long
 		}
 		return m
 	case "pig":
@@ -1723,6 +1733,9 @@ func (o *objects) useNode(street string, ob *liveObj, verb string, perks map[str
 	}
 	if !known {
 		return refuse("bad_verb", "You can't do that here.")
+	}
+	if class == dustTrapClass {
+		return o.springTrap(street, ob, rule) // G946 (objects_dust_trap.go)
 	}
 	if rule.Model == "tend" {
 		return o.tendPaper(street, ob, verb, perks, rule)

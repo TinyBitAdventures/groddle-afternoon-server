@@ -47,6 +47,8 @@ type objRec struct {
 	Mega      bool    `json:"mega,omitempty"`
 	NextMega  bool    `json:"nextMega,omitempty"`
 	Units     int     `json:"units,omitempty"`
+	ReadyAt   int64   `json:"readyAt,omitempty"`  // a Dust Trap's ready_time (objects_dust_trap.go)
+	SprungAt  int64   `json:"sprungAt,omitempty"` // when it went down
 	Petted    bool    `json:"petted,omitempty"`
 	Watered   bool    `json:"watered,omitempty"`
 	ResetAt   int64   `json:"resetAt,omitempty"`
@@ -130,6 +132,7 @@ func timeOf(ms int64) time.Time {
 
 func (o *objects) record(ob *liveObj) *objRec {
 	r := &objRec{Kind: ob.spot.kind, Chunks: ob.chunks, Mega: ob.mega, NextMega: ob.nextMega, Units: ob.units,
+		ReadyAt: msOf(ob.readyAt), SprungAt: msOf(ob.sprungAt),
 		Petted: ob.petted, Watered: ob.watered, ResetAt: msOf(ob.resetAt), Fruit: ob.fruit, Health: ob.health,
 		Maturity: ob.maturity, Day: ob.day, WoodCount: ob.woodCount, PoisonEnd: msOf(ob.poisonEnd), PoisonBy: ob.poisonBy,
 		Dead: ob.dead, DeadBy: ob.deadBy, Mood: ob.mood, Hunger: ob.hunger, Daily: ob.daily, Croak: ob.croak,
@@ -191,6 +194,7 @@ func (o *objects) revive(spot *objSpot, r *objRec) *liveObj {
 		rule := o.w.rules.Nodes[spot.class]
 		ob.units = clamp(r.Units, rule.Min, rule.Max)
 		ob.petted, ob.watered, ob.resetAt = r.Petted, r.Watered, timeOf(r.ResetAt)
+		ob.readyAt, ob.sprungAt = timeOf(r.ReadyAt), timeOf(r.SprungAt)
 	case "tree":
 		ob.maturity = clamp(r.Maturity, 1, len(o.w.rules.Trants[spot.class]))
 		ob.health = clamp(r.Health, 1, 10)
@@ -393,6 +397,10 @@ func (o *objects) resume() {
 				}
 			case "node":
 				rule := o.w.rules.Nodes[ob.spot.class]
+				if ob.spot.class == dustTrapClass {
+					o.resumeTrap(street, ob, now)
+					break
+				}
 				if !ob.due.IsZero() {
 					due := ob.due
 					for !due.After(now) && ob.units < rule.Max {
