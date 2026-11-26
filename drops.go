@@ -1174,7 +1174,9 @@ func (m *drops) pickupFrame(cl *Client, frame json.RawMessage) {
 	ox := dropOrigin(s.Street, msg.Ox)
 	px, py := cl.Pos()
 	px -= ox
-	if math.Hypot(s.X-px, s.Y-py) > dropReach {
+	// The owner at home picks up from anywhere there (main.js 2955-2979: at_home skips the verb
+	// radius for a pickup; #719, Decoration Mode hides the avatar). A visitor stays within reach.
+	if dropHomeOwner(s.Street) != cl.ID() && math.Hypot(s.X-px, s.Y-py) > dropReach {
 		name := s.C
 		if c, ok := m.table.Items[s.C]; ok && c.Name != "" {
 			name = c.Name
