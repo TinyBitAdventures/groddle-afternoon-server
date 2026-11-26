@@ -241,16 +241,17 @@ func TestDanglesLightsAreTheStreets(t *testing.T) {
 // onJar is a player's feet on jar i (10 px above the box's foot, as the game's tests stand them).
 func onJar(i int) (float64, float64) { return koulatoJars[i].X, koulatoJars[i].Y - 10 }
 
-// Koulato Cluster: every arrival counts; the 30th brings the jars out for everyone.
-func TestKoulatoCountsEveryArrivalAndTheThirtiethBringsTheJars(t *testing.T) {
+// Koulato Cluster: every arrival counts; the 10th brings the jars out for everyone (ours, #711:
+// Glitch's street script waited for the 30th).
+func TestKoulatoCountsEveryArrivalAndTheTenthBringsTheJars(t *testing.T) {
 	r := newToyRig(t)
 	ada := joinAt(r.hub, 1, "Ada", koulatoStreet, 1000, 1100)
 	if st := lastOf(t, ada, "toy_state"); st["arrivals"] != 1.0 || st["out"] != false {
 		t.Fatalf("first arrival %v", st)
 	}
-	// Bo walks on and off 28 times: each is an arrival (a join from elsewhere).
+	// Bo walks on and off 8 times: each is an arrival (a join from elsewhere).
 	bo := joinAt(r.hub, 2, "Bo", "GA5101HF7F429V5", 0, 0)
-	for i := 0; i < 28; i++ {
+	for i := 0; i < 8; i++ {
 		r.now = r.now.Add(2 * joinEvery) // two joins a turn, within joinRate (hub.go)
 		send(r.hub, bo, map[string]any{"t": "join", "street": koulatoStreet, "x": 900, "y": 1100})
 		send(r.hub, bo, map[string]any{"t": "join", "street": "GA5101HF7F429V5", "x": 0, "y": 0})
@@ -259,15 +260,15 @@ func TestKoulatoCountsEveryArrivalAndTheThirtiethBringsTheJars(t *testing.T) {
 	}
 	frames(ada)
 	frames(bo)
-	if n, out := r.hub.ProvidedLocked("toys.koulato").(func(string) (int, bool))(koulatoStreet); n != 29 || out {
-		t.Fatalf("after 29 arrivals: %d %v", n, out)
+	if n, out := r.hub.ProvidedLocked("toys.koulato").(func(string) (int, bool))(koulatoStreet); n != 9 || out {
+		t.Fatalf("after 9 arrivals: %d %v", n, out)
 	}
 	cy := joinAt(r.hub, 3, "Cy", koulatoStreet, 900, 1100)
 	if got := playedOf(ada); len(got) != 1 || !sameStrings(eventsOf(got[0]), []string{"place_jars"}) || got[0]["out"] != true {
 		t.Fatalf("the street saw %v", got)
 	}
 	if st := lastOf(t, cy, "toy_state"); st["out"] != true || st["arrivals"] != 0.0 {
-		t.Fatalf("the 30th arrival's state %v", st)
+		t.Fatalf("the 10th arrival's state %v", st)
 	}
 	// A rejoin after a dropped socket is no arrival; a fresh visit after the grace is.
 	r.hub.Disconnect(cy)
@@ -289,7 +290,7 @@ func TestKoulatoCountsEveryArrivalAndTheThirtiethBringsTheJars(t *testing.T) {
 	}
 }
 
-// putOut sets a street's jars out without 30 joins.
+// putOut sets a street's jars out without 10 joins.
 func (r *toyRig) putOut(street string) {
 	r.hub.mu.Lock()
 	st := r.mod.street(street)
@@ -356,7 +357,7 @@ func TestKoulatoThreePlayersOnTheJarsGetOneJarEachOnce(t *testing.T) {
 			t.Fatalf("placed %d %+v", i, p)
 		}
 	}
-	// Standing on, moving, resending, reconnecting: never again until the next 30 arrivals.
+	// Standing on, moving, resending, reconnecting: never again until the next 10 arrivals.
 	r.advance(2 * time.Second)
 	r.click(ada, "lotha_note_1")
 	r.hub.Disconnect(bo)

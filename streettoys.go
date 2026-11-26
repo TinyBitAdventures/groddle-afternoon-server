@@ -20,9 +20,9 @@ package main
 //     _off; flag lightN_on (set while the light is out) picks which one runs, flag lightN locks
 //     the light for 700 ms (lightN_reset). The light is the street's: out for everyone.
 //   - Koulato Cluster (LIF10RP1DBU11NU.xml): player_enter counts loc.num for every arrival and at
-//     30 runs place_jars (reset_vars, the three jars shown, flag jars_on). jarN_on / jarN_off set
-//     loc.jN from three Collision-triggered Event Boxes (enter / exit), and check_done runs complete
-//     and turn_off once j1, j2 and j3 are all true. complete (once, flag completed) shows three
+//     30 runs place_jars (reset_vars, the three jars shown, flag jars_on; ours: at 10). jarN_on /
+//     jarN_off set loc.jN from three Collision-triggered Event Boxes (enter / exit), and check_done
+//     runs complete and turn_off once j1, j2 and j3 are all true. complete (once, flag completed) shows three
 //     light pools, hides everything a second later (hide_all) and puts three Firefly Jars, 7
 //     Fireflies each, on the ground (loc.createItemStack('firefly_jar', 1, x, -800) at -270, -98
 //     and 62): three stacks on the location, which anyone there could pick up. Three Glitches
@@ -38,7 +38,8 @@ package main
 //     sends more often than toyClickEvery is dropped (ours; the source took every click).
 //   - Lotha Harte's notes and lock, and the 22 s and 3.5 s timers, run here; light_fade goes out
 //     as toy_played when its time comes. Icicle Dangles' three lights and their 700 ms locks too.
-//   - Koulato Cluster's count is every player's arrival on the street (OnJoin), as loc.num was;
+//   - Koulato Cluster's count is every player's arrival on the street (OnJoin), as loc.num was,
+//     and every koulatoArrivals-th arrival brings the jars out (ours: the 10th, Glitch's the 30th);
 //     a join that only takes back the street after a dropped socket or a replaced one (the same
 //     player, the same street, within toyRejoinGrace) is not an arrival (the source counted
 //     player_enter, never player_reconnect, which the street has no script for). The jars are lit
@@ -74,7 +75,7 @@ package main
 //	{"t":"toy_played","street":"G…","toy":"","by":0,"events":["light_fade"]}                     a timer of the street's
 //	{"t":"toy_played","street":"G…","toy":"","by":0,"events":["jar3_on","complete","turn_off"],
 //	 "jars":[{"n":1,"id":7,"name":"Ada","own":false},…]}                                         the puzzle done
-//	{"t":"toy_played","street":"G…","toy":"","by":0,"events":[…],"arrivals":30?,"out":true,"lit":[…]}  jars placed, lit, put out
+//	{"t":"toy_played","street":"G…","toy":"","by":0,"events":[…],"arrivals":0,"out":true,"lit":[…]}  jars placed, lit, put out
 
 import (
 	"encoding/json"
@@ -95,8 +96,10 @@ const (
 	lothaReset = 3500 * time.Millisecond
 	// LHF70EIUS0D3RDM.xml shroom_light_N_on/_off: lightN_reset at delay 700.
 	danglesLock = 700 * time.Millisecond
-	// LIF10RP1DBU11NU.xml player_enter: if(loc.num>=30) call_event('place_jars').
-	koulatoArrivals = 30
+	// LIF10RP1DBU11NU.xml player_enter: if(loc.num>=30) call_event('place_jars'). Ours: every 10th
+	// arrival (Austin 2026-11-25, #711; the game's js/koulato-jars.js JAR_ARRIVALS). A count kept
+	// from before at or past 10 brings the jars out at the next arrival.
+	koulatoArrivals = 10
 	// complete: f1.setInstanceProp('num_flies', 7).
 	koulatoFlies = 7
 )
