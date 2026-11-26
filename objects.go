@@ -723,6 +723,7 @@ func (o *objects) Register(r *Registry) {
 	r.Handle("obj_guano_dev", o.kept(o.guanoDev))
 	r.Handle("bog_start", o.kept(o.handleBogStart))
 	r.OnLeave(o.leftStreet)
+	r.OnJoin(o.arriveAlone) // a Dust Trap sprung empty for a player alone (objects_dust_trap.go)
 	r.Provide("objects.treeClass", o.treeClass)
 	r.Provide("objects.rookTree", o.rookTree)
 	r.Provide("objects.rookCreature", o.rookCreature)

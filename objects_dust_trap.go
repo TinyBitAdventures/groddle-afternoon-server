@@ -35,13 +35,28 @@ package main
 // nobody has sprung since the server started has no ready_time (onCreate 197-201: ready, no
 // ready_time), so its first spring is the minimum.
 //
-// Not run: onPlayerEnter 207-212 (a player arriving alone on the street springs it empty 20% of
-// the time), which the solo game never ran either.
+// onPlayerEnter 207-212 (Austin's ruling 2026-11-26: as Glitch): a player arriving on a street
+// with no other active player springs each ready trap empty 20% of the time:
+//
+//	if(num_keys(this.container.getActivePlayers()) == 1 && is_chance(0.2)) {
+//		this.doPlayerResponse(null);
+//	}
+//
+// doPlayerResponse(null) sets the same reset timer and, with no pc, goes straight to stayDown
+// (160-161): no smackDown, no drop, no sound (arriveAlone). The solo game rolls it on the page
+// (js/resource-nodes.js springDustTrapsOnArrival).
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 const (
 	dustTrapClass = "dust_trap"
+	// dustTrapEmptyChance: onPlayerEnter's is_chance(0.2).
+	dustTrapEmptyChance = 0.2
+	// dustTrapSmack: smackDown's 2 s (stayDown at 2000 ms, 159); a trap sprung empty skips it.
+	dustTrapSmack = 2 * time.Second
 	// dustTrapRaise: the reset timer's + 250 ms (153), then makeReady 1 s after reset (238).
 	dustTrapRaise = 1250 * time.Millisecond
 )
@@ -98,4 +113,41 @@ func (o *objects) resumeTrap(street string, ob *liveObj, now time.Time) {
 		return
 	}
 	ob.units, ob.readyAt, ob.sprungAt = 1, due, time.Time{}
+}
+
+// arriveAlone is onPlayerEnter (207-212) for a player who joined a street nobody else is on: each
+// ready trap there rolls is_chance(0.2) and is sprung empty, down at once (stayDown, 160-161).
+// Only the arriving player is there to see it; their obj_sync snapshot shows it down.
+func (o *objects) arriveAlone(cl *Client) {
+	street := cl.Street()
+	if street == "" || len(o.h.StreetLocked(street)) != 1 {
+		return
+	}
+	spots := o.spots(street)
+	if spots == nil {
+		return
+	}
+	o.resume()
+	rule := o.w.rules.Nodes[dustTrapClass]
+	ids := make([]string, 0)
+	for id, spot := range spots {
+		if spot.kind == "node" && spot.class == dustTrapClass {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	sprung := false
+	for _, id := range ids {
+		ob := o.get(street, spots[id])
+		if ob.units >= 1 && o.roll() < dustTrapEmptyChance {
+			if v := o.springTrap(street, ob, rule); v.ok {
+				ob.sprungAt = ob.sprungAt.Add(-dustTrapSmack)
+				sprung = true
+			}
+		}
+		o.forget(street, ob)
+	}
+	if sprung {
+		o.saveSoon()
+	}
 }

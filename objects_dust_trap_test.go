@@ -104,3 +104,50 @@ func TestADustTrapsWaitOutlivesARestart(t *testing.T) {
 		t.Fatalf("a trap ready 5 min across a restart stays down %v", got)
 	}
 }
+
+// Austin's ruling 2026-11-26 (as Glitch): onPlayerEnter 207-212, a player arriving with no one else
+// on the street springs each ready trap empty 20% of the time (doPlayerResponse(null): the same
+// reset, straight to stayDown 160-161, no smackDown).
+func TestADustTrapIsSprungEmptyForAPlayerArrivingAlone(t *testing.T) {
+	r := newObjRig(t)
+	const street = "GA5101HF7F429V5"
+	trap0, trap1 := "node:dust_trap:0", "node:dust_trap:1"
+	spot := sharedWorld.streets[street][trap0]
+	var rolls []float64
+	r.mod.roll = func() float64 {
+		v := 0.5
+		if len(rolls) > 0 {
+			v, rolls = rolls[0], rolls[1:]
+		}
+		return v
+	}
+
+	// Alone: the first trap rolls 0.19 (sprung), the second 0.2 (no chance).
+	rolls = []float64{0.19, 0.2}
+	a := r.player(1, "Ada", street, spot.x, spot.y)
+	if len(rolls) != 0 {
+		t.Fatalf("each ready trap rolls once on arrival: %v left", rolls)
+	}
+	s := syncOf(r, a, trap0)
+	if s == nil || num(s["units"]) != 0 || num(s["in"]) != 181250 || num(s["sprung"]) < 2000 {
+		t.Fatalf("a trap sprung on arrival reads %v", s)
+	}
+	if s1 := syncOf(r, a, trap1); s1 != nil && num(s1["units"]) != 1 {
+		t.Fatalf("a roll of 0.2 sprang it: %v", s1)
+	}
+	// Walking into the sprung one does nothing.
+	r.act(a, 1, trap0, "trigger", nil)
+	if no := r.only(a, "obj_no"); no["code"] != "not_ready" {
+		t.Fatalf("the empty trap answered %v", no)
+	}
+
+	// Someone else there: no roll.
+	rolls = []float64{0}
+	r.player(2, "Bo", street, spot.x, spot.y)
+	if len(rolls) != 1 {
+		t.Fatal("a player arriving where someone already is rolled the traps")
+	}
+	if s1 := syncOf(r, a, trap1); s1 != nil && num(s1["units"]) != 1 {
+		t.Fatalf("the second trap went down with Ada there: %v", s1)
+	}
+}
