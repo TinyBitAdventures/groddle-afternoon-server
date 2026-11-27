@@ -4,7 +4,7 @@ package main
 // add emoji responses?"). Glitch had none: its client turned a smiley typed in
 // Local chat into the avatar's happy, angry or surprised animation (glitch-client
 // port/Emotes.as, RightSideManager.as 470-474) and its updates feed had replies,
-// but no chat line could be reacted to. Here a player may put one of a small
+// but no chat line could be reacted to. Here a player may put one of a
 // fixed set (reactionKeys) on a line of Local chat, a party, a channel (Global
 // Chat, Live Help, the Trade Channel) or a group chat, and on an IM line (im.go
 // im_react): each of the set at most once a player a line, toggled.
@@ -48,8 +48,10 @@ package main
 // Rates: reactBurst, then one each reactEvery, for react and im_react each.
 
 import (
+	_ "embed"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -63,15 +65,46 @@ const (
 	reactPruneGap   = time.Minute
 )
 
-// reactionKeys are the reactions the game offers, in the order they show. The
-// game's js/chat-reactions.js REACTIONS draws them (👍 ❤️ 😂 😮 😢 🎉 🙏 and Tiny
-// Speck's own "Hi" sign). "thanks" (🙏, "Thank you") came on 2026-11-10. A new
-// key needs nothing else here: a line's reactions are kept by key (in memory,
-// in -im-file and on the site, chatstore.go), and a game or page from before a
-// key leaves it out of what it draws. The site keeps only keys it knows
-// (ChatHistory.php reactionsJson drops the rest of a line's set), so the site
-// must know a new key before any game or page offers it.
-var reactionKeys = []string{"like", "heart", "laugh", "wow", "sad", "tada", "thanks", "hi"}
+// reactionKeys are the reactions the game offers, in the order they show: the
+// game's js/chat-reactions.js REACTIONS, written here as data/reactions.json by
+// its tools/build-reactions.mjs (do not edit it by hand; the site gets the same
+// file). 👍 ❤️ 😂 😮 😢 🎉 🙏, then 👏 😊 🤔 😍 🔥 👀 😅 💯 (2026-11-27), and Tiny
+// Speck's own "Hi" sign last. A new key needs nothing else here: a line's
+// reactions are kept by key (in memory, in -im-file and on the site,
+// chatstore.go), a game or page from before a key leaves it out of what it
+// draws, and a server from before it refuses it in words (error "react"). The
+// site keeps only keys it knows (ChatHistory.php reactionsJson drops the rest
+// of a line's set), so the site must know a new key before any game or page
+// offers it.
+//
+//go:embed data/reactions.json
+var reactionsJSON []byte
+
+var reactionKeys = mustReactionKeys(reactionsJSON)
+
+func mustReactionKeys(raw []byte) []string {
+	var set struct {
+		Reactions []struct {
+			Key string `json:"key"`
+		} `json:"reactions"`
+	}
+	if err := json.Unmarshal(raw, &set); err != nil {
+		panic("realtime: data/reactions.json: " + err.Error())
+	}
+	keys := make([]string, 0, len(set.Reactions))
+	seen := map[string]bool{}
+	for _, r := range set.Reactions {
+		if r.Key == "" || len(r.Key) > 12 || seen[r.Key] {
+			panic("realtime: data/reactions.json: a bad or repeated key " + strconv.Quote(r.Key))
+		}
+		seen[r.Key] = true
+		keys = append(keys, r.Key)
+	}
+	if len(keys) == 0 {
+		panic("realtime: data/reactions.json: no reactions")
+	}
+	return keys
+}
 
 func reactionOrder(e string) int {
 	for i, k := range reactionKeys {

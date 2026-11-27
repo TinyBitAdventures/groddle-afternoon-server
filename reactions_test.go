@@ -185,7 +185,7 @@ func TestReactionsOnlyTheSetAndOnlyLinesItKnows(t *testing.T) {
 	for _, e := range reactionKeys {
 		r.react(bo, lid, e)
 	}
-	if a := lastReacted(drain(ada), "reacted", lid); a != "like:9 heart:9 laugh:9 wow:9 sad:9 tada:9 thanks:9 hi:9" {
+	if a := lastReacted(drain(ada), "reacted", lid); a != "like:9 heart:9 laugh:9 wow:9 sad:9 tada:9 thanks:9 clap:9 smile:9 think:9 love:9 fire:9 eyes:9 phew:9 hundred:9 hi:9" {
 		t.Fatalf("the set: %q", a)
 	}
 	r.react(bo, lid+1000, "like")
@@ -503,11 +503,11 @@ func TestReactionsSetKeepsOrderAndOnePerPlayer(t *testing.T) {
 	}
 }
 
-// Thank you (2026-11-10): one of the set, between Hooray and the Hi sign, toggled like the rest, on a
+// Thank you (2026-11-10): one of the set, after Hooray (the Hi sign last), toggled like the rest, on a
 // Local line and on an IM line (kept in the state file by its key).
 func TestReactionsThankYouIsOneOfTheSet(t *testing.T) {
-	if !validReaction("thanks") || reactionOrder("thanks") != reactionOrder("tada")+1 || reactionOrder("hi") != reactionOrder("thanks")+1 {
-		t.Fatalf("thanks sits after tada and before hi: %v", reactionKeys)
+	if !validReaction("thanks") || reactionOrder("thanks") != reactionOrder("tada")+1 || reactionOrder("hi") != len(reactionKeys)-1 {
+		t.Fatalf("thanks sits after tada, hi last: %v", reactionKeys)
 	}
 	file := filepath.Join(t.TempDir(), "im.json")
 	r := newReactRig(t, file)
@@ -560,6 +560,92 @@ func TestReactionsThankYouIsOneOfTheSet(t *testing.T) {
 	r.do(bo, map[string]any{"t": "im_react", "with": 7, "line": line, "e": "thanks"})
 	if a := one(t, drain(ada), "im_reacted"); reactedText(a) != "" {
 		t.Fatalf("off again: %v", a)
+	}
+}
+
+// The set is the game's (data/reactions.json, its tools/build-reactions.mjs): sixteen since
+// 2026-11-27, Austin's eight everyday emoji after Thank you and the Hi sign still last.
+func TestReactionsTheSetIsTheGames(t *testing.T) {
+	want := []string{"like", "heart", "laugh", "wow", "sad", "tada", "thanks", "clap", "smile", "think", "love", "fire", "eyes", "phew", "hundred", "hi"}
+	if strings.Join(reactionKeys, " ") != strings.Join(want, " ") {
+		t.Fatalf("reactionKeys %v", reactionKeys)
+	}
+	for _, bad := range []string{`{}`, `{"reactions":[{"key":"like"},{"key":"like"}]}`, `{"reactions":[{"key":""}]}`, `{"reactions":[{"key":"averyverylongkey"}]}`, `nope`} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s: no panic", bad)
+				}
+			}()
+			mustReactionKeys([]byte(bad))
+		}()
+	}
+}
+
+// Each of the sixteen round-trips: on and off a Local line, and on an IM line (kept in the state
+// file by its key); an older server's refusal stays in words for a key it lacks.
+func TestReactionsEachOfTheSetRoundTrips(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "im.json")
+	r := newReactRig(t, file)
+	ada, bo := r.online(7, "Ada"), r.online(9, "Bo")
+	r.street("GA5", ada, bo)
+	r.do(ada, map[string]any{"t": "chat", "text": "all of them"})
+	lid := lidOf(t, drain(bo), "said")
+	drain(ada)
+	var all []string
+	for _, e := range reactionKeys {
+		r.react(bo, lid, e, true)
+		all = append(all, e+":9")
+		if a := lastReacted(drain(ada), "reacted", lid); a != strings.Join(all, " ") {
+			t.Fatalf("%s on: %q", e, a)
+		}
+		if errs := reactErrors(drain(bo)); len(errs) != 0 {
+			t.Fatalf("%s refused: %v", e, errs)
+		}
+	}
+	for i, e := range reactionKeys {
+		r.react(bo, lid, e, false)
+		if a := lastReacted(drain(ada), "reacted", lid); a != strings.Join(all[i+1:], " ") {
+			t.Fatalf("%s off: %q", e, a)
+		}
+	}
+	drain(bo)
+	r.do(ada, map[string]any{"t": "im_sync"})
+	r.do(bo, map[string]any{"t": "im_sync"})
+	drain(ada)
+	drain(bo)
+	r.do(ada, map[string]any{"t": "im_send", "to": 9, "text": "psst"})
+	line := int64(one(t, drain(bo), "im")["line"].(map[string]any)["id"].(float64))
+	drain(ada)
+	for _, e := range reactionKeys {
+		r.now = r.now.Add(time.Second)
+		r.do(bo, map[string]any{"t": "im_react", "with": 7, "line": line, "e": e, "on": true})
+		if a := reactedText(one(t, drain(ada), "im_reacted")); !strings.HasSuffix(a, e+":9") {
+			t.Fatalf("IM %s: %q", e, a)
+		}
+		drain(bo)
+	}
+	if !r.im.save() {
+		t.Fatal("save")
+	}
+	raw, _ := os.ReadFile(file)
+	for _, e := range reactionKeys {
+		if !strings.Contains(string(raw), `{"e":"`+e+`","by":[{"id":9,"name":"Bo"}]}`) {
+			t.Fatalf("state file lacks %s: %s", e, raw)
+		}
+	}
+	// A server from before a key: the game's words for a key it does not know (the client's toast).
+	saved := reactionKeys
+	reactionKeys = saved[:7]
+	defer func() { reactionKeys = saved }()
+	r.react(bo, lid, "fire")
+	if errs := reactErrors(drain(bo)); len(errs) != 1 || errs[0] != "react: That is not a reaction the game has." {
+		t.Fatalf("older server: %v", errs)
+	}
+	r.now = r.now.Add(time.Second)
+	r.do(bo, map[string]any{"t": "im_react", "with": 7, "line": line, "e": "hundred"})
+	if errs := reactErrors(drain(bo)); len(errs) != 1 || errs[0] != "react: That is not a reaction the game has." {
+		t.Fatalf("older server, IM: %v", errs)
 	}
 }
 
