@@ -369,6 +369,8 @@ type dropAnswer struct {
 	In     *int       `json:"in,omitempty"` // that stack's count now
 	X      *int       `json:"x,omitempty"`  // a move: where the stack lies now
 	Y      *int       `json:"y,omitempty"`
+	// A shift (drops_shift.go): every stack it moved and where it lies now.
+	Moved []shiftedRow `json:"moved,omitempty"`
 }
 
 // dropSite is the site's ledger (httpLedger). Calls block; the module makes them off the hub lock.
@@ -378,8 +380,9 @@ type dropSite interface {
 	dropsOnGround() ([]dropRow, error)
 	dropsOnStreet(street string) ([]dropRow, error) // G1224: one place's stacks (the site's name for it)
 	dropEat(op string, from int) dropAnswer
-	dropPlace(c dropCall) dropAnswer // G605: a stack the street makes (a Plop, a Piglet), under the player whose act made it
-	dropMove(c moveCall) dropAnswer  // the owner's floor-to-floor move in their house or Tower
+	dropPlace(c dropCall) dropAnswer  // G605: a stack the street makes (a Plop, a Piglet), under the player whose act made it
+	dropMove(c moveCall) dropAnswer   // the owner's floor-to-floor move in their house or Tower
+	dropShift(c shiftCall) dropAnswer // G1327: the owner's un-expand moves the stacks in the last stretch (drops_shift.go)
 }
 
 func (l *httpLedger) dropPost(route string, body []byte, out any) error {
@@ -488,6 +491,9 @@ type drops struct {
 	sweeping bool
 	// G1224: when each house or Tower floor last asked the site for stacks this server has not heard of.
 	refreshed map[string]time.Time
+	// G1327 (drops_shift.go): the shift each floor waits on, and the drops and moves on their way to the site per floor.
+	shifting map[string]string
+	placing  map[string]int
 }
 
 func newDrops(h *Hub) Module {
@@ -517,6 +523,7 @@ func (m *drops) Register(r *Registry) {
 	r.Handle("ground_drop", m.dropFrame)
 	r.Handle("ground_pickup", m.pickupFrame)
 	r.Handle("ground_move", m.moveFrame)
+	r.Handle("ground_shift", m.shiftFrame)
 	r.OnJoin(m.sendState)
 	r.OnDisconnect(func(cl *Client) { delete(m.rates, cl.ID()) })
 	// How many shared stacks lie on a street (for other modules and tests).
@@ -839,7 +846,7 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		}
 		return
 	}
-	if _, waiting := m.dropping[cl.ID()]; waiting {
+	if _, waiting := m.dropping[cl.ID()]; waiting || m.shifting[street] != "" {
 		m.refuseDrop(cl, ref, "busy", dropTextBusy)
 		return
 	}
@@ -867,10 +874,12 @@ func (m *drops) dropFrame(cl *Client, frame json.RawMessage) {
 		into.picking = from // nobody takes from it, or eats it, while the site weighs the merge
 	}
 	m.dropping[from] = call.Op
+	m.placingStarted(street)
 	site := m.site
 	m.spawn(func() {
 		a := site.drop(call)
 		m.h.After(0, func() {
+			m.placingDone(street)
 			if m.dropping[from] == call.Op {
 				delete(m.dropping, from)
 			}
@@ -1052,7 +1061,7 @@ func (m *drops) moveFrame(cl *Client, frame json.RawMessage) {
 		m.refuseMove(cl, s.ID, "off", pickTextOff)
 		return
 	}
-	if s.picking != 0 || s.eating {
+	if s.picking != 0 || s.eating || m.shifting[street] != "" {
 		m.refuseMove(cl, s.ID, "busy", pickTextBusy)
 		return
 	}
@@ -1068,11 +1077,13 @@ func (m *drops) moveFrame(cl *Client, frame json.RawMessage) {
 		}
 	}
 	s.picking = cl.ID()
+	m.placingStarted(street)
 	site := m.site
 	by := cl.ID()
 	m.spawn(func() {
 		a := site.dropMove(call)
 		m.h.After(0, func() {
+			m.placingDone(street)
 			if s.picking == by {
 				s.picking = 0
 			}

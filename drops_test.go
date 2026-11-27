@@ -30,6 +30,48 @@ type fakeDropSite struct {
 	merges bool             // a drop or move naming a like stack joins it (LedgerDrop joins), counts in `held`
 	held   map[string]int   // with merges: each stack's count at the site
 	moves  []moveCall
+	shifts []shiftCall // G1327: each shift asked (drops_shift.go)
+	lost   int         // G1327: this many shift answers settle at the site but never come back
+	// G1327: the shift op that last moved each row
+	shiftedBy map[string]string
+}
+
+// dropShift is LedgerDrop::shiftStacks on the rows in ground: every one on those streets at x >= from moves
+// by dx, once per op (asked again, it answers as recorded).
+func (f *fakeDropSite) dropShift(c shiftCall) dropAnswer {
+	f.shifts = append(f.shifts, c)
+	if f.silent {
+		return dropAnswer{}
+	}
+	if f.shiftedBy == nil {
+		f.shiftedBy = map[string]string{}
+	}
+	on := map[string]bool{}
+	for _, s := range c.Streets {
+		on[s] = true
+	}
+	seen := false
+	for _, op := range f.shiftedBy {
+		seen = seen || op == c.Op
+	}
+	for i := range f.ground {
+		row := &f.ground[i]
+		if !seen && on[row.Street] && row.X >= float64(c.From) {
+			row.X += float64(c.Dx)
+			f.shiftedBy[row.ID] = c.Op
+		}
+	}
+	if f.lost > 0 {
+		f.lost--
+		return dropAnswer{}
+	}
+	moved := []shiftedRow{}
+	for _, row := range f.ground {
+		if on[row.Street] && f.shiftedBy[row.ID] == c.Op {
+			moved = append(moved, shiftedRow{ID: row.ID, X: int(row.X)})
+		}
+	}
+	return dropAnswer{Status: "settled", Moved: moved}
 }
 
 // fakePileCap is LedgerDrop::pileCap for a stack this server names: a pile at home holds dropPileMax of
