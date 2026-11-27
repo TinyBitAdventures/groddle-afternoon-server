@@ -41,6 +41,7 @@ package main
 //	{"t":"home_machine","req":3,"owner":7,"verb":"place","class":"fuelmaker","rx":120,"fuel":50,"ox":640,"oy":570}
 //	{"t":"home_machine","req":4,"owner":7,"verb":"use","id":"hm-…","key":"fuel_cell","qty":2}
 //	{"t":"home_machine","req":5,"owner":7,"verb":"refuel|collect|take|music|check","id":"hm-…","all":true,"force":true,"on":false}
+//	{"t":"home_machine","req":6,"owner":7,"verb":"move","id":"hm-…","rx":460}
 //
 // Server to client:
 //
@@ -57,6 +58,12 @@ package main
 // x 0 and walk line are as it draws them ("ox", "oy": the house's x moves with the home's yards, as
 // drops.go's "ox"; a room's left end; a floor's line), and the player's position is read against
 // them. Without them no "from" goes, and the site measures from where the machine goes.
+//
+// The owner slides a placed machine along its floor (report #730, G1333; Austin 2026-11-27: "slide them
+// as Glitch: drag to move, no 200 px rule on a move"): "move" with the new rx, the owner only (Glitch's
+// itemstackModify, main.js doModifyItem 4852-4867, asked only that you were at home), named to the site
+// with the place the owner stands in, so it stays on its floor; the site keeps it between the walls and
+// everyone there is told how it stands now, as for any act.
 //
 // Ours: an act the site has not answered in time is refused to the actor;
 // the site settles each op once, so asking again never counts twice.
@@ -86,6 +93,7 @@ const (
 
 	machineTextAway = "You need to be in their home or a Community Machine Room to do that."
 	machineTextOwn  = "Only the owner can set a machine down here."
+	machineTextMove = "Only the owner can move a machine."
 	machineTextOff  = "That can't be done right now."
 	machineTextBad  = "Nothing to do here."
 )
@@ -94,7 +102,7 @@ var (
 	machineIDRe    = regexp.MustCompile(`^hm-[0-9a-f]{16}$`)
 	machineClassRe = regexp.MustCompile(`^(fuelmaker|blockmaker|metalmaker|woodworker)$`)
 	machineKeyRe   = regexp.MustCompile(`^[a-z][a-z0-9_]{1,47}$`)
-	machineVerbs   = map[string]bool{"place": true, "take": true, "use": true, "collect": true, "refuel": true, "music": true, "check": true}
+	machineVerbs   = map[string]bool{"place": true, "take": true, "use": true, "collect": true, "refuel": true, "music": true, "check": true, "move": true}
 )
 
 func init() { modules = append(modules, newHomeMachines) }
@@ -265,6 +273,8 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 	switch msg.Verb {
 	case "place":
 		ok = ok && machineClassRe.MatchString(msg.Class) && msg.Rx != nil && *msg.Rx >= -machineRxMax && *msg.Rx <= machineRxMax && (msg.Fuel == nil || (*msg.Fuel >= 0 && *msg.Fuel <= 200))
+	case "move":
+		ok = ok && machineIDRe.MatchString(msg.ID) && msg.Rx != nil && *msg.Rx >= -machineRxMax && *msg.Rx <= machineRxMax
 	case "use":
 		ok = ok && machineIDRe.MatchString(msg.ID) && machineKeyRe.MatchString(msg.Key) && msg.Qty >= 1 && msg.Qty <= 999
 	default:
@@ -279,8 +289,14 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 		m.refuse(cl, req, owner, msg.Verb, "away", machineTextAway)
 		return
 	}
-	if msg.Verb == "place" && owner != actor {
-		m.refuse(cl, req, owner, msg.Verb, "own", machineTextOwn)
+	// #730: only the owner slides one along the floor, as only the owner sets one down (Glitch's
+	// doModifyItem, main.js 4853: "You are not at home"); a key-holder or a visitor never.
+	if (msg.Verb == "place" || msg.Verb == "move") && owner != actor {
+		text := machineTextOwn
+		if msg.Verb == "move" {
+			text = machineTextMove
+		}
+		m.refuse(cl, req, owner, msg.Verb, "own", text)
 		return
 	}
 	if owner != actor && m.blocked(owner, actor) {
@@ -296,6 +312,8 @@ func (m *homeMachines) act(cl *Client, frame json.RawMessage) {
 	if msg.Verb == "place" {
 		px, py := cl.Pos()
 		a.From = machineFromPos(px, py, msg.Ox, msg.Oy)
+	} else if msg.Verb == "move" {
+		a.Class, a.Fuel = "", nil
 	} else {
 		a.Class, a.Rx, a.Fuel = "", nil, nil
 	}

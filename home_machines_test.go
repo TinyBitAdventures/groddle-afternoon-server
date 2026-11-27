@@ -489,3 +489,43 @@ func TestMachineFromPos(t *testing.T) {
 		}
 	}
 }
+
+// Report #730 (G1333; Austin 2026-11-27: "slide them as Glitch: drag to move, no 200 px rule on a move"):
+// the owner slides a placed machine along her floor; the site hears the place she stands in and the new
+// x; a key-holder in the house cannot (Glitch's doModifyItem, main.js 4853, only for the one at home);
+// everyone on that floor is told how it stands now.
+func TestTheOwnerSlidesAPlacedMachineAlongHerFloor(t *testing.T) {
+	r := newMachineRig(t)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.join(ada, "HOUSE_7_2")
+	r.pass(bo, 7, "Ada", true)
+	r.join(bo, "HOUSE_7_2")
+	drain(ada)
+	drain(bo)
+	r.site.answer.Machine = json.RawMessage(`{"id":"hm-00000000000000aa","class":"blockmaker","place":"house:2","rx":460,"fuel":150,"music":true,"job":{"user":"7","qty":2},"waiting":[]}`)
+	r.do(ada, map[string]any{"t": "home_machine", "req": 1, "owner": 7, "verb": "move", "id": "hm-00000000000000aa", "rx": 460, "class": "fuelmaker", "fuel": 3})
+	r.settle()
+	if len(r.site.calls) != 1 {
+		t.Fatalf("one call: %v", r.site.calls)
+	}
+	if c := r.site.calls[0]; c.Verb != "move" || c.Place != "house:2" || c.ID != "hm-00000000000000aa" || c.Rx == nil || *c.Rx != 460 || c.Class != "" || c.Fuel != nil || c.From != nil {
+		t.Fatalf("the site hears the move, its floor and its x, nothing else: %+v", c)
+	}
+	if f := only(t, drain(ada), "home_machine_done"); f["status"] != "settled" || f["verb"] != "move" {
+		t.Fatalf("Ada is answered: %v", f)
+	}
+	if a := only(t, drain(bo), "home_machine_changed"); a["verb"] != "move" || a["machine"].(map[string]any)["rx"] != float64(460) {
+		t.Fatalf("Bo on her third floor sees it move: %v", a)
+	}
+	r.do(bo, map[string]any{"t": "home_machine", "req": 2, "owner": 7, "verb": "move", "id": "hm-00000000000000aa", "rx": 300})
+	if f := only(t, drain(bo), "home_machine_done"); f["why"] != "own" || f["text"] != machineTextMove {
+		t.Fatalf("a key-holder cannot move it: %v", f)
+	}
+	r.do(ada, map[string]any{"t": "home_machine", "req": 3, "owner": 7, "verb": "move", "id": "hm-00000000000000aa"})
+	if f := only(t, drain(ada), "home_machine_done"); f["why"] != "bad" {
+		t.Fatalf("a move names its x: %v", f)
+	}
+	if len(r.site.calls) != 1 {
+		t.Fatalf("the site is not asked again: %v", r.site.calls)
+	}
+}
