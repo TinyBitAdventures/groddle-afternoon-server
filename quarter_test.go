@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,9 +100,10 @@ type quarterRig struct {
 }
 
 const (
-	quarterBlock  = "GQRMM1100BLOCK1"
-	quarterBlock2 = "GQRMM1200BLOCK1" // the second block (Austin 2026-11-27)
-	quarterOther  = "GLI32HBOUTD1GQV" // Marylpole Mount, the parent street
+	quarterBlock   = "GQRMM1100BLOCK1"
+	quarterBlock2  = "GQRMM1200BLOCK1" // the second block (Austin 2026-11-27)
+	quarterOther   = "GLI32HBOUTD1GQV" // Marylpole Mount, the parent street
+	quarterBortola = "GQRME1100BLOCK1" // Mien Evoke Quarter, 1100 block, in Bortola (Austin 2026-11-28)
 )
 
 func newQuarterRig(t *testing.T, site *fakeQuarterSite) *quarterRig {
@@ -192,14 +194,70 @@ func TestTheQuarterDataNamesTheSecondBlockAndItsOwnLots(t *testing.T) {
 	if len(b.Lots) != 10 || b.Lots[0] != 1205 || b.Lots[9] != 1295 {
 		t.Fatalf("ten lots 1205..1295: %v", b.Lots)
 	}
-	seen := map[int]string{}
+	// No number on two blocks of one quarter (<x><y>##); two quarters both have an 1100 block.
+	seen := map[string]string{}
 	for street, blk := range d.Streets {
+		quarter := strings.SplitN(blk.Label, ",", 2)[0]
 		for _, lot := range blk.Lots {
-			if other, dup := seen[lot]; dup {
+			key := fmt.Sprintf("%s#%d", quarter, lot)
+			if other, dup := seen[key]; dup {
 				t.Fatalf("lot %d on %s and %s", lot, other, street)
 			}
-			seen[lot] = street
+			seen[key] = street
 		}
+	}
+}
+
+// A second quarter (Mien Evoke Quarter, Bortola) is data only: its block and lots come from
+// data/quarters.json, and its 1105 is not Marylpole Mount Quarter's 1105. One lot per player across
+// every block of every quarter (pols_canBuy has_other): holding 1105 on one refuses 1105 on the other.
+func TestASecondQuarterIsDataAndOneLotHoldsAcrossQuarters(t *testing.T) {
+	d := parseQuarterData(quartersJSON)
+	b, ok := d.Streets[quarterBortola]
+	if !ok || b.Label != "Mien Evoke Quarter, 1100 block" || len(b.Lots) != 10 || b.Lots[0] != 1105 || b.Lots[9] != 1195 {
+		t.Fatalf("Mien Evoke Quarter's 1100 block, lots 1105..1195: %+v", b)
+	}
+	site := newFakeQuarterSite()
+	r := newQuarterRig(t, site)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.at(ada, quarterBlock)
+	drain(ada)
+	r.claim(ada, 1105)
+	if got := pick(t, drain(ada), "quarter_claimed"); got["status"] != "settled" {
+		t.Fatalf("Ada has 1105 on Marylpole Mount Quarter: %v", got)
+	}
+	r.at(ada, quarterBortola)
+	if st := pick(t, drain(ada), "quarter_lots"); st["street"] != quarterBortola || len(st["lots"].([]any)) != 0 {
+		t.Fatalf("Mien Evoke Quarter's block has its own table: %v", st)
+	}
+	asked := len(site.claims)
+	r.claim(ada, 1105)
+	if got := pick(t, drain(ada), "quarter_claimed"); got["why"] != "have" {
+		t.Fatalf("the same number on another quarter is another lot, and Ada has one (has_other): %v", got)
+	}
+	if len(site.claims) != asked {
+		t.Fatalf("refused here without asking the site")
+	}
+	// Bo claims Mien Evoke Quarter's 1105 while Ada holds Marylpole Mount Quarter's.
+	r.at(bo, quarterBortola)
+	drain(bo)
+	r.claim(bo, 1105)
+	frames := drain(bo)
+	if got := pick(t, frames, "quarter_claimed"); got["status"] != "settled" {
+		t.Fatalf("Bo has 1105 on Mien Evoke Quarter: %v", got)
+	}
+	owner := r.hub.provided["quarter.owner"].(func(string, int) int64)
+	if owner(quarterBlock, 1105) != 7 || owner(quarterBortola, 1105) != 9 {
+		t.Fatalf("two lots numbered 1105, one owner each: %d %d", owner(quarterBlock, 1105), owner(quarterBortola, 1105))
+	}
+	// Ada gives hers up from Mien Evoke Quarter's block; Marylpole Mount Quarter's 1105 goes back on sale, Bo's stays.
+	r.do(ada, map[string]any{"t": "quarter_release"})
+	r.settle()
+	if got := pick(t, drain(ada), "quarter_released"); got["status"] != "settled" || got["lot"] != float64(1105) {
+		t.Fatalf("Ada's 1105 given up: %v", got)
+	}
+	if owner(quarterBlock, 1105) != 0 || owner(quarterBortola, 1105) != 9 {
+		t.Fatalf("only Ada's lot went back on sale: %d %d", owner(quarterBlock, 1105), owner(quarterBortola, 1105))
 	}
 }
 
