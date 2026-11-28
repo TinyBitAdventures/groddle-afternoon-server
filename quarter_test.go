@@ -99,8 +99,9 @@ type quarterRig struct {
 }
 
 const (
-	quarterBlock = "GQRMM1100BLOCK1"
-	quarterOther = "GLI32HBOUTD1GQV" // Marylpole Mount, the parent street
+	quarterBlock  = "GQRMM1100BLOCK1"
+	quarterBlock2 = "GQRMM1200BLOCK1" // the second block (Austin 2026-11-27)
+	quarterOther  = "GLI32HBOUTD1GQV" // Marylpole Mount, the parent street
 )
 
 func newQuarterRig(t *testing.T, site *fakeQuarterSite) *quarterRig {
@@ -179,6 +180,88 @@ func TestTheQuarterDataNamesTheBlockAndItsTenLots(t *testing.T) {
 	}
 	if len(b.Lots) != 10 || b.Lots[0] != 1105 || b.Lots[9] != 1195 {
 		t.Fatalf("ten lots 1105..1195: %v", b.Lots)
+	}
+}
+
+func TestTheQuarterDataNamesTheSecondBlockAndItsOwnLots(t *testing.T) {
+	d := parseQuarterData(quartersJSON)
+	b, ok := d.Streets[quarterBlock2]
+	if !ok || b.Label != "Marylpole Mount Quarter, 1200 block" {
+		t.Fatalf("the 1200 block: %+v", d)
+	}
+	if len(b.Lots) != 10 || b.Lots[0] != 1205 || b.Lots[9] != 1295 {
+		t.Fatalf("ten lots 1205..1295: %v", b.Lots)
+	}
+	seen := map[int]string{}
+	for street, blk := range d.Streets {
+		for _, lot := range blk.Lots {
+			if other, dup := seen[lot]; dup {
+				t.Fatalf("lot %d on %s and %s", lot, other, street)
+			}
+			seen[lot] = street
+		}
+	}
+}
+
+// One lot per player across every block (inc_pols.js pols_canBuy has_other): a lot on the 1100
+// block refuses a claim on the 1200 block, here and without asking the site; giving it up works
+// from either block; a lot the site was given directly (Austin's 1205) reaches this table with the
+// next answer, and with the load a restart makes.
+func TestOneLotAcrossBlocks(t *testing.T) {
+	site := newFakeQuarterSite()
+	r := newQuarterRig(t, site)
+	ada, bo := r.connect(7, "Ada"), r.connect(9, "Bo")
+	r.at(ada, quarterBlock)
+	drain(ada)
+	r.claim(ada, 1105)
+	if got := pick(t, drain(ada), "quarter_claimed"); got["status"] != "settled" {
+		t.Fatalf("Ada has 1105: %v", got)
+	}
+	r.at(ada, quarterBlock2)
+	if st := pick(t, drain(ada), "quarter_lots"); st["street"] != quarterBlock2 || len(st["lots"].([]any)) != 0 {
+		t.Fatalf("the 1200 block has its own table: %v", st)
+	}
+	asked := len(site.claims)
+	r.claim(ada, 1215)
+	if got := pick(t, drain(ada), "quarter_claimed"); got["why"] != "have" || got["text"] != quarterTextHave {
+		t.Fatalf("a second lot on another block is refused (has_other): %v", got)
+	}
+	if len(site.claims) != asked {
+		t.Fatalf("refused here without asking the site")
+	}
+	// A lot from the 1100 block asked for on the 1200 block is no lot there.
+	r.claim(ada, 1135)
+	if got := pick(t, drain(ada), "quarter_claimed"); got["why"] != "lot" {
+		t.Fatalf("1135 is not on the 1200 block: %v", got)
+	}
+	// Given up from the other block, then claimed here.
+	r.do(ada, map[string]any{"t": "quarter_release"})
+	r.settle()
+	if got := pick(t, drain(ada), "quarter_released"); got["status"] != "settled" || got["lot"] != float64(1105) {
+		t.Fatalf("1105 given up from the 1200 block: %v", got)
+	}
+	r.claim(ada, 1215)
+	if got := pick(t, drain(ada), "quarter_claimed"); got["status"] != "settled" || got["lot"] != float64(1215) {
+		t.Fatalf("then 1215 is Ada's: %v", got)
+	}
+
+	// The site is given 1205 for Cy directly (a row written there): Bo's claim of it is refused by
+	// the site, and its table reaches the block.
+	site.rows[quarterBlock2+"#1205"] = quarterRow{Street: quarterBlock2, Lot: 1205, Owner: 11, Name: "Cy"}
+	r.at(bo, quarterBlock2)
+	drain(bo)
+	r.claim(bo, 1205)
+	frames := drain(bo)
+	if got := pick(t, frames, "quarter_claimed"); got["status"] != "refused" || got["why"] != "taken" {
+		t.Fatalf("the site's row holds: %v", got)
+	}
+	if o := quarterOwners(t, pick(t, frames, "quarter_lots")); o[1205] != 11 || o[1215] != 7 {
+		t.Fatalf("both lots on the block: %v", o)
+	}
+	// A server that starts after the row was written has it from the load.
+	r2 := newQuarterRig(t, site)
+	if r2.hub.provided["quarter.owner"].(func(string, int) int64)(quarterBlock2, 1205) != 11 {
+		t.Fatalf("a restart loads the row")
 	}
 }
 

@@ -30,6 +30,12 @@ package main
 //
 // Ours: one claim or give-up at a time per player and per lot; a lot the site is weighing a
 // claim on is refused to everyone else as taken.
+//
+// Several blocks (the 1100 block, the 1200 block from 2026-11-27, ...): data/quarters.json names
+// each block street and its lots, and nothing here names one, so a new block is the game's data
+// rebuilt. One lot per player across every block (lotOf looks at all of them; the site's user_id
+// key holds it too). A row written on the site directly reaches this table with the next claim or
+// give-up answer (each carries the whole table) or the load at start.
 
 import (
 	"crypto/rand"
