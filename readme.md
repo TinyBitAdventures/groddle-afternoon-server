@@ -132,6 +132,7 @@ Every shared system is a module in a file of its own, with its message kinds in 
 | `tally.go` | The world's tallies for the console's Analytics tab: each act on the shared world that lands (a rock mined, a Piggy nibbled, a Butterfly milked, a garden plot harvested, a quoin grabbed) adds one to that act's count for the UTC day, everyone together and nobody named; they reach the site on the play-time batches (`counts`), taken once by the batch id |
 | `rook.go` | Rook attacks fought by everyone on the street |
 | `rook_admin.go` | The console's Rook calls: `rooks` lists every attack now, `rook_end` sends a Rook off its street as after its last wing beat, paying nothing |
+| `meteor.go` | Meteor showers and lone shooting stars in the night sky (ours; the game's `js/meteor-shower.js`): the console's signed `meteor` call starts one now or in up to five minutes (a hint first), stops it or asks what is on; every game online gets one event with a seed, so every page draws the same streaks at the same moment, and a game asks for it as it comes online (`meteor_sync`) to join one in progress. Memory only: a restart ends it |
 | `races.go` | Grab 'Em Good and the finish-line races between real players; the dead (a player on a Naraka street) cannot challenge and are left out of a starting game |
 | `hoghaul.go` | The Great Hog Haul between real players on races.go's challenge: sacks, hogties, the pen and three wins decided from `data/hoghaul.json`; the winner credited through credits.go |
 | `trade.go` | Trading items and currants |
