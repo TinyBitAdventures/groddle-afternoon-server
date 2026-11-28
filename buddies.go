@@ -18,8 +18,8 @@ package main
 // Server to client:
 //
 //	{"t":"buddies_status","online":[{"id":7,"name":"Ada","street":"GA5…"}]}   who on the watched list is online, after each watch
-//	{"t":"buddy_online","id":7,"name":"Ada","street":"GA5…"}
-//	{"t":"buddy_offline","id":7,"name":"Ada"}
+//	{"t":"buddy_online","id":7,"name":"Ada","street":"GA5…"}             "quiet":true: change the list, show no notice
+//	{"t":"buddy_offline","id":7,"name":"Ada"}                            (quiet as well)
 //	{"t":"buddy_moved","id":7,"name":"Ada","street":"GA5…"}                  street "" is a private place (a home, a quest room, a race)
 //	{"t":"buddy_added","id":7,"name":"Ada"}                                  Ada just added you
 //	{"t":"error","code":"buddies","message":"…"}
@@ -56,8 +56,21 @@ package main
 // Ours: a player counts as online for their buddies once their game has sent
 // its own signed list (so their ignore list is known before anyone hears
 // about them); a socket that drops has buddyGrace to come back before its
-// buddies hear it went offline (a reload is not a logout); a street change
-// (a leave, then a join) is told once, after buddySettle; rates.
+// buddies hear it went offline (a reload, Play here or a phone's dropped
+// connection is not a logout); a street change (a leave, then a join) is told
+// once, after buddySettle; rates.
+//
+// Ours as well (Austin 2026-11-28: going on and off quickly must not spam
+// your buddies): what a buddy's game says aloud is held back, and the lists
+// stay live. Glitch had no notice to hold back: its client only moved the
+// contact between Online and Offline (ContactList.as buddyUpdate). A coming
+// online is said at most once each buddyAnnounceEvery per player (said);
+// a going offline is said only to close an online that was said, or after a
+// stay of buddyAnnounceEvery or more. Everything else goes out "quiet": the
+// dot changes, nothing pops up. A block or un-block is always quiet (a list
+// change, not a coming or going), and "Appear offline" follows the same rule
+// as a real login and logout. At most one "is online" and one "went offline"
+// per player per window, however they flap.
 
 import (
 	"crypto/hmac"
@@ -74,14 +87,15 @@ import (
 )
 
 const (
-	buddyGrace      = 15 * time.Second       // ours: a dropped socket's time to come back
-	buddySettle     = 300 * time.Millisecond // ours: a leave then a join is one move
-	buddyTellLife   = 2 * time.Minute        // the longest an add proof is honoured, whatever it says
-	buddyMaxIDs     = 4000                   // ids one token may carry (the site's limit is 1000 buddies)
-	buddyWatchBurst = 6
-	buddyWatchEvery = 5 * time.Second
-	buddyTellBurst  = 10
-	buddyTellEvery  = 3 * time.Second
+	buddyGrace         = 30 * time.Second       // ours: a dropped socket's time to come back (the dot waits too)
+	buddyAnnounceEvery = 5 * time.Minute        // ours: "is online" said at most this often per player
+	buddySettle        = 300 * time.Millisecond // ours: a leave then a join is one move
+	buddyTellLife      = 2 * time.Minute        // the longest an add proof is honoured, whatever it says
+	buddyMaxIDs        = 4000                   // ids one token may carry (the site's limit is 1000 buddies)
+	buddyWatchBurst    = 6
+	buddyWatchEvery    = 5 * time.Second
+	buddyTellBurst     = 10
+	buddyTellEvery     = 3 * time.Second
 )
 
 // buddySecretForTest is the secret in tests (the flag is not parsed there).
@@ -103,6 +117,14 @@ type buddies struct {
 	settle map[int64]func() bool
 	spent  *proofJournal // proofs used until they expire (proofs.go: kept across a restart)
 	rates  map[string]*bucket
+	said   map[int64]*buddySaid // what was said aloud about each player (kept past their logout, for the window)
+}
+
+// buddySaid is what a player's buddies were last told aloud about them.
+type buddySaid struct {
+	on   time.Time // the last "is online" said aloud
+	up   time.Time // when they last came online for their buddies, aloud or quiet
+	open bool      // an "is online" was said and no "went offline" since
 }
 
 func newBuddies(h *Hub) Module {
@@ -116,7 +138,8 @@ func newBuddies(h *Hub) Module {
 		secret, _ = readSecret(path)
 	}
 	return &buddies{h: h, secret: secret, watch: map[int64]*buddyWatch{}, live: map[int64]string{},
-		away: map[int64]func() bool{}, settle: map[int64]func() bool{}, spent: sharedProofs(), rates: map[string]*bucket{}}
+		away: map[int64]func() bool{}, settle: map[int64]func() bool{}, spent: sharedProofs(), rates: map[string]*bucket{},
+		said: map[int64]*buddySaid{}}
 }
 
 func (m *buddies) Register(r *Registry) {
@@ -246,16 +269,63 @@ func (m *buddies) visibility(id int64) {
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	off := m.h.OffLocked(id)
+	var loud bool
+	if off {
+		loud = m.sayOffline(id, m.h.Now())
+	} else {
+		loud = m.sayOnline(id)
+	}
 	for _, w := range ids {
 		if w == id || m.h.ClientLocked(w) == nil || !m.holds(w, id) || m.blocked(w, id) {
 			continue
 		}
 		if off {
-			m.send(w, m.presence("buddy_offline", cl, ""))
+			m.send(w, m.aloud(m.presence("buddy_offline", cl, ""), loud))
 		} else {
-			m.send(w, m.presence("buddy_online", cl, street))
+			m.send(w, m.aloud(m.presence("buddy_online", cl, street), loud))
 		}
 	}
+}
+
+// sayOnline is whether id coming online for their buddies is said aloud now (and notes it).
+func (m *buddies) sayOnline(id int64) bool {
+	now := m.h.Now()
+	for o, s := range m.said {
+		if _, on := m.live[o]; !on && !s.open && now.Sub(s.on) >= buddyAnnounceEvery && now.Sub(s.up) >= buddyAnnounceEvery {
+			delete(m.said, o) // nothing left for the window to hold back
+		}
+	}
+	s := m.said[id]
+	if s == nil {
+		s = &buddySaid{}
+		m.said[id] = s
+	}
+	s.up = now
+	if !s.on.IsZero() && now.Sub(s.on) < buddyAnnounceEvery {
+		return false
+	}
+	s.on, s.open = now, true
+	return true
+}
+
+// sayOffline is whether id going offline (at went) is said aloud: it closes an "is online" that was
+// said, or ends a stay of buddyAnnounceEvery or more.
+func (m *buddies) sayOffline(id int64, went time.Time) bool {
+	s := m.said[id]
+	if s == nil {
+		return false
+	}
+	loud := s.open || (!s.up.IsZero() && went.Sub(s.up) >= buddyAnnounceEvery)
+	s.open = false
+	return loud
+}
+
+// aloud marks msg quiet unless it is to be said aloud.
+func (m *buddies) aloud(msg map[string]any, loud bool) map[string]any {
+	if !loud {
+		msg["quiet"] = true
+	}
+	return msg
 }
 
 // shownStreet is where others are told a player is: "" in a private place (a race is one).
@@ -350,13 +420,13 @@ func (m *buddies) watchMsg(cl *Client, frame json.RawMessage) {
 		// removeBuddy does (inc_buddies.js:512-597); an un-ignore puts them back.
 		for w := range before {
 			if !m.tellable(w, id) {
-				m.send(w, m.presence("buddy_offline", cl, ""))
+				m.send(w, m.aloud(m.presence("buddy_offline", cl, ""), false))
 			}
 		}
 		street := m.live[id]
 		for w := range m.watch {
 			if !before[w] && m.tellable(w, id) {
-				m.send(w, m.presence("buddy_online", cl, street))
+				m.send(w, m.aloud(m.presence("buddy_online", cl, street), false))
 			}
 		}
 	}
@@ -403,7 +473,9 @@ func (m *buddies) cameBack(cl *Client) {
 	m.live[id] = street
 	switch {
 	case !on:
-		m.tellWatchers(id, m.presence("buddy_online", cl, street), nil)
+		// Someone appearing offline is told to nobody, so nothing is said yet (visibility says it later).
+		loud := !m.h.OffLocked(id) && m.sayOnline(id)
+		m.tellWatchers(id, m.aloud(m.presence("buddy_online", cl, street), loud), nil)
 	case told != street:
 		m.tellWatchers(id, m.presence("buddy_moved", cl, street), nil)
 	}
@@ -491,13 +563,15 @@ func (m *buddies) disconnected(cl *Client) {
 		stop()
 	}
 	name := cl.Name()
+	went := m.h.Now()
 	m.away[id] = m.h.After(buddyGrace, func() {
 		delete(m.away, id)
 		if m.h.ClientLocked(id) != nil {
 			return
 		}
 		// player.js:248-252: the buddies hear you went offline.
-		msg := map[string]any{"t": "buddy_offline", "id": id, "name": name}
+		loud := !m.h.OffLocked(id) && m.sayOffline(id, went)
+		msg := m.aloud(map[string]any{"t": "buddy_offline", "id": id, "name": name}, loud)
 		m.tellWatchers(id, msg, nil)
 		delete(m.live, id)
 		delete(m.watch, id)
